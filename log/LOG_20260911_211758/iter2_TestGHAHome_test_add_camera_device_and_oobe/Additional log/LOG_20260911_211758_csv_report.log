@@ -1,2 +1,0 @@
-2026-09-11 21:21:01 | INFO    | utils.csv_report.csv_report | Test result saved locally to /Users/enlin/iOS_Automation/log/test_results.csv
-2026-09-11 21:21:01 | ERROR   | utils.csv_report.csv_report | Failed to sync with Google Sheet Webhook: HTTP Error 404: Not Found

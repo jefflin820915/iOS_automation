@@ -14,18 +14,6 @@ from utils import logging_utils
 
 class GHAHelpImproveCameraDevicePage(BasePage):
     """Class for handling GHA bottom navigation tab interactions on iOS."""
-    PAGE_HEADLINE = "Help improve camera device screen."
-
-    # def __init__(self, driver: WebDriver, timeout: float = 10.0) -> None:
-    #     """Initialize GHAHomeTabObject with iOS Appium driver.
-    #
-    #     Args:
-    #         driver (WebDriver): The iOS Appium driver instance.
-    #         timeout (float): Default timeout in seconds for finding elements.
-    #     """
-    #     self.driver = driver
-    #     self.timeout = timeout
-    #     self._logger = logging_utils.get_logger(__name__, "privacy")
 
     def _find_element(self, by: AppiumBy, locator_value: str) -> Optional[WebElement]:
         """Find an element using specified locator strategy with explicit wait."""
@@ -35,7 +23,7 @@ class GHAHelpImproveCameraDevicePage(BasePage):
             )
         except TimeoutException:
             self._logger.error(f"Timed out waiting for element: by={by}, value='{locator_value}'")
-            return None
+            return False
 
     def _find_by_class_chain(self, class_chain: str) -> Optional[WebElement]:
         """Convenient helper to find an element by IOS_CLASS_CHAIN."""

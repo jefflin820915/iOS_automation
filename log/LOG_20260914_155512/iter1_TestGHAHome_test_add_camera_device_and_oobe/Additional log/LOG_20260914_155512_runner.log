@@ -1,0 +1,13 @@
+2026-09-14 15:55:12 | INFO    | core.test_runner.runner | 
+>>> [RUNNING] [Iter #1] TestGHAHome.test_add_camera_device_and_oobe
+2026-09-14 15:55:12 | INFO    | core.test_runner.runner | >>> [TARGET DIR] /Users/enlin/iOS_Automation/log/LOG_20260914_155512/iter1_TestGHAHome_test_add_camera_device_and_oobe
+2026-09-14 15:55:17 | INFO    | core.test_runner.runner | [REC] Screen recording started for: TestGHAHome.test_add_camera_device_and_oobe
+2026-09-14 15:55:34 | INFO    | core.test_runner.runner | >>> [PASS] [Iter #1] TestGHAHome.test_add_camera_device_and_oobe (16.83s)
+2026-09-14 15:55:35 | INFO    | core.test_runner.runner | [REC] Screen recording saved: screen_record_RECORD_iter1_20260914_155512_TestGHAHome_test_add_camera_device_and_oobe_20260914_155535.mp4
+2026-09-14 15:55:35 | INFO    | core.test_runner.runner | [ENV INFO] First testcase completed, collecting environment info...
+2026-09-14 15:56:18 | INFO    | core.test_runner.runner | [ENV INFO] Cached: GHA 4.30.25 | iOS 26.5 | SSID Xperia_3375 | Phone IP 10.30.94.128 | Gateway 10.30.94.74
+2026-09-14 15:56:18 | INFO    | core.test_runner.runner | [TARGET DEVICE CAPTURED] ID: 578ECAE17B050AB8 | SN: AV423357A1556 | FW: capriicamera-user 1 OPENMASTER 6.3.2600.845616249 prod-keys stable-channel | IP: 10.30.94.199
+2026-09-14 15:56:20 | INFO    | core.test_runner.runner | 
+=================================================================
+2026-09-14 15:56:20 | INFO    | core.test_runner.runner |                STARTING ITERATION #2 (Infinite)
+2026-09-14 15:56:20 | INFO    | core.test_runner.runner | =================================================================

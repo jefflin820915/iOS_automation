@@ -213,9 +213,10 @@ class GHASession:
         GHAYourCameraDeviceIsReadyPage.click_done_btn(self)
 
     def handle_remove_device(self):
-        GHATabPage.enter_home_settings_page(self)
-        GHASettingsPage.open_device_settings(self, device_name=self.device_name)
-        GHADeviceSettingPage.click_remove_device_btn(self)
+        # GHATabPage.enter_home_settings_page(self)
+        # GHASettingsPage.open_device_settings(self, device_name=self.device_name)
+        GHADeviceSettingPage.get_device_information(self)
+        # GHADeviceSettingPage.click_remove_device_btn(self)
 
 
 

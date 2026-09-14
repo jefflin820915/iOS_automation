@@ -1,2 +1,0 @@
-2026-09-11 22:19:33 | INFO    | utils.csv_report.csv_report | Test result saved locally to /Users/enlin/iOS_Automation/log/test_results.csv
-2026-09-11 22:19:45 | ERROR   | utils.csv_report.csv_report | Failed to sync with Google Sheet Webhook: The read operation timed out

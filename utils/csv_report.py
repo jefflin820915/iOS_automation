@@ -7,19 +7,15 @@ from datetime import datetime
 
 from common import constants
 from utils import logging_utils
-
-
 logger = logging_utils.get_logger(__name__, "csv_report")
-
 CSV_FILE_PATH = "/Users/enlin/iOS_Automation/log/test_results.csv"
-WEBHOOK_URL = "https://script.google.com/a/macros/google.com/s/AKfycbxvNyA-SwUqsIxLa0svIX_SUm1reTtnpy1IZpWh12umN_V7OMC-0a8P6MSXaLbGAt_a/exec"
 CSV_HEADERS = [
     "Timestamp", "Iteration", "Test Name", "Status", "Duration (s)",
     "GHA Version", "iOS Version", "Device Name", "Wi-Fi SSID",
     "Failure Stage", "Error Message", "Log Directory", "Video File", "Host Machine",
-    "Device IP Address", "Router Gateway", "Subnet Mask"
+    "Phone IP Address", "Router Gateway", "Subnet Mask",
+    "Device ID", "Serial Number", "Software Version", "Device IP"
 ]
-
 def append_test_result_to_csv(
         test_name: str,
         device_name: str,
@@ -31,15 +27,19 @@ def append_test_result_to_csv(
         iteration: int = 1,
         ios_version: str = "",
         wifi_ssid: str = "",
-        failure_stage: str = "",
+        failure_stage: str = "No errors",
         log_dir: str = "",
         video_file: str = "",
         host_machine: str = "",
-        device_ip: str = "UNKNOWN",
+        phone_ip: str = "UNKNOWN",
         router_gateway: str = "UNKNOWN",
-        subnet_mask: str = "UNKNOWN"
+        subnet_mask: str = "UNKNOWN",
+        device_id: str = "UNKNOWN",
+        serial_number: str = "UNKNOWN",
+        software_version: str = "UNKNOWN",
+        device_ip: str = "UNKNOWN"
 ) -> None:
-    """Record test result to local CSV and upload to Google Sheet Webhook."""
+    """Record testcase telemetry to local CSV and upload payload to Google Sheet Webhook."""
     file_exists = os.path.isfile(CSV_FILE_PATH)
     os.makedirs(os.path.dirname(CSV_FILE_PATH), exist_ok=True)
     duration_s = round((end_time - start_time).total_seconds(), 2)
@@ -60,9 +60,13 @@ def append_test_result_to_csv(
         log_dir,
         video_file,
         host_machine,
-        device_ip,
+        phone_ip,
         router_gateway,
-        subnet_mask
+        subnet_mask,
+        device_id,
+        serial_number,
+        software_version,
+        device_ip
     ]
     try:
         with open(CSV_FILE_PATH, mode="a", newline="", encoding="utf-8") as f:
@@ -70,9 +74,9 @@ def append_test_result_to_csv(
             if not file_exists:
                 writer.writerow(CSV_HEADERS)
             writer.writerow(row)
-        logger.info(f"Test result saved locally to {CSV_FILE_PATH}")
+        logger.info(f"[CSV] Appended telemetry row for '{test_name}' to {CSV_FILE_PATH}")
     except Exception as e:
-        logger.error(f"Failed to write CSV: {e}")
+        logger.error(f"[CSV] Failed to append row to CSV: {e}")
     payload_data = {
         "timestamp": timestamp_str,
         "iteration": iteration_str,
@@ -88,13 +92,18 @@ def append_test_result_to_csv(
         "log_directory": log_dir,
         "video_file": video_file,
         "host_machine": host_machine,
-        "device_ip": device_ip,
+        "phone_ip": phone_ip,
         "router_gateway": router_gateway,
         "subnet_mask": subnet_mask,
+        "device_id": device_id,
+        "serial_number": serial_number,
+        "software_version": software_version,
+        "device_ip": device_ip,
         "row": row,
         "values": row
     }
     try:
+        logger.info(f"[WEBHOOK] Uploading telemetry for '{test_name}' to Google Sheet...")
         req = urllib.request.Request(
             constants.GOOGLE_SHEET_WEBHOOK_URL,
             data=json.dumps(payload_data).encode("utf-8"),
@@ -102,6 +111,6 @@ def append_test_result_to_csv(
         )
         with urllib.request.urlopen(req, timeout=10) as response:
             res_body = response.read().decode("utf-8")
-            logger.info(f"Google Sheet Webhook sync success: {res_body}")
+            logger.info(f"[GOOGLE SHEET SYNC] Webhook upload response: {res_body}")
     except Exception as e:
-        logger.error(f"Failed to sync with Google Sheet Webhook: {e}")
+        logger.error(f"[GOOGLE SHEET SYNC] Webhook synchronization failed: {e}")

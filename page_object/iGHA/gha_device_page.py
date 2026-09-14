@@ -115,7 +115,6 @@ class GHADevicePage(BasePage):
                         target_element.click()
                     except Exception:
                         self.driver.execute_script("mobile: tap", {"x": center_x, "y": center_y})
-                # 等待頁面過場動畫
                 time.sleep(2.0)
                 back_buttons = self.driver.find_elements(
                     by=AppiumBy.XPATH,

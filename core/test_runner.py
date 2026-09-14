@@ -21,11 +21,10 @@ from utils.screen_recorder import ScreenRecorder
 from utils.gemini_reporter import GeminiReporter
 from utils import csv_report
 
-
 logger = logging_utils.get_logger(__name__, "runner")
 
 def extract_failure_stage(exc: Exception) -> str:
-    """Automatically extract the failing method name from exception traceback without manual tagging."""
+    """Automatically extract failing method name from exception traceback without manual tagging."""
     if not exc or not hasattr(exc, "__traceback__"):
         return "UNKNOWN"
     tb_frames = traceback.extract_tb(exc.__traceback__)
@@ -39,6 +38,8 @@ def extract_failure_stage(exc: Exception) -> str:
                 return matches[-1].upper()
             return frame.name.upper()
     return "UNKNOWN"
+
+
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
     def __init__(
@@ -69,10 +70,15 @@ class MultiProjectTestRunner:
         self.gha_version: str = "4.29.25"
         self.ios_version: str = "iOS 17+"
         self.wifi_ssid: str = "Atelier320482024g"
-        self.device_ip: str = "192.168.1.113"
+        self.phone_ip: str = "192.168.1.113"
         self.router_gateway: str = "192.168.1.1"
         self.subnet_mask: str = "255.255.255.0"
+        self.device_id: str = "UNKNOWN"
+        self.serial_number: str = "UNKNOWN"
+        self.software_version: str = "UNKNOWN"
+        self.device_ip: str = "UNKNOWN"
         self.env_info_collected: bool = False
+
     def setup(self) -> None:
         """Initialize Appium session and configure implicit wait."""
         mode_str = f"{self.count} times" if self.count else "INFINITE LOOP (Press Ctrl+C to stop)"
@@ -93,6 +99,7 @@ class MultiProjectTestRunner:
         implicit_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
         self.driver.implicitly_wait(implicit_wait)
         logger.info(f"Global driver implicit wait configured to: {implicit_wait}s")
+
     def teardown(self) -> None:
         """Collect .xcappdata container, quit Appium WebDriver, and stop syslog collector."""
         logger.info("=" * 65)
@@ -120,6 +127,7 @@ class MultiProjectTestRunner:
         logger.info("=" * 65)
         logger.info(f"Artifacts and Logs stored in: {constants.SESSION_LOG_DIR}")
         logger.info("=" * 65)
+
     def _get_project_suite(self) -> Tuple[Any, List[Type]]:
         """Resolve session instance and test classes for the target project."""
         if self.project_name == "ighp":
@@ -132,6 +140,7 @@ class MultiProjectTestRunner:
         session_instance.pairing_code = self.pairing_code
         session_instance.room_name = self.room_name
         return session_instance, test_classes
+
     def run(self) -> None:
         """Execute test suite across iterations with dynamically isolated log directories per run."""
         total_runs = 0
@@ -252,23 +261,47 @@ class MultiProjectTestRunner:
                                         if "wifi_info" in env_info and isinstance(env_info["wifi_info"], dict):
                                             w_info = env_info["wifi_info"]
                                             self.wifi_ssid = str(w_info.get("ssid", self.wifi_ssid))
-                                            self.device_ip = str(w_info.get("ip_address", self.device_ip))
+                                            self.phone_ip = str(w_info.get("ip_address", self.phone_ip))
                                             self.router_gateway = str(w_info.get("router_gateway", self.router_gateway))
                                             self.subnet_mask = str(w_info.get("subnet_mask", self.subnet_mask))
                                     self.env_info_collected = True
                                     logger.info(
-                                        f"[ENV INFO] Cached Info: GHA {self.gha_version} | iOS {self.ios_version} | "
-                                        f"SSID {self.wifi_ssid} | IP {self.device_ip} | Gateway {self.router_gateway} | Subnet {self.subnet_mask}"
+                                        f"[ENV INFO] Cached: GHA {self.gha_version} | iOS {self.ios_version} | "
+                                        f"SSID {self.wifi_ssid} | Phone IP {self.phone_ip} | Gateway {self.router_gateway}"
                                     )
                                 except Exception as env_err:
                                     logger.warning(f"Failed to collect version information: {env_err}")
                                     self.env_info_collected = True
+                            dev_tech = (
+                                    getattr(self.driver, "device_tech_info", None)
+                                    or getattr(test_instance, "device_tech_info", None)
+                                    or getattr(session_instance, "device_tech_info", None)
+                                    or getattr(getattr(test_instance, "session", None), "device_tech_info", None)
+                            )
+                            if isinstance(dev_tech, dict) and dev_tech:
+                                for key, val in dev_tech.items():
+                                    if val and str(val).upper() != "UNKNOWN":
+                                        if key in ("device_id", "Device ID"):
+                                            self.device_id = str(val)
+                                        elif key in ("serial_number", "serial_no", "Serial Number"):
+                                            self.serial_number = str(val)
+                                        elif key in ("software_version", "Software Version", "firmware_version"):
+                                            self.software_version = str(val)
+                                        elif key in ("device_ip", "camera_ip", "Device IP", "ip_address"):
+                                            self.device_ip = str(val)
+                                logger.info(
+                                    f"[TARGET DEVICE CAPTURED] ID: {self.device_id} | SN: {self.serial_number} | "
+                                    f"FW: {self.software_version} | IP: {self.device_ip}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"[TARGET DEVICE] No device_tech_info found! (dev_tech={dev_tech})"
+                                )
                             if test_status == "PASS":
-                                failure_stage = "NONE"
+                                failure_stage = "No errors"
                             else:
                                 failure_stage = extract_failure_stage(caught_exception)
-                                logger.info(f"[FAILURE ATTRIBUTION] Automatically identified failing step: {failure_stage}")
-
+                                logger.info(f"[FAILURE ATTRIBUTION] Failing step: {failure_stage}")
                             try:
                                 csv_report.append_test_result_to_csv(
                                     test_name=f"{class_name}.{test_name}",
@@ -285,9 +318,13 @@ class MultiProjectTestRunner:
                                     log_dir=child_folder_name,
                                     video_file=video_filename,
                                     host_machine=socket.gethostname(),
-                                    device_ip=self.device_ip,
+                                    phone_ip=self.phone_ip,
                                     router_gateway=self.router_gateway,
-                                    subnet_mask=self.subnet_mask
+                                    subnet_mask=self.subnet_mask,
+                                    device_id=self.device_id,
+                                    serial_number=self.serial_number,
+                                    software_version=self.software_version,
+                                    device_ip=self.device_ip
                                 )
                             except Exception as csv_err:
                                 logger.warning(f"Failed to record result to CSV / Google Sheet: {csv_err}")

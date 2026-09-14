@@ -1,6 +1,7 @@
 """Page object for handling the Device Settings page and scrolling to remove device on iOS."""
+import re
 import time
-from typing import Optional
+from typing import Optional, Dict
 from appium.webdriver.common.appiumby import AppiumBy
 from appium.webdriver.webelement import WebElement
 from selenium.common.exceptions import TimeoutException, WebDriverException
@@ -82,3 +83,81 @@ class GHADeviceSettingPage(BasePage):
             page_name=self.__class__.__name__,
             message=f"Failed to find 'Remove device' button after {max_scrolls} swipes on Device Settings page."
         )
+
+    def get_device_information(self) -> Dict[str, str]:
+        """Navigate into the Device Information page, extract technical metadata, and return to Device Settings.
+        Returns:
+            Dict[str, str]: Dictionary containing device_id, serial_number, software_version, and camera_ip.
+        """
+
+
+        self._logger.info("Locating and clicking 'Device information'...")
+        device_details = {
+            "device_id": "UNKNOWN",
+            "serial_number": "UNKNOWN",
+            "software_version": "UNKNOWN",
+            "device_ip": "UNKNOWN"
+        }
+        dev_info_btn = None
+        for _ in range(3):
+            elems = self.driver.find_elements(
+                AppiumBy.XPATH,
+                '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="Device information"]] | '
+                '//XCUIElementTypeStaticText[@name="Device information"]'
+            )
+            if elems and elems[0].is_displayed():
+                dev_info_btn = elems[0]
+                break
+            self._fast_swipe_down()
+            time.sleep(0.3)
+        if not dev_info_btn:
+            self._logger.warning("Could not find 'Device information' entry on Device Settings page.")
+            return device_details
+        try:
+            dev_info_btn.click()
+        except WebDriverException:
+            self.driver.execute_script("mobile: tap", {"elementId": dev_info_btn.id})
+        try:
+            back_btn = WebDriverWait(self.driver, 5.0).until(
+                EC.element_to_be_clickable((AppiumBy.XPATH, '//XCUIElementTypeButton[@name="BackButton"]'))
+            )
+            self._logger.info("Entered 'Device information' page. Extracting technical info...")
+            time.sleep(1.0)
+            raw_text = ""
+            tech_elems = self.driver.find_elements(
+                AppiumBy.XPATH,
+                '//XCUIElementTypeStaticText[contains(@value, "Device ID:") or contains(@label, "Device ID:")] | '
+                '//XCUIElementTypeTextView[contains(@value, "Device ID:")]'
+            )
+            if tech_elems:
+                raw_text = tech_elems[0].get_attribute("value") or tech_elems[0].get_attribute("label") or tech_elems[0].text
+            else:
+                all_texts = [e.text for e in self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText")]
+                for t in all_texts:
+                    if "Device ID:" in t:
+                        raw_text = t
+                        break
+            if raw_text:
+                self._logger.info(f"Raw Technical Info Text: {raw_text}")
+                if m_dev := re.search(r"Device ID:\s*([A-Za-z0-9]+)", raw_text):
+                    device_details["device_id"] = m_dev.group(1).strip()
+                if m_sn := re.search(r"Serial no\.:\s*([A-Za-z0-9]+)", raw_text):
+                    device_details["serial_number"] = m_sn.group(1).strip()
+                if m_sw := re.search(r"Software version:\s*([^\n\r]+?)(?:\s+Updated:|$)", raw_text):
+                    device_details["software_version"] = m_sw.group(1).strip()
+                if m_ip := re.search(r"\bIP:\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", raw_text):
+                    device_details["device_ip"] = m_ip.group(1).strip()
+            self._logger.info(f"Extracted Device Information: {device_details}")
+            self.device_tech_info = device_details
+            if hasattr(self, "driver") and self.driver:
+                self.driver.device_tech_info = device_details
+            self._logger.info("Clicking '< Back' button to return to Device Settings...")
+            back_btn.click()
+            time.sleep(1.5)
+        except Exception as e:
+            self._logger.error(f"Error during Device information extraction: {e}")
+            try:
+                self.driver.find_element(AppiumBy.XPATH, '//XCUIElementTypeButton[@name="BackButton"]').click()
+            except Exception:
+                pass
+        return device_details

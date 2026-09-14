@@ -23,7 +23,7 @@ class GHADeviceConnectedPage(BasePage):
             )
         except TimeoutException:
             self._logger.error(f"Timed out waiting for element: by={by}, value='{locator_value}'")
-            return None
+            return False
 
     def _find_by_class_chain(self, class_chain: str) -> Optional[WebElement]:
         """Convenient helper to find an element by IOS_CLASS_CHAIN."""
