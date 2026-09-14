@@ -133,11 +133,10 @@ class GHACameraLivePage(BasePage):
             elapsed = time.time() - start_time
             if retry_btn := self._get_visible_retry_btn():
                 if retry_count >= max_retries:
-                    self._logger.error(
+                    return AssertionError(
                         f"Camera live stream verification FAILED: Reached maximum retry limit ({max_retries}) "
                         f"and stream is still not live. Returning False."
                     )
-                    return False
                 retry_count += 1
                 self._logger.warning(
                     f"Camera stream disconnected! Found 'Retry' button. Clicking retry (#{retry_count}/{max_retries})..."
@@ -151,11 +150,10 @@ class GHACameraLivePage(BasePage):
                     has_streamed_live = True
                     self._logger.info(f"Camera live stream recovered after retry (#{retry_count}).")
                 elif retry_count >= max_retries:
-                    self._logger.error(
+                    return AssertionError(
                         f"Camera live stream verification FAILED: Exhausted all {max_retries} retries "
                         f"and stream failed to recover. Returning False."
                     )
-                    return False
                 continue
             if self.is_camera_live():
                 has_streamed_live = True
@@ -168,11 +166,10 @@ class GHACameraLivePage(BasePage):
                 self._logger.debug(f"Camera stream buffering/reconnecting... ({int(elapsed)}s elapsed)")
             time.sleep(check_interval)
         if not has_streamed_live or not self.is_camera_live():
-            self._logger.error(
+            return AssertionError(
                 f"Camera live stream verification FAILED: Reached duration ({int(duration_seconds)}s) "
                 f"but stream was not in a valid LIVE state (has_streamed_live={has_streamed_live}). Returning False."
             )
-            return False
         total_time = int(time.time() - start_time)
         self._logger.info(
             f"SUCCESS: Camera live stream verified continuously for {total_time}s! (Total retries clicked: {retry_count})"
