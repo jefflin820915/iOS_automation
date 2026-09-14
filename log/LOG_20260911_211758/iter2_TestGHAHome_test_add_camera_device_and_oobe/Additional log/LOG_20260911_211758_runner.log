@@ -1,0 +1,12 @@
+2026-09-11 21:20:15 | INFO    | core.test_runner.runner | 
+>>> [RUNNING] [Iter #2] TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:20:15 | INFO    | core.test_runner.runner | >>> [TARGET DIR] /Users/enlin/iOS_Automation/log/LOG_20260911_211758/iter2_TestGHAHome_test_add_camera_device_and_oobe
+2026-09-11 21:20:20 | INFO    | core.test_runner.runner | [REC] Screen recording started for: TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:21:00 | ERROR   | core.test_runner.runner | >>> [FAIL] [Iter #2] TestGHAHome.test_add_camera_device_and_oobe (40.25s) - Error: 'bool' object has no attribute 'value'
+2026-09-11 21:21:00 | INFO    | core.test_runner.runner | Saved failure screenshot to: /Users/enlin/iOS_Automation/log/LOG_20260911_211758/iter2_TestGHAHome_test_add_camera_device_and_oobe/Additional log/FAILED_iter2_20260911_212015_TestGHAHome_test_add_camera_device_and_oobe.png
+2026-09-11 21:21:01 | INFO    | core.test_runner.runner | [REC] Screen recording saved: screen_record_RECORD_iter2_20260911_212015_TestGHAHome_test_add_camera_device_and_oobe_20260911_212101.mp4
+2026-09-11 21:21:01 | INFO    | core.test_runner.runner | [FAILURE ATTRIBUTION] Automatically identified failing step: GO_TO_TAB
+2026-09-11 21:21:01 | INFO    | core.test_runner.runner | 
+=================================================================
+2026-09-11 21:21:01 | INFO    | core.test_runner.runner |                STARTING ITERATION #3/5
+2026-09-11 21:21:01 | INFO    | core.test_runner.runner | =================================================================

@@ -1,0 +1,87 @@
+2026-09-11 21:48:57 | INFO    | page_object.iGHA.gha_session.gha_session | GHA is already running in foreground.
+2026-09-11 21:49:10 | INFO    | page_object.iGHA.gha_session.gha_session | Navigating from HOME to DEVICES...
+2026-09-11 21:49:33 | INFO    | page_object.iGHA.gha_session.gha_session | GHA has been refreshed.
+2026-09-11 21:49:33 | INFO    | page_object.iGHA.gha_session.gha_session | Clicking 'Add Devices' button...
+2026-09-11 21:49:40 | INFO    | page_object.iGHA.gha_session.gha_session | Start scanning nearby devices for target: 'Onn Wired Indoor Camera'...
+2026-09-11 21:49:45 | INFO    | page_object.iGHA.gha_session.gha_session | Phase 1: Waiting at top for up to 6s for nearby device discovery to populate...
+2026-09-11 21:49:46 | INFO    | page_object.iGHA.gha_session.gha_session | Discovered Device Name List (2): ['Onn Wired Indoor Camera (5502:4233:1658)', 'Nest Hub (2nd gen) (NestHub4F3A)']
+2026-09-11 21:49:46 | INFO    | page_object.iGHA.gha_session.gha_session | Target device 'Onn Wired Indoor Camera' detected! Attempting safe click...
+2026-09-11 21:52:39 | INFO    | page_object.iGHA.gha_session.gha_session | Start searching for device: 'Onn Wired Indoor Camera' on Devices page...
+2026-09-11 21:52:43 | INFO    | page_object.iGHA.gha_session.gha_session | Currently discovered devices: ['Onn Wired Indoor Camera']
+2026-09-11 21:52:43 | INFO    | page_object.iGHA.gha_session.gha_session | Target device 'Onn Wired Indoor Camera' found successfully!
+2026-09-11 21:52:43 | INFO    | page_object.iGHA.gha_session.gha_session | Attempting to enter device page for: 'Onn Wired Indoor Camera'...
+2026-09-11 21:52:43 | INFO    | page_object.iGHA.gha_session.gha_session | [Attempt 1/2] Triggering interaction on 'Onn Wired Indoor Camera'...
+2026-09-11 21:52:43 | INFO    | page_object.iGHA.gha_session.gha_session | Executing mobile: touchAndHold at (100, 280) for 2.5s...
+2026-09-11 21:52:49 | WARNING | page_object.iGHA.gha_session.gha_session | Did not detect navigation after attempt 1. Retrying with long press...
+2026-09-11 21:52:49 | INFO    | page_object.iGHA.gha_session.gha_session | [Attempt 2/2] Triggering interaction on 'Onn Wired Indoor Camera'...
+2026-09-11 21:52:51 | ERROR   | page_object.iGHA.gha_session.gha_session | Error interacting with 'Onn Wired Indoor Camera' on attempt 2: Message: The previously found element ""deviceTileCell_0_0" Cell" is not present in the current view anymore. Make sure the application UI has the expected state. Original error: No matches found for Elements matching predicate 'fb_uid IN {"F0040000-0000-0000-0507-000000000000"}' from input {(
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell
+)}; For documentation on this error, please visit: https://www.selenium.dev/documentation/webdriver/troubleshooting/errors#staleelementreferenceexception
+Stacktrace:
+StaleElementReferenceError: The previously found element ""deviceTileCell_0_0" Cell" is not present in the current view anymore. Make sure the application UI has the expected state. Original error: No matches found for Elements matching predicate 'fb_uid IN {"F0040000-0000-0000-0507-000000000000"}' from input {(
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell,
+    Cell
+)}
+    at errorFromW3CJsonCode (/Users/enlin/.appium/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/protocol/errors.js:1112:25)
+    at ProxyRequestError.getActualError (/Users/enlin/.appium/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/protocol/errors.js:981:14)
+    at JWProxy.proxyReqRes (/Users/enlin/.appium/node_modules/appium-xcuitest-driver/node_modules/@appium/base-driver/lib/jsonwp-proxy/proxy.js:410:58)
+    at processTicksAndRejections (node:internal/process/task_queues:105:5)
+2026-09-11 21:52:51 | ERROR   | page_object.iGHA.gha_session.gha_session | Failed to enter device page for 'Onn Wired Indoor Camera' after 2 attempts.
+2026-09-11 21:52:51 | INFO    | page_object.iGHA.gha_session.gha_session | Starting Camera Live stream verification (Target: 30s, Max Retries: 20)...
+2026-09-11 21:52:52 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (0s elapsed)
+2026-09-11 21:52:54 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (1s elapsed)
+2026-09-11 21:52:55 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (3s elapsed)
+2026-09-11 21:52:57 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (4s elapsed)
+2026-09-11 21:52:58 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (6s elapsed)
+2026-09-11 21:53:00 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (7s elapsed)
+2026-09-11 21:53:01 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (9s elapsed)
+2026-09-11 21:53:03 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (10s elapsed)
+2026-09-11 21:53:04 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (12s elapsed)
+2026-09-11 21:53:06 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (13s elapsed)
+2026-09-11 21:53:07 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (15s elapsed)
+2026-09-11 21:53:09 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (16s elapsed)
+2026-09-11 21:53:10 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (18s elapsed)
+2026-09-11 21:53:12 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (19s elapsed)
+2026-09-11 21:53:13 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (21s elapsed)
+2026-09-11 21:53:15 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (22s elapsed)
+2026-09-11 21:53:16 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (24s elapsed)
+2026-09-11 21:53:18 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (25s elapsed)
+2026-09-11 21:53:19 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (27s elapsed)
+2026-09-11 21:53:21 | DEBUG   | page_object.iGHA.gha_session.gha_session | Camera stream buffering/reconnecting... (28s elapsed)
+2026-09-11 21:53:22 | ERROR   | page_object.iGHA.gha_session.gha_session | Camera live stream verification FAILED: Reached duration (30s) but stream was not in a valid LIVE state (has_streamed_live=False). Returning False.
+2026-09-11 21:53:22 | INFO    | page_object.iGHA.gha_session.gha_session | Opening Settings page from account avatar...
+2026-09-11 21:53:34 | ERROR   | page_object.iGHA.gha_session.gha_session | Failed to open Home Settings page: 'NoneType' object has no attribute 'is_displayed'
+2026-09-11 21:55:23 | INFO    | page_object.iGHA.gha_session.gha_session | Clicking device card: 'Onn Wired Indoor Camera'...
+2026-09-11 21:55:25 | INFO    | page_object.iGHA.gha_session.gha_session | Fast scrolling down to locate 'Remove device' button...
+2026-09-11 21:55:26 | INFO    | page_object.iGHA.gha_session.gha_session | Not visible yet. Fast swiping (1/5)...
+2026-09-11 21:55:27 | INFO    | page_object.iGHA.gha_session.gha_session | Not visible yet. Fast swiping (2/5)...
+2026-09-11 21:55:31 | INFO    | page_object.iGHA.gha_session.gha_session | 'Remove device' button found (after 2 swipes)! Clicking...
+2026-09-11 21:55:31 | INFO    | page_object.iGHA.gha_session.gha_session | Waiting for secondary 'Remove' confirmation dialog...
+2026-09-11 21:55:33 | INFO    | page_object.iGHA.gha_session.gha_session | Successfully confirmed device removal.
+2026-09-11 21:55:52 | INFO    | page_object.iGHA.gha_session.gha_session | GHA has been refreshed.
+2026-09-11 21:55:54 | INFO    | page_object.iGHA.gha_session.gha_session | GHA stopped successfully.

@@ -1,0 +1,10 @@
+2026-09-11 23:22:52 | INFO    | core.test_runner.runner | 
+>>> [RUNNING] [Iter #17] TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 23:22:52 | INFO    | core.test_runner.runner | >>> [TARGET DIR] /Users/enlin/iOS_Automation/log/LOG_20260911_214847/iter17_TestGHAHome_test_add_camera_device_and_oobe
+2026-09-11 23:22:57 | INFO    | core.test_runner.runner | [REC] Screen recording started for: TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 23:28:28 | INFO    | core.test_runner.runner | >>> [PASS] [Iter #17] TestGHAHome.test_add_camera_device_and_oobe (331.33s)
+2026-09-11 23:28:30 | INFO    | core.test_runner.runner | [REC] Screen recording saved: screen_record_RECORD_iter17_20260911_232252_TestGHAHome_test_add_camera_device_and_oobe_20260911_232829.mp4
+2026-09-11 23:28:32 | INFO    | core.test_runner.runner | 
+=================================================================
+2026-09-11 23:28:32 | INFO    | core.test_runner.runner |                STARTING ITERATION #18 (Infinite)
+2026-09-11 23:28:32 | INFO    | core.test_runner.runner | =================================================================

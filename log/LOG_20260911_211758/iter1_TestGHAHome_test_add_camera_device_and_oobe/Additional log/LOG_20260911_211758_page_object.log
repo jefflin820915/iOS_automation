@@ -1,0 +1,6 @@
+2026-09-11 21:18:18 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=-ios class chain, value='**/XCUIElementTypeNavigationBar[`name == "Settings"`]'
+2026-09-11 21:18:21 | INFO    | common.base_page.page_object | Active Tab: HOME
+2026-09-11 21:18:24 | INFO    | common.base_page.page_object | Switched to 'Home' tab.
+2026-09-11 21:18:24 | INFO    | common.base_page.page_object | Selecting chip: 'All devices' under Home tab...
+2026-09-11 21:18:26 | INFO    | common.base_page.page_object | Successfully selected chip 'All devices'.
+2026-09-11 21:19:22 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=accessibility id, value='Use pairing code'

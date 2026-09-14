@@ -1,0 +1,12 @@
+2026-09-11 21:40:26 | INFO    | core.test_runner.runner | 
+>>> [RUNNING] [Iter #4] TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:40:26 | INFO    | core.test_runner.runner | >>> [TARGET DIR] /Users/enlin/iOS_Automation/log/LOG_20260911_212220/iter4_TestGHAHome_test_add_camera_device_and_oobe
+2026-09-11 21:40:31 | INFO    | core.test_runner.runner | [REC] Screen recording started for: TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:41:37 | ERROR   | core.test_runner.runner | >>> [FAIL] [Iter #4] TestGHAHome.test_add_camera_device_and_oobe (66.37s) - Error: 'NoneType' object has no attribute 'send_keys'
+2026-09-11 21:41:38 | INFO    | core.test_runner.runner | Saved failure screenshot to: /Users/enlin/iOS_Automation/log/LOG_20260911_212220/iter4_TestGHAHome_test_add_camera_device_and_oobe/Additional log/FAILED_iter4_20260911_214026_TestGHAHome_test_add_camera_device_and_oobe.png
+2026-09-11 21:41:38 | INFO    | core.test_runner.runner | [REC] Screen recording saved: screen_record_RECORD_iter4_20260911_214026_TestGHAHome_test_add_camera_device_and_oobe_20260911_214138.mp4
+2026-09-11 21:41:38 | INFO    | core.test_runner.runner | [FAILURE ATTRIBUTION] Automatically identified failing step: ENTER_PAIRING_CODE
+2026-09-11 21:41:42 | INFO    | core.test_runner.runner | 
+=================================================================
+2026-09-11 21:41:42 | INFO    | core.test_runner.runner |                STARTING ITERATION #5/5
+2026-09-11 21:41:42 | INFO    | core.test_runner.runner | =================================================================

@@ -1,0 +1,8 @@
+2026-09-11 21:40:44 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=-ios class chain, value='**/XCUIElementTypeNavigationBar[`name == "Settings"`]'
+2026-09-11 21:40:47 | INFO    | common.base_page.page_object | Active Tab: HOME
+2026-09-11 21:40:50 | INFO    | common.base_page.page_object | Switched to 'Home' tab.
+2026-09-11 21:40:50 | INFO    | common.base_page.page_object | Selecting chip: 'All devices' under Home tab...
+2026-09-11 21:40:52 | INFO    | common.base_page.page_object | Successfully selected chip 'All devices'.
+2026-09-11 21:41:23 | INFO    | common.base_page.page_object | Target device 'Onn Wired Indoor Camera (5502:4233:1658)' is safe in viewport! Clicking now...
+2026-09-11 21:41:24 | INFO    | common.base_page.page_object | Successfully clicked device card.
+2026-09-11 21:41:37 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=class name, value='XCUIElementTypeTextField'

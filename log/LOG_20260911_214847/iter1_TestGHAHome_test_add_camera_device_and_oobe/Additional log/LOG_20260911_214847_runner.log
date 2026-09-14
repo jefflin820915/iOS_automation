@@ -1,0 +1,12 @@
+2026-09-11 21:48:52 | INFO    | core.test_runner.runner | 
+>>> [RUNNING] [Iter #1] TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:48:52 | INFO    | core.test_runner.runner | >>> [TARGET DIR] /Users/enlin/iOS_Automation/log/LOG_20260911_214847/iter1_TestGHAHome_test_add_camera_device_and_oobe
+2026-09-11 21:48:57 | INFO    | core.test_runner.runner | [REC] Screen recording started for: TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:56:04 | INFO    | core.test_runner.runner | >>> [PASS] [Iter #1] TestGHAHome.test_add_camera_device_and_oobe (426.46s)
+2026-09-11 21:56:05 | INFO    | core.test_runner.runner | [REC] Screen recording saved: screen_record_RECORD_iter1_20260911_214852_TestGHAHome_test_add_camera_device_and_oobe_20260911_215605.mp4
+2026-09-11 21:56:05 | INFO    | core.test_runner.runner | [ENV INFO] First testcase completed, collecting environment info...
+2026-09-11 21:57:01 | INFO    | core.test_runner.runner | [ENV INFO] Cached Info: GHA 4.30.25 | iOS 26.5 | SSID Atelier320482024g | IP 192.168.1.113 | Gateway 192.168.1.1 | Subnet 255.255.255.0
+2026-09-11 21:57:04 | INFO    | core.test_runner.runner | 
+=================================================================
+2026-09-11 21:57:04 | INFO    | core.test_runner.runner |                STARTING ITERATION #2 (Infinite)
+2026-09-11 21:57:04 | INFO    | core.test_runner.runner | =================================================================

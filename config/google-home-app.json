@@ -1,0 +1,11 @@
+{
+  "login_account": "tzuenlinqa@gmail.com",
+  "login_password": "@nesthome",
+  "package_name": "com.tuya.smart",
+  "pin_code": "1234",
+  "personal_profile_id": 0,
+  "devices": {
+    "starter_device": ["A.E27","LOCK1", "Home2Light"],
+    "action_device": ["Outlet1"]
+  }
+}

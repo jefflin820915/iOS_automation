@@ -1,0 +1,4 @@
+2026-09-11 21:22:08 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=-ios class chain, value='**/XCUIElementTypeNavigationBar[`name == "Settings"`]'
+2026-09-11 21:22:10 | INFO    | common.base_page.page_object | Active Tab: HOME
+2026-09-11 21:22:13 | INFO    | common.base_page.page_object | Switched to 'Home' tab.
+2026-09-11 21:22:13 | INFO    | common.base_page.page_object | Selecting chip: 'All devices' under Home tab...

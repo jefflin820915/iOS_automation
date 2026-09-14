@@ -1,0 +1,14 @@
+2026-09-11 21:18:03 | INFO    | core.test_runner.runner | 
+>>> [RUNNING] [Iter #1] TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:18:03 | INFO    | core.test_runner.runner | >>> [TARGET DIR] /Users/enlin/iOS_Automation/log/LOG_20260911_211758/iter1_TestGHAHome_test_add_camera_device_and_oobe
+2026-09-11 21:18:08 | INFO    | core.test_runner.runner | [REC] Screen recording started for: TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:19:22 | ERROR   | core.test_runner.runner | >>> [FAIL] [Iter #1] TestGHAHome.test_add_camera_device_and_oobe (74.17s) - Error: 'NoneType' object has no attribute 'click'
+2026-09-11 21:19:23 | INFO    | core.test_runner.runner | Saved failure screenshot to: /Users/enlin/iOS_Automation/log/LOG_20260911_211758/iter1_TestGHAHome_test_add_camera_device_and_oobe/Additional log/FAILED_iter1_20260911_211803_TestGHAHome_test_add_camera_device_and_oobe.png
+2026-09-11 21:19:23 | INFO    | core.test_runner.runner | [REC] Screen recording saved: screen_record_RECORD_iter1_20260911_211803_TestGHAHome_test_add_camera_device_and_oobe_20260911_211923.mp4
+2026-09-11 21:19:23 | INFO    | core.test_runner.runner | [ENV INFO] First testcase completed, collecting environment info...
+2026-09-11 21:20:15 | INFO    | core.test_runner.runner | [ENV INFO] Cached Info: GHA 4.30.25 | iOS 26.5 | SSID Atelier320482024g | IP 192.168.1.113 | Gateway 192.168.1.1 | Subnet 255.255.255.0
+2026-09-11 21:20:15 | INFO    | core.test_runner.runner | [FAILURE ATTRIBUTION] Automatically identified failing step: CLICK_USE_PAIRING_CODE_BTN
+2026-09-11 21:20:15 | INFO    | core.test_runner.runner | 
+=================================================================
+2026-09-11 21:20:15 | INFO    | core.test_runner.runner |                STARTING ITERATION #2/5
+2026-09-11 21:20:15 | INFO    | core.test_runner.runner | =================================================================

@@ -1,0 +1,9 @@
+2026-09-11 21:21:49 | INFO    | core.test_runner.runner | 
+>>> [RUNNING] [Iter #4] TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:21:49 | INFO    | core.test_runner.runner | >>> [TARGET DIR] /Users/enlin/iOS_Automation/log/LOG_20260911_211758/iter4_TestGHAHome_test_add_camera_device_and_oobe
+2026-09-11 21:21:54 | INFO    | core.test_runner.runner | [REC] Screen recording started for: TestGHAHome.test_add_camera_device_and_oobe
+2026-09-11 21:22:15 | INFO    | core.test_runner.runner | 
+[INTERRUPT] Received KeyboardInterrupt (Ctrl+C). Terminating test execution gracefully...
+2026-09-11 21:22:15 | INFO    | core.test_runner.runner | =================================================================
+2026-09-11 21:22:15 | INFO    | core.test_runner.runner |             TEARDOWN & COLLECTING ARTIFACTS                  
+2026-09-11 21:22:15 | INFO    | core.test_runner.runner | =================================================================

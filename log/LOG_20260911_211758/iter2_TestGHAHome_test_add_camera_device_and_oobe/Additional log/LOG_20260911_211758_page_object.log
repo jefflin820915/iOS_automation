@@ -1,0 +1,5 @@
+2026-09-11 21:20:30 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=-ios class chain, value='**/XCUIElementTypeNavigationBar[`name == "Settings"`]'
+2026-09-11 21:20:40 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=accessibility id, value='homeTabBarButtonAccessibilityID'
+2026-09-11 21:20:50 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=accessibility id, value='activityTabBarButtonAccessibilityID'
+2026-09-11 21:21:00 | ERROR   | common.base_page.page_object | Timed out waiting for element: by=accessibility id, value='automationTabBarButtonAccessibilityID'
+2026-09-11 21:21:00 | INFO    | common.base_page.page_object | Active Tab: UNKNOWN
