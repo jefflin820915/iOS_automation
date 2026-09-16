@@ -1,9 +1,10 @@
 """Session Page Object managing iGHA lifecycle and aggregating all sub-page objects."""
 
 import time
+import tomllib
 from typing import Optional, Any
 from appium.webdriver.webdriver import WebDriver
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import WebDriverException, StaleElementReferenceException
 
 from common import constants
 from common.base_page import BasePage
@@ -116,6 +117,42 @@ class GHASession:
         actions.w3c_actions.pointer_action.pointer_up()
         actions.perform()
 
+    def _dismiss_setup_new_devices_sheet(self, timeout: float = 5.0) -> bool:
+        """Check for and dismiss the 'Set up new devices?' bottom sheet if it appears after launch.
+        Args:
+            timeout (float): Max time in seconds to poll for the bottom sheet (defaults to 5.0s).
+        Returns:
+            bool: True if the sheet was detected and dismissed, False otherwise.
+        """
+        self._logger.info(f"Checking for 'Set up new devices?' bottom sheet (polling up to {timeout}s)...")
+        start_time = time.time()
+        not_now_locators = [
+            (AppiumBy.XPATH, '//XCUIElementTypeButton[@name="actionBarSecondaryButton" or @name="Not now" or @label="Not now"]'),
+            (AppiumBy.XPATH, '//XCUIElementTypeStaticText[@name="Not now" or @label="Not now"]'),
+            (AppiumBy.ACCESSIBILITY_ID, "actionBarSecondaryButton"),
+            (AppiumBy.ACCESSIBILITY_ID, "Not now")
+        ]
+        while time.time() - start_time < timeout:
+            try:
+                self.driver.implicitly_wait(0)
+                for by, loc in not_now_locators:
+                    btns = self.driver.find_elements(by, loc)
+                    for btn in btns:
+                        try:
+                            if btn.is_displayed():
+                                self._logger.info("Detected 'Set up new devices?' prompt. Clicking 'Not now'...")
+                                btn.click()
+                                time.sleep(1.0)
+                                return True
+                        except (StaleElementReferenceException, WebDriverException):
+                            continue
+            except Exception:
+                pass
+            finally:
+                self.driver.implicitly_wait(getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0))
+            time.sleep(0.5)
+        self._logger.info("No 'Set up new devices?' bottom sheet detected. Continuing.")
+        return False
 
     def refresh_gha_devices(self, timeout: float = 5.0) -> None:
         """Refresh all devices in the Google Home App (iOS).
@@ -174,6 +211,7 @@ class GHASession:
         self._logger.info("Starting Google Home App on iOS...")
         try:
             self.driver.activate_app(constants.GHA_BUNDLE_ID)
+            self._dismiss_setup_new_devices_sheet()
         except WebDriverException as e:
             self._logger.error(f"Failed to activate GHA: {e}")
             return False

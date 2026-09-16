@@ -321,7 +321,7 @@ class GHACommissioningPageObject(BasePage):
 
             if any(fail in headline for fail in ["Can’t connect", "Can't connect", "Something went wrong", "Unable to connect"]):
                 self._click_if_visible(AppiumBy.ACCESSIBILITY_ID, "Exit")
-                return AssertionError(f"FATAL: Commissioning failed with headline: '{headline}'.")
+                raise AssertionError(f"FATAL: Commissioning failed with headline: '{headline}'.")
             time.sleep(1.5)
         self._logger.error(f"Commissioning timed out after {int(timeout)}s.")
-        return AssertionError(f"Commissioning timed out after {int(timeout)}s.")
+        raise AssertionError(f"Commissioning timed out after {int(timeout)}s.")
