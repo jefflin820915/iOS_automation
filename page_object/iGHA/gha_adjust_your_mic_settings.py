@@ -12,13 +12,18 @@ from common.base_page import BasePage, PageNotPresentException
 from utils import logging_utils
 
 
-class GHAAdjustYourMicSettingsPage(BasePage):
+class OOBEInternalErrorException(Exception):
+    """Raised when GHA displays 'Internal error encountered.' modal during post-commissioning OOBE."""
+    pass
 
+
+class GHAAdjustYourMicSettingsPage(BasePage):
     """Class for managing microphone and audio recording toggles on the mic settings page."""
     MICROPHONE_CELL_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Microphone"`]/**/XCUIElementTypeSwitch'
     AUDIO_RECORDING_CELL_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Audio recording"`]/**/XCUIElementTypeSwitch'
 
-
+    INTERNAL_ERROR_PREDICATE = 'label == "Internal error encountered." OR name == "Internal error encountered."'
+    ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
     def _find_element(self, by: AppiumBy, locator_value: str) -> Optional[WebElement]:
         """Find an element using specified locator strategy with explicit wait."""
         try:
@@ -90,12 +95,33 @@ class GHAAdjustYourMicSettingsPage(BasePage):
             self._logger.warning("Audio recording switch element not found.")
         return True
 
+    def _check_for_internal_error(self, timeout: float = 4.0):
+        """Check if 'Internal error encountered.' alert pops up and dismiss it."""
+        try:
+            WebDriverWait(self.driver, timeout).until(
+                EC.presence_of_element_located((AppiumBy.IOS_PREDICATE, self.INTERNAL_ERROR_PREDICATE))
+            )
+            self._logger.warning("[MicSettings] Detected 'Internal error encountered.' alert dialog!")
+            try:
+                ok_btn = WebDriverWait(self.driver, 2.0).until(
+                    EC.element_to_be_clickable((AppiumBy.IOS_PREDICATE, self.ALERT_OK_PREDICATE))
+                )
+                ok_btn.click()
+                self._logger.info("[MicSettings] Clicked 'OK' on internal error alert.")
+            except Exception as dismiss_err:
+                self._logger.warning(f"[MicSettings] Failed to click OK on alert: {dismiss_err}")
+            raise OOBEInternalErrorException("GHA displayed 'Internal error encountered.' during Mic settings.")
+        except TimeoutException:
+            pass
+
     def _click_next_btn(self) -> bool:
         """Click the 'Next' button to proceed to the next step.
         Returns:
             bool: True if clicked successfully, False otherwise.
+        Raises:
+            OOBEInternalErrorException: If internal error dialog appears.
         """
-        time.sleep(3.0)
+        time.sleep(2.0)
         btn = self._get_next_btn()
         if not btn:
             self._logger.error("Cannot click 'Next': Button element not found.")
@@ -103,18 +129,15 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         try:
             self._logger.info("Clicking 'Next' button...")
             btn.click()
-            time.sleep(1.0)
-            return True
         except WebDriverException as e:
             self._logger.warning(f"Direct click failed: {e}. Trying tap fallback...")
             try:
                 self.driver.execute_script("mobile: tap", {"elementId": btn.id})
-                time.sleep(1.0)
-                return True
             except Exception as tap_err:
                 self._logger.error(f"Failed to click 'Next' button: {tap_err}")
                 return False
-
+        self._check_for_internal_error(timeout=4.0)
+        return True
     def enable_all_mic_settings_and_proceed(self) -> bool:
         """Convenient method to turn ON all mic settings toggles and click Next.
         Returns:

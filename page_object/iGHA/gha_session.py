@@ -1,11 +1,9 @@
 """Session Page Object managing iGHA lifecycle and aggregating all sub-page objects."""
-
 import time
 import tomllib
 from typing import Optional, Any
 from appium.webdriver.webdriver import WebDriver
 from selenium.common.exceptions import WebDriverException, StaleElementReferenceException
-
 from common import constants
 from common.base_page import BasePage
 from page_object.iGHA.gha_home_page import GHAHomePage
@@ -24,7 +22,10 @@ from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDeviceP
 from page_object.iGHA.gha_device_connected_page import GHADeviceConnectedPage
 from page_object.iGHA.gha_camera_activated_page import GHACameraActivatedPage
 from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShouldNowSeeLiveVideoPage
-from page_object.iGHA.gha_choose_whether_you_want_to_turn_on_video_history import GHAChooseWhetherYouWantToTurnOnVideoPage
+from page_object.iGHA.gha_choose_whether_you_want_to_turn_on_video_history import (
+    GHAChooseWhetherYouWantToTurnOnVideoPage,
+    OOBEInternalErrorException,
+)
 from page_object.iGHA.gha_adjust_your_mic_settings import GHAAdjustYourMicSettingsPage
 from page_object.iGHA.gha_stay_in_the_know_page import GHAStayInTheKnowPage
 from page_object.iGHA.gha_your_camera_device_is_ready_page import GHAYourCameraDeviceIsReadyPage
@@ -48,11 +49,11 @@ class GHASession:
 
     def __init__(self, driver: WebDriver) -> None:
         """Initialize GHASession with Appium driver and instantiate all iGHA page objects.
-
         Args:
             driver (WebDriver): The active Appium WebDriver instance.
         """
         self.driver = driver
+        self.timeout = getattr(constants, "DEFAULT_TIMEOUT_SECONDS", 15.0)
         self._logger = logging_utils.get_logger(__name__, "gha_session")
         page_classes = [
             GHAHomePage,
@@ -79,7 +80,6 @@ class GHASession:
             GHADeviceSettingPage,
             GHACameraLivePage
         ]
-
         for cls in page_classes:
             attr_name = cls.__name__.lower()
             setattr(self, attr_name, cls(driver))
@@ -154,6 +154,20 @@ class GHASession:
         self._logger.info("No 'Set up new devices?' bottom sheet detected. Continuing.")
         return False
 
+    def _emergency_recover_and_remove_device(self) -> None:
+        """Restarts GHA and removes the partially paired device to restore a clean uncommissioned state."""
+        self._logger.warning("[Emergency Teardown] Initiating GHA restart to reset navigation state...")
+        try:
+            self.stop_gha()
+            time.sleep(2.0)
+            self.start_gha()
+            time.sleep(5.0)
+            self._logger.info("[Emergency Teardown] Navigating to Settings to remove device...")
+            self.handle_remove_device()
+            self._logger.info("[Emergency Teardown] Device successfully removed during emergency cleanup.")
+        except Exception as cleanup_err:
+            self._logger.error(f"[Emergency Teardown] Failed to remove device during recovery: {cleanup_err}")
+
     def refresh_gha_devices(self, timeout: float = 5.0) -> None:
         """Refresh all devices in the Google Home App (iOS).
         Performs a pull-to-refresh on deviceTileGridCollectionView and waits
@@ -207,7 +221,6 @@ class GHASession:
         if self._is_gha_running():
             self._logger.info("GHA is already running in foreground.")
             return True
-
         self._logger.info("Starting Google Home App on iOS...")
         try:
             self.driver.activate_app(constants.GHA_BUNDLE_ID)
@@ -215,7 +228,6 @@ class GHASession:
         except WebDriverException as e:
             self._logger.error(f"Failed to activate GHA: {e}")
             return False
-
         start_time = time.time()
         while time.time() - start_time < timeout:
             if self._is_gha_running():
@@ -229,38 +241,42 @@ class GHASession:
         return False
 
     def handle_device_selection_steps(self) -> bool:
+        """Navigate to Add Device page and verify target device is listed."""
         GHAAddPage.navigate_to_setup_device_page(self)
-        GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
+        return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
 
-    def pair_device_with_pairing_code(self):
+    def pair_device_with_pairing_code(self) -> None:
+        """Proceed to enter pairing code screen and input manual pairing code."""
         GHAAddDevicePage.click_use_pairing_code_btn(self)
         GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=self.pairing_code)
 
-    def handle_setup_requirement_pages(self):
+    def handle_setup_requirement_pages(self) -> None:
+        """Handle privacy guidelines and product improvement consent screens."""
         GHAPrivacyGuidelinesPage.handle_privacy_guidelines_page_process(self)
         GHAHelpImproveCameraDevicePage.click_yes_i_m_in_btn(self)
 
     def handle_pairing_until_device_connected(self) -> bool:
         """Commission the Matter device through Apple sheets and GHA setup steps until connected."""
-        GHACommissioningPageObject(self.driver).complete_commissioning_and_pairing_flow(
-            device_name=self.device_name,room_name=getattr(self, "room_name", "Attic")
-        )
-        GHAChooseWhetherYouWantToTurnOnVideoPage.enable_video_history_and_proceed(self)
-        GHAAdjustYourMicSettingsPage.enable_all_mic_settings_and_proceed(self)
-        GHAStayInTheKnowPage.handle_stay_in_the_know_page_process(self)
-        GHAYourCameraDeviceIsReadyPage.click_done_btn(self)
+        device_name = getattr(self, "device_name", None)
+        room_name = getattr(self, "room_name", "Attic")
 
-    def handle_remove_device(self):
+        GHACommissioningPageObject(self.driver).complete_commissioning_and_pairing_flow(
+            device_name=device_name, room_name=room_name
+        )
+        try:
+            GHAChooseWhetherYouWantToTurnOnVideoPage.enable_video_history_and_proceed(self)
+            GHAAdjustYourMicSettingsPage.enable_all_mic_settings_and_proceed(self)
+            GHAStayInTheKnowPage.handle_stay_in_the_know_page_process(self)
+            GHAYourCameraDeviceIsReadyPage.click_done_btn(self)
+            return True
+        except OOBEInternalErrorException as e:
+            self._logger.error(f"[OOBE Failure] Intercepted internal error: {e}")
+            self._emergency_recover_and_remove_device()
+            raise AssertionError(f"Commissioning OOBE failed due to internal error: {e}") from e
+
+    def handle_remove_device(self) -> None:
+        """Navigate to Settings and completely remove/unpair the camera device."""
         GHATabPage.enter_home_settings_page(self)
         GHASettingsPage.open_device_settings(self, device_name=self.device_name)
         GHADeviceSettingPage.get_device_information(self)
         GHADeviceSettingPage.click_remove_device_btn(self)
-
-
-
-
-
-
-
-
-
