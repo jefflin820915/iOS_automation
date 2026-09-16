@@ -112,6 +112,7 @@ class GHADevicePage(BasePage):
                 else:
                     self._logger.info(f"Executing direct click / coordinate tap at ({center_x}, {center_y})...")
                     try:
+                        time.sleep(3)
                         target_element.click()
                     except Exception:
                         self.driver.execute_script("mobile: tap", {"x": center_x, "y": center_y})

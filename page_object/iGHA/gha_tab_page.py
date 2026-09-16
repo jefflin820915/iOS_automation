@@ -166,7 +166,7 @@ class GHATabPage(BasePage):
             account_icon = self._find_element(AppiumBy.ACCESSIBILITY_ID, constants.GHA_ACCOUNT_PARTICLE_BTN_ACCESSIBILITY_ID)
             if account_icon.is_displayed():
                 account_icon.click()
-                time.sleep(2.0)
+                time.sleep(5.0)
             home_settings_opts = self._find_element(AppiumBy.IOS_CLASS_CHAIN, constants.GHA_SETTING_PAGE_CLASS_CHAIN)
             if home_settings_opts.is_displayed():
                 home_settings_opts.click()
