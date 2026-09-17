@@ -144,14 +144,14 @@ def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
         on_wifi_page = False
         try:
             on_wifi_page = bool(
-                driver.find_elements(AppiumBy.XPATH, '//XCUIElementTypeNavigationBar[@name="Wi-Fi" or @name="無線區域網路"]')
+                driver.find_elements(AppiumBy.XPATH, '//XCUIElementTypeNavigationBar[@name="Wi-Fi"')
             )
         except Exception:
             pass
         if not on_wifi_page:
             wifi_cells = driver.find_elements(
                 AppiumBy.XPATH,
-                '//XCUIElementTypeCell[@name="Wi-Fi" or .//XCUIElementTypeStaticText[@name="Wi-Fi" or @name="無線區域網路"]]'
+                '//XCUIElementTypeCell[@name="Wi-Fi" or .//XCUIElementTypeStaticText[@name="Wi-Fi"]]'
             )
             if wifi_cells:
                 try:
