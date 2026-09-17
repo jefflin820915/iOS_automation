@@ -117,7 +117,7 @@ class GHASession:
         actions.w3c_actions.pointer_action.pointer_up()
         actions.perform()
 
-    def _dismiss_setup_new_devices_sheet(self, timeout: float = 5.0) -> bool:
+    def _dismiss_setup_new_devices_sheet(self, timeout: float = 10.0) -> bool:
         """Check for and dismiss the 'Set up new devices?' bottom sheet if it appears after launch.
         Args:
             timeout (float): Max time in seconds to poll for the bottom sheet (defaults to 5.0s).
