@@ -7,7 +7,7 @@ import subprocess
 import time
 import traceback
 from datetime import datetime
-from typing import Any, List, Optional, Tuple, Type
+from typing import Any, List, Optional, Tuple, Type, Union
 from appium import webdriver
 from appium.options.common import AppiumOptions
 from common import constants
@@ -20,6 +20,7 @@ from utils.environment_utils import log_all_version_information
 from utils.screen_recorder import ScreenRecorder
 from utils.gemini_reporter import GeminiReporter
 from utils import csv_report
+
 
 logger = logging_utils.get_logger(__name__, "runner")
 
@@ -42,11 +43,12 @@ def extract_failure_stage(exc: Exception) -> str:
 
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
+
     def __init__(
             self,
             app: Optional[str] = "igha",
-            device_name: Optional[str] = None,
-            pairing_code: Optional[str] = None,
+            device_name: Optional[Union[str, List[str]]] = None,
+            pairing_code: Optional[Union[str, List[str]]] = None,
             count: Optional[int] = None,
             room_name: Optional[str] = "Attic",
             gemini_api_key: Optional[str] = constants.GEMINI_API_KEY,
@@ -58,6 +60,24 @@ class MultiProjectTestRunner:
         self.pairing_code = pairing_code
         self.count = count
         self.room_name = room_name or "Attic"
+        if isinstance(device_name, list):
+            self.device_names: List[str] = [str(d).strip() for d in device_name if str(d).strip()]
+        elif isinstance(device_name, str) and device_name.strip():
+            if "," in device_name:
+                self.device_names = [d.strip() for d in device_name.split(",") if d.strip()]
+            else:
+                self.device_names = [device_name.strip()]
+        else:
+            self.device_names = []
+        if isinstance(pairing_code, list):
+            self.pairing_codes: List[str] = [str(c).strip() for c in pairing_code if str(c).strip()]
+        elif isinstance(pairing_code, str) and pairing_code.strip():
+            if "," in pairing_code:
+                self.pairing_codes = [c.strip() for c in pairing_code.split(",") if c.strip()]
+            else:
+                self.pairing_codes = [pairing_code.strip()]
+        else:
+            self.pairing_codes = []
         self.udid = constants.IOS_CAPABILITIES.get("appium:udid", "")
         self.driver: Optional[webdriver.Remote] = None
         self.syslog_collector: Optional[SyslogCollector] = None
@@ -79,16 +99,49 @@ class MultiProjectTestRunner:
         self.device_ip: str = "UNKNOWN"
         self.env_info_collected: bool = False
 
+    def get_iteration_targets(self, iteration: int) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve target device and its corresponding pairing code for the given iteration.
+        Guarantees strict 1-to-1 mapping between device_names[idx] and pairing_codes[idx].
+        """
+        if not self.device_names:
+            target_device = self.device_name if isinstance(self.device_name, str) else None
+            target_code = self.pairing_code if isinstance(self.pairing_code, str) else None
+            return target_device, target_code
+        device_idx = (iteration - 1) % len(self.device_names)
+        target_device = self.device_names[device_idx]
+        if not self.pairing_codes:
+            target_code = self.pairing_code if isinstance(self.pairing_code, str) else None
+        elif device_idx < len(self.pairing_codes):
+            target_code = self.pairing_codes[device_idx]
+        else:
+            target_code = self.pairing_codes[device_idx % len(self.pairing_codes)]
+        return target_device, target_code
+
     def setup(self) -> None:
         """Initialize Appium session and configure implicit wait."""
         mode_str = f"{self.count} times" if self.count else "INFINITE LOOP (Press Ctrl+C to stop)"
         logger.info("=" * 65)
         logger.info(f"       STARTING TEST SESSION FOR APP: {self.project_name}        ")
         logger.info(f"       Execution Mode     : {mode_str}")
-        if self.device_name:
+        if self.device_names:
+            logger.info(f"       Target Devices     : {', '.join(self.device_names)}")
+        elif self.device_name:
             logger.info(f"       Target Device Name : {self.device_name}")
-        if self.pairing_code:
+        if self.pairing_codes:
+            logger.info(f"       Pairing Codes      : {', '.join(self.pairing_codes)}")
+        elif self.pairing_code:
             logger.info(f"       Pairing Code       : {self.pairing_code}")
+        if self.device_names and self.pairing_codes:
+            logger.info("-" * 65)
+            logger.info("       Device <===> Pairing Code Mapping:")
+            for idx, d_name in enumerate(self.device_names):
+                p_code = (
+                    self.pairing_codes[idx]
+                    if idx < len(self.pairing_codes)
+                    else self.pairing_codes[idx % len(self.pairing_codes)]
+                )
+                logger.info(f"         [{idx + 1}] '{d_name}'  <===>  '{p_code}'")
+            logger.info("-" * 65)
         if self.room_name:
             logger.info(f"       Assigned Room Name : {self.room_name}")
         logger.info("=" * 65)
@@ -136,8 +189,9 @@ class MultiProjectTestRunner:
         else:
             session_instance = GHASession(self.driver)
             test_classes = [TestGHAHome]
-        session_instance.device_name = self.device_name
-        session_instance.pairing_code = self.pairing_code
+        initial_device, initial_code = self.get_iteration_targets(1)
+        session_instance.device_name = initial_device
+        session_instance.pairing_code = initial_code
         session_instance.room_name = self.room_name
         return session_instance, test_classes
 
@@ -155,15 +209,20 @@ class MultiProjectTestRunner:
                 iteration += 1
                 if self.count is not None and iteration > self.count:
                     break
+                current_device, current_pairing_code = self.get_iteration_targets(iteration)
+                session_instance.device_name = current_device
+                session_instance.pairing_code = current_pairing_code
                 iter_label = f"{iteration}/{self.count}" if self.count else f"{iteration} (Infinite)"
                 logger.info("\n" + "=" * 65)
                 logger.info(f"               STARTING ITERATION #{iter_label}")
+                logger.info(f"               TARGET DEVICE : {current_device}")
+                logger.info(f"               PAIRING CODE  : {current_pairing_code}")
                 logger.info("=" * 65)
                 for test_cls in test_classes:
                     test_instance = test_cls(
                         session=session_instance,
-                        device_name=self.device_name,
-                        pairing_code=self.pairing_code,
+                        device_name=current_device,
+                        pairing_code=current_pairing_code,
                         room_name=self.room_name
                     )
                     class_name = test_cls.__name__
@@ -183,7 +242,10 @@ class MultiProjectTestRunner:
                         os.makedirs(case_main_log_dir, exist_ok=True)
                         os.makedirs(case_additional_log_dir, exist_ok=True)
                         logging_utils.set_current_test_dirs(case_main_log_dir, case_additional_log_dir)
-                        logger.info(f"\n>>> [RUNNING] [Iter #{iteration}] {class_name}.{test_name}")
+                        logger.info(
+                            f"\n>>> [RUNNING] [Iter #{iteration}] {class_name}.{test_name} "
+                            f"(Device: '{current_device}', Code: '{current_pairing_code}')"
+                        )
                         logger.info(f">>> [TARGET DIR] {case_dir}")
                         current_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                         case_syslog_path = None
@@ -198,6 +260,11 @@ class MultiProjectTestRunner:
                                 logger.info(f"[REC] Screen recording started for: {class_name}.{test_name}")
                             except Exception as rec_err:
                                 logger.warning(f"Failed to start screen recording: {rec_err}")
+                        # Reset technical device metadata for current iteration
+                        self.device_id = "UNKNOWN"
+                        self.serial_number = "UNKNOWN"
+                        self.software_version = "UNKNOWN"
+                        self.device_ip = "UNKNOWN"
                         start_time = time.time()
                         start_dt = datetime.now()
                         test_status = "PASS"
@@ -305,7 +372,7 @@ class MultiProjectTestRunner:
                             try:
                                 csv_report.append_test_result_to_csv(
                                     test_name=f"{class_name}.{test_name}",
-                                    device_name=self.device_name or "iPhone 11 Pro",
+                                    device_name=current_device or "iPhone 11 Pro",
                                     gha_version=self.gha_version,
                                     status=test_status,
                                     start_time=start_dt,

@@ -1,5 +1,0 @@
-2026-09-14 15:56:26 | INFO    | page_object.iGHA.gha_session.gha_session | Locating and clicking 'Device information'...
-2026-09-14 15:56:28 | INFO    | page_object.iGHA.gha_session.gha_session | Entered 'Device information' page. Extracting technical info...
-2026-09-14 15:56:30 | INFO    | page_object.iGHA.gha_session.gha_session | Raw Technical Info Text: , Device ID: 578ECAE17B050AB8 Serial no.: AV423357A1556 Software version: capriicamera-user 1 OPENMASTER 6.3.2600.845616249 prod-keys stable-channel Updated: Unknown IP: 10.30.94.199 Last contact: Just Now
-2026-09-14 15:56:30 | INFO    | page_object.iGHA.gha_session.gha_session | Extracted Device Information: {'device_id': '578ECAE17B050AB8', 'serial_number': 'AV423357A1556', 'software_version': 'capriicamera-user 1 OPENMASTER 6.3.2600.845616249 prod-keys stable-channel', 'device_ip': '10.30.94.199'}
-2026-09-14 15:56:30 | INFO    | page_object.iGHA.gha_session.gha_session | Clicking '< Back' button to return to Device Settings...

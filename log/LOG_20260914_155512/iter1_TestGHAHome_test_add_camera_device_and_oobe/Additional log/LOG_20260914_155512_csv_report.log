@@ -1,3 +1,0 @@
-2026-09-14 15:56:18 | INFO    | utils.csv_report.csv_report | [CSV] Appended telemetry row for 'TestGHAHome.test_add_camera_device_and_oobe' to /Users/enlin/iOS_Automation/log/test_results.csv
-2026-09-14 15:56:18 | INFO    | utils.csv_report.csv_report | [WEBHOOK] Uploading telemetry for 'TestGHAHome.test_add_camera_device_and_oobe' to Google Sheet...
-2026-09-14 15:56:20 | INFO    | utils.csv_report.csv_report | [GOOGLE SHEET SYNC] Webhook upload response: {"status":"success"}

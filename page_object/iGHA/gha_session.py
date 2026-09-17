@@ -274,8 +274,17 @@ class GHASession:
             self._emergency_recover_and_remove_device()
             raise AssertionError(f"Commissioning OOBE failed due to internal error: {e}") from e
 
+    def handle_verify_camera_live_stream_and_remove(self):
+        try:
+            GHADevicePage.is_device_exist_device_page(self, device_name=self.device_name)
+            GHADevicePage.enter_device_page(self, device_name=self.device_name)
+            GHACameraLivePage.verify_camera_live_stream(self)
+        finally:
+            self.handle_remove_device()
+
     def handle_remove_device(self) -> None:
         """Navigate to Settings and completely remove/unpair the camera device."""
+        self._logger.info("Start test case: remove device")
         GHATabPage.enter_home_settings_page(self)
         GHASettingsPage.open_device_settings(self, device_name=self.device_name)
         GHADeviceSettingPage.get_device_information(self)

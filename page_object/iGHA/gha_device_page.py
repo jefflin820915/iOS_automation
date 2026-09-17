@@ -1,17 +1,17 @@
 """Page object method for verifying device existence on the Devices page in iOS."""
 import time
-from typing import List
+from typing import List, Optional
 from appium.webdriver.common.appiumby import AppiumBy
 from appium.webdriver.webdriver import WebDriver
 from appium.webdriver.webelement import WebElement
-from selenium.common.exceptions import WebDriverException
+from selenium.common.exceptions import WebDriverException, StaleElementReferenceException
 from common.base_page import BasePage, PageNotPresentException
 from common import constants
 from utils import logging_utils
 
+
 class GHADevicePage(BasePage):
     """Class for handling Google Account Picker dialog on iOS."""
-
 
     def _get_device_tab_device_name_elements(self) -> List[WebElement]:
         """Retrieve all visible device name WebElements on the Devices page."""
@@ -51,7 +51,7 @@ class GHADevicePage(BasePage):
                     return True
             if not new_devices_found and scroll_idx > 0:
                 self._logger.info("Reached the end of the device list. No more new devices found.")
-                return False
+                raise AssertionError("Reached the end of the device list. No more new devices found.")
             self._logger.info(f"Device '{device_name}' not in current view. Scrolling down ({scroll_idx + 1}/{max_scrolls})...")
             try:
                 self.driver.execute_script("mobile: scroll", {"direction": "down"})
@@ -63,39 +63,83 @@ class GHADevicePage(BasePage):
                     self._logger.error(f"Swipe fallback also failed: {swipe_err}")
                     break
         self._logger.info(f"Could not find device '{device_name}' after {max_scrolls} scrolls.")
+        raise AssertionError(f"Could not find device '{device_name}' after {max_scrolls} scrolls.")
+
+    def _is_in_device_or_camera_page(self) -> bool:
+        """Check if navigation into device details or camera live page has completed."""
+        nav_locators = [
+            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "closeButton" AND visible == 1`]'),
+            (AppiumBy.ACCESSIBILITY_ID, "closeButton"),
+            (AppiumBy.ACCESSIBILITY_ID, "close"),
+            (AppiumBy.ACCESSIBILITY_ID, "Close"),
+            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "CamerazillaPlayerView" AND visible == 1`]'),
+            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeOther[`name == "CamerazillaPlayerView" AND visible == 1`]'),
+            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "cameraStatusBadgeView" AND visible == 1`]'),
+            (AppiumBy.IOS_PREDICATE, 'label == "Back" OR name == "Back" OR name == "chevron.backward"'),
+            (AppiumBy.ACCESSIBILITY_ID, "Back"),
+            (AppiumBy.ACCESSIBILITY_ID, "chevron.backward"),
+        ]
+        default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+        try:
+            self.driver.implicitly_wait(0)
+            for by, loc in nav_locators:
+                matches = self.driver.find_elements(by, loc)
+                for elem in matches:
+                    if elem.is_displayed():
+                        return True
+        except Exception:
+            pass
+        finally:
+            self.driver.implicitly_wait(default_wait)
         return False
 
     def enter_device_page(self, device_name: str, duration: float = 2.5, max_retries: int = 2) -> bool:
         """Robustly tap or long-press on a device tile to enter its detail/control page on iOS.
-
         Args:
             device_name (str): The visible name of the device to interact with.
             duration (float): Duration in seconds if long-press is required. Defaults to 2.5s.
             max_retries (int): Retry count if initial click didn't navigate. Defaults to 2.
-
         Returns:
             bool: True if navigated to the device page successfully, False otherwise.
         """
         self._logger.info(f"Attempting to enter device page for: '{device_name}'...")
-        target_element = None
         card_xpath = f"//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@label='{device_name}']]"
         text_xpath = f"//XCUIElementTypeStaticText[@name='deviceTileTitleTextView' and @label='{device_name}']"
-        for xpath in [card_xpath, text_xpath]:
-            elements = self.driver.find_elements(by=AppiumBy.XPATH, value=xpath)
-            if elements:
-                target_element = elements[0]
-                break
-        if not target_element:
-            self._logger.error(f"Cannot enter device page: '{device_name}' element not found on current screen.")
-            return False
-        for attempt in range(1, max_retries + 1):
-            self._logger.info(f"[Attempt {attempt}/{max_retries}] Triggering interaction on '{device_name}'...")
+        pred_loc = f'label CONTAINS "{device_name}" OR name CONTAINS "{device_name}"'
 
+        def find_target_tile():
+            """Find fresh target element on current screen to avoid stale elements."""
+            try:
+                for xpath in [card_xpath, text_xpath]:
+                    elems = self.driver.find_elements(by=AppiumBy.XPATH, value=xpath)
+                    if elems and elems[0].is_displayed():
+                        return elems[0]
+                matches = self.driver.find_elements(by=AppiumBy.IOS_PREDICATE, value=pred_loc)
+                if matches and matches[0].is_displayed():
+                    return matches[0]
+            except Exception:
+                pass
+            return None
+        if self._is_in_device_or_camera_page():
+            self._logger.info(f"Already detected in device/camera page for '{device_name}'.")
+            return True
+        for attempt in range(1, max_retries + 1):
+            if self._is_in_device_or_camera_page():
+                self._logger.info(f"Successfully entered device page for '{device_name}' (confirmed on attempt {attempt})!")
+                return True
+            self._logger.info(f"[Attempt {attempt}/{max_retries}] Triggering interaction on '{device_name}'...")
+            target_element = find_target_tile()
+            if not target_element:
+                time.sleep(1.5)
+                if self._is_in_device_or_camera_page():
+                    self._logger.info(f"Device tile disappeared because device page loaded! (Attempt {attempt})")
+                    return True
+                self._logger.warning(f"Device tile for '{device_name}' not found on attempt {attempt}.")
+                continue
             try:
                 rect = target_element.rect
                 center_x = int(rect['x'] + rect['width'] / 2)
                 center_y = int(rect['y'] + rect['height'] / 2)
-
                 if duration >= 2.0 or attempt > 1:
                     self._logger.info(f"Executing mobile: touchAndHold at ({center_x}, {center_y}) for {duration}s...")
                     try:
@@ -112,26 +156,29 @@ class GHADevicePage(BasePage):
                 else:
                     self._logger.info(f"Executing direct click / coordinate tap at ({center_x}, {center_y})...")
                     try:
-                        time.sleep(3)
                         target_element.click()
                     except Exception:
                         self.driver.execute_script("mobile: tap", {"x": center_x, "y": center_y})
+            except (StaleElementReferenceException, WebDriverException) as interact_err:
+                self._logger.warning(f"Interaction exception: {interact_err}. Verifying if navigation occurred...")
                 time.sleep(2.0)
-                back_buttons = self.driver.find_elements(
-                    by=AppiumBy.XPATH,
-                    value='//XCUIElementTypeButton[@name="Back" or @name="chevron.backward" or contains(@label, "返回")]'
-                )
-                if back_buttons and back_buttons[0].is_displayed():
-                    self._logger.info(f"Successfully entered device page for '{device_name}'!")
+                if self._is_in_device_or_camera_page():
+                    self._logger.info(f"Navigation confirmed after interaction exception! (Attempt {attempt})")
                     return True
-                self._logger.warning(f"Did not detect navigation after attempt {attempt}. Retrying with long press...")
-            except WebDriverException as e:
-                self._logger.error(f"Error interacting with '{device_name}' on attempt {attempt}: {e}")
-        back_buttons = self.driver.find_elements(
-            by=AppiumBy.XPATH,
-            value='//XCUIElementTypeButton[@name="Back" or @name="chevron.backward" or contains(@label, "返回")]'
-        )
-        if back_buttons:
+                continue
+            poll_start = time.time()
+            navigated = False
+            while time.time() - poll_start < 5.0:
+                if self._is_in_device_or_camera_page():
+                    navigated = True
+                    break
+                time.sleep(0.5)
+            if navigated:
+                self._logger.info(f"Successfully entered device page for '{device_name}' on attempt {attempt}!")
+                return True
+            self._logger.warning(f"Did not detect navigation after attempt {attempt}. Retrying...")
+        if self._is_in_device_or_camera_page():
+            self._logger.info(f"Final check passed: inside device page for '{device_name}'.")
             return True
         self._logger.error(f"Failed to enter device page for '{device_name}' after {max_retries} attempts.")
-        return False
+        raise AssertionError(f"Failed to enter device page for '{device_name}' after {max_retries} attempts.")
