@@ -16,7 +16,7 @@ from page_object.iGHA.gha_session import GHASession
 from page_object.iGHP.ghp_session import GHPSession
 from testcase.iGHA.test_home import TestGHAHome
 from utils import logging_utils
-from utils.environment_utils import log_all_version_information
+from utils.environment_utils import log_all_version_information, get_wifi_information
 from utils.screen_recorder import ScreenRecorder
 from utils.gemini_reporter import GeminiReporter
 from utils import csv_report
@@ -43,7 +43,6 @@ def extract_failure_stage(exc: Exception) -> str:
 
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
-
     def __init__(
             self,
             app: Optional[str] = "igha",
@@ -260,7 +259,6 @@ class MultiProjectTestRunner:
                                 logger.info(f"[REC] Screen recording started for: {class_name}.{test_name}")
                             except Exception as rec_err:
                                 logger.warning(f"Failed to start screen recording: {rec_err}")
-                        # Reset technical device metadata for current iteration
                         self.device_id = "UNKNOWN"
                         self.serial_number = "UNKNOWN"
                         self.software_version = "UNKNOWN"
@@ -318,7 +316,7 @@ class MultiProjectTestRunner:
                                 self.syslog_collector = None
                             if not self.env_info_collected and self.driver:
                                 try:
-                                    logger.info("[ENV INFO] First testcase completed, collecting environment info...")
+                                    logger.info("[ENV INFO] First testcase completed, collecting full environment info...")
                                     env_info = log_all_version_information(self.driver)
                                     if isinstance(env_info, dict):
                                         if "gha_version" in env_info:
@@ -333,12 +331,27 @@ class MultiProjectTestRunner:
                                             self.subnet_mask = str(w_info.get("subnet_mask", self.subnet_mask))
                                     self.env_info_collected = True
                                     logger.info(
-                                        f"[ENV INFO] Cached: GHA {self.gha_version} | iOS {self.ios_version} | "
+                                        f"[ENV INFO] Initialized: GHA {self.gha_version} | iOS {self.ios_version} | "
                                         f"SSID {self.wifi_ssid} | Phone IP {self.phone_ip} | Gateway {self.router_gateway}"
                                     )
                                 except Exception as env_err:
                                     logger.warning(f"Failed to collect version information: {env_err}")
                                     self.env_info_collected = True
+                            elif self.driver:
+                                try:
+                                    logger.info(f"[ENV INFO] [Iter #{iteration}] Fetching latest Wi-Fi details for current run...")
+                                    w_info = get_wifi_information(self.driver)
+                                    if isinstance(w_info, dict):
+                                        self.wifi_ssid = str(w_info.get("ssid", self.wifi_ssid))
+                                        self.phone_ip = str(w_info.get("ip_address", self.phone_ip))
+                                        self.router_gateway = str(w_info.get("router_gateway", self.router_gateway))
+                                        self.subnet_mask = str(w_info.get("subnet_mask", self.subnet_mask))
+                                    logger.info(
+                                        f"[ENV INFO] [Iter #{iteration}] Updated Wi-Fi: SSID='{self.wifi_ssid}' | "
+                                        f"Phone IP='{self.phone_ip}' | Gateway='{self.router_gateway}'"
+                                    )
+                                except Exception as wifi_err:
+                                    logger.warning(f"Failed to refresh Wi-Fi info for iteration #{iteration}: {wifi_err}")
                             dev_tech = (
                                     getattr(self.driver, "device_tech_info", None)
                                     or getattr(test_instance, "device_tech_info", None)
