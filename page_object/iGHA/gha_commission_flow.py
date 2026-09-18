@@ -188,7 +188,6 @@ class GHACommissioningPageObject(BasePage):
                     break
             if not found_btn:
                 break
-        # Handle "Exit setup?" confirmation alert if presented
         try:
             confirm_btns = self.driver.find_elements(
                 AppiumBy.XPATH,
@@ -226,94 +225,134 @@ class GHACommissioningPageObject(BasePage):
         except Exception as e:
             self._logger.warning(f"[Recovery] Could not tap Devices tab: {e}")
 
+    def _locate_plug_button_by_name(self, target_name: str) -> Optional[WebElement]:
+        """Dynamically re-locate a specific plug button to prevent StaleElementReferenceException."""
+        try:
+            device_tiles = self.driver.find_elements(AppiumBy.NAME, "deviceTile")
+            for tile in device_tiles:
+                lbl = (tile.get_attribute("label") or "").lower()
+                name_attr = (tile.get_attribute("name") or "").lower()
+                title_val = ""
+                try:
+                    title_elem = tile.find_elements(AppiumBy.NAME, "deviceTileTitleTextView")
+                    if title_elem:
+                        title_val = (title_elem[0].get_attribute("value") or "").lower()
+                except Exception:
+                    pass
+                target_lower = target_name.lower()
+                if target_lower in lbl or target_lower in name_attr or (title_val and target_lower in title_val):
+                    return tile
+        except Exception:
+            pass
+        try:
+            cells = self.driver.find_elements(AppiumBy.XPATH, '//XCUIElementTypeCell[contains(@name, "deviceTileCell")]')
+            for cell in cells:
+                cell_lbl = (cell.get_attribute("label") or "").lower()
+                if target_name.lower() in cell_lbl:
+                    inner_btns = cell.find_elements(AppiumBy.NAME, "deviceTile")
+                    return inner_btns[0] if inner_btns else cell
+        except Exception:
+            pass
+        return None
+
     def power_cycle_smart_plug(
             self,
             keywords: Optional[List[str]] = None,
             off_wait: float = 5.0,
             on_wait: float = 8.0
     ) -> bool:
-        """Locates a device tile containing 'plug' or 'outlet' in its name/label
-        and cycles power: OFF -> wait -> ON -> wait.
+        """Locates all device tiles containing 'plug' or 'outlet' in their name/label,
+        and sequentially cycles power for EACH device: OFF -> wait -> ON -> wait.
         """
         if keywords is None:
             keywords = ["plug", "outlet", "插頭"]
-        self._logger.info(f"[PowerCycle] Searching for smart plug/outlet device with keywords: {keywords}...")
-
+        self._logger.info(f"[PowerCycle] Scanning for all smart plug/outlet devices matching keywords: {keywords}...")
         def is_plug_match(elem) -> bool:
             lbl = (elem.get_attribute("label") or "").lower()
             val = (elem.get_attribute("value") or "").lower()
             name = (elem.get_attribute("name") or "").lower()
             return any(kw.lower() in lbl or kw.lower() in val or kw.lower() in name for kw in keywords)
-        target_btn = None
-        target_label = ""
+        discovered_plugs: List[str] = []
         for attempt in range(2):
             try:
                 device_tiles = self.driver.find_elements(AppiumBy.NAME, "deviceTile")
                 for tile in device_tiles:
                     if is_plug_match(tile):
-                        target_btn = tile
-                        target_label = tile.get_attribute("label") or tile.get_attribute("name") or "Smart Plug"
-                        break
+                        title_val = ""
+                        try:
+                            t_elem = tile.find_elements(AppiumBy.NAME, "deviceTileTitleTextView")
+                            if t_elem:
+                                title_val = (t_elem[0].get_attribute("value") or "").strip()
+                        except Exception:
+                            pass
+                        ident = title_val or (tile.get_attribute("label") or "").split(",")[0].strip() or tile.get_attribute("name")
+                        if ident and ident not in discovered_plugs:
+                            discovered_plugs.append(ident)
             except Exception as e:
                 self._logger.warning(f"[PowerCycle] Error scanning deviceTile buttons: {e}")
-            if target_btn:
-                break
             try:
                 cells = self.driver.find_elements(AppiumBy.XPATH, '//XCUIElementTypeCell[contains(@name, "deviceTileCell")]')
                 for cell in cells:
                     if is_plug_match(cell):
-                        inner_btns = cell.find_elements(AppiumBy.NAME, "deviceTile")
-                        target_btn = inner_btns[0] if inner_btns else cell
-                        target_label = cell.get_attribute("label") or "Smart Plug"
-                        break
+                        ident = (cell.get_attribute("label") or "").split(",")[0].strip()
+                        if ident and ident not in discovered_plugs:
+                            discovered_plugs.append(ident)
             except Exception as e:
                 self._logger.warning(f"[PowerCycle] Error scanning cells: {e}")
-            if target_btn:
+            if discovered_plugs:
                 break
             if attempt == 0:
-                self._logger.info("[PowerCycle] Plug not found on top fold, scrolling down...")
+                self._logger.info("[PowerCycle] No plugs found on top fold, scrolling down...")
                 try:
                     self.driver.execute_script("mobile: scroll", {"direction": "down"})
                     time.sleep(1.5)
                 except Exception:
                     pass
-        if not target_btn:
+        if not discovered_plugs:
             self._logger.error(f"[PowerCycle] FAILED to find any smart plug/outlet matching keywords: {keywords}")
             return False
-        self._logger.info(f"[PowerCycle] Found target plug device: '{target_label}'")
-        current_val = (target_btn.get_attribute("value") or "").strip().lower()
-        is_on = current_val in ["on", "1", "true"]
-        self._logger.info(f"[PowerCycle] Initial power state of '{target_label}': value='{current_val}' (is_on={is_on})")
-        try:
-            if is_on or current_val not in ["off", "0", "false"]:
-                self._logger.info(f"[PowerCycle] Tapping to turn OFF '{target_label}'...")
-                target_btn.click()
-                self._logger.info(f"[PowerCycle] Plug turned OFF. Waiting {off_wait}s to fully discharge camera...")
-                time.sleep(off_wait)
-                self._logger.info("[PowerCycle] Re-locating plug button to turn back ON...")
-                turn_on_btn = None
-                for tile in self.driver.find_elements(AppiumBy.NAME, "deviceTile"):
-                    if is_plug_match(tile):
-                        turn_on_btn = tile
-                        break
-                if turn_on_btn:
-                    self._logger.info(f"[PowerCycle] Tapping to turn ON '{target_label}'...")
-                    turn_on_btn.click()
+        self._logger.info(
+            f"[PowerCycle] Discovered {len(discovered_plugs)} target plug/outlet device(s): {discovered_plugs}. "
+            f"Power-cycling each sequentially..."
+        )
+        all_success = True
+        for idx, plug_name in enumerate(discovered_plugs, start=1):
+            self._logger.info(f"[PowerCycle] [{idx}/{len(discovered_plugs)}] Processing device: '{plug_name}'...")
+            btn = self._locate_plug_button_by_name(plug_name)
+            if not btn:
+                self._logger.warning(f"[PowerCycle] [{idx}/{len(discovered_plugs)}] Could not re-locate button for '{plug_name}'. Skipping.")
+                all_success = False
+                continue
+            current_val = (btn.get_attribute("value") or "").strip().lower()
+            is_on = current_val in ["on", "1", "true"]
+            self._logger.info(f"[PowerCycle] Initial power state of '{plug_name}': value='{current_val}' (is_on={is_on})")
+            try:
+                if is_on or current_val not in ["off", "0", "false"]:
+                    self._logger.info(f"[PowerCycle] Tapping to turn OFF '{plug_name}'...")
+                    btn.click()
+                    self._logger.info(f"[PowerCycle] '{plug_name}' turned OFF. Waiting {off_wait}s to discharge...")
+                    time.sleep(off_wait)
+                    self._logger.info(f"[PowerCycle] Re-locating '{plug_name}' to turn back ON...")
+                    btn_on = self._locate_plug_button_by_name(plug_name)
+                    if btn_on:
+                        self._logger.info(f"[PowerCycle] Tapping to turn ON '{plug_name}'...")
+                        btn_on.click()
+                    else:
+                        self._logger.warning(f"[PowerCycle] Re-locating '{plug_name}' failed, trying fallback click...")
+                        btn.click()
+                    self._logger.info(f"[PowerCycle] '{plug_name}' turned ON! Waiting {on_wait}s for boot...")
+                    time.sleep(on_wait)
                 else:
-                    self._logger.warning("[PowerCycle] Re-locating by name failed, trying fallback click...")
-                    target_btn.click()
-                self._logger.info(f"[PowerCycle] Plug turned ON! Waiting {on_wait}s for camera boot & Matter advertising...")
-                time.sleep(on_wait)
-            else:
-                self._logger.info(f"[PowerCycle] Plug is currently OFF. Tapping to turn ON...")
-                target_btn.click()
-                self._logger.info(f"[PowerCycle] Plug turned ON! Waiting {on_wait}s for camera boot...")
-                time.sleep(on_wait)
-            self._logger.info(f"[PowerCycle] Successfully power-cycled smart plug '{target_label}'.")
-            return True
-        except Exception as e:
-            self._logger.error(f"[PowerCycle] Error during power-cycling plug: {e}")
-            return False
+                    self._logger.info(f"[PowerCycle] '{plug_name}' is currently OFF. Tapping to turn ON...")
+                    btn.click()
+                    self._logger.info(f"[PowerCycle] '{plug_name}' turned ON! Waiting {on_wait}s for boot...")
+                    time.sleep(on_wait)
+                self._logger.info(f"[PowerCycle] [{idx}/{len(discovered_plugs)}] Successfully power-cycled '{plug_name}'.")
+            except Exception as plug_err:
+                self._logger.error(f"[PowerCycle] Failed power-cycling '{plug_name}': {plug_err}")
+                all_success = False
+        self._logger.info(f"[PowerCycle] Finished sequential power cycle for all {len(discovered_plugs)} devices.")
+        return all_success
 
     def handle_apple_commissioning_sheet(self, device_name: str) -> bool:
         """Observe and act on foreground Apple Matter ProxCard sheet.
@@ -341,7 +380,6 @@ class GHACommissioningPageObject(BasePage):
                 ok_id = getattr(constants, "GHA_DONE_BTN_ACCESSIBILITY_ID", "OK")
                 self._click_apple_sheet_button(ok_id) or self._click_apple_sheet_button("OK")
                 time.sleep(1.5)
-                # Dismiss and execute power cycle immediately
                 self._dismiss_commissioning_and_go_to_devices()
                 cycle_ok = self.power_cycle_smart_plug()
                 raise AssertionError(
