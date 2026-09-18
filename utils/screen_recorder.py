@@ -1,3 +1,4 @@
+"""Screen Recorder for iOS devices using Appium WebDriver and saves to Additional log."""
 import base64
 from datetime import datetime
 import os
@@ -11,8 +12,7 @@ class ScreenRecorder:
     def __init__(self, output_dir: str = "Additional log"):
         """Initializes the ScreenRecorder.
         Args:
-            output_dir: Target directory where video files will be saved. Defaults
-              to "Additional log".
+            output_dir: Target directory where video files will be saved. Defaults to "Additional log".
         """
         self.output_dir = output_dir
         self._is_recording = False
@@ -22,28 +22,50 @@ class ScreenRecorder:
             driver: WebDriver,
             time_limit: int = 1800,
             video_quality: str = "medium",
+            video_fps: int = 10,
+            video_scale: str = "720:-2",
     ) -> bool:
         """Starts screen recording on the connected iOS device.
+        Uses downscaled resolution (720p) and 10 FPS to prevent WDA memory overflow
+        during long-running tests (5~30 minutes).
         Args:
             driver: Active Appium WebDriver instance.
             time_limit: Maximum recording time in seconds (default 1800s / 30 mins).
-            video_quality: Video quality ('low', 'medium', 'high').
+            video_quality: Video quality ('low', 'medium', 'high'). Defaults to 'medium'.
+            video_fps: Frames per second (default 10 fps, optimal for mobile UI automation).
+            video_scale: Scaling parameter for ffmpeg (default '720:-2' preserves aspect ratio).
         Returns:
             True if recording started successfully, False otherwise.
         """
         if not driver:
-            print(
-                "[ScreenRecorder] Driver is not initialized. Cannot start recording."
-            )
+            print("[ScreenRecorder] Driver is not initialized. Cannot start recording.")
             return False
+        recording_options = {
+            "timeLimit": time_limit,
+            "time_limit": time_limit,
+            "videoQuality": video_quality,
+            "video_quality": video_quality,
+            "videoFps": video_fps,
+            "video_fps": video_fps,
+            "videoScale": video_scale,
+            "video_scale": video_scale,
+            "forceRestart": True,
+        }
         try:
-            # Start iOS screen recording via Appium XCUITest API
-            driver.start_recording_screen(
-                video_quality=video_quality,
-                time_limit=time_limit,
-            )
+            try:
+                driver.execute_script("mobile: startScreenRecording", recording_options)
+                self._is_recording = True
+                print(
+                    f"[ScreenRecorder] Screen recording started successfully "
+                    f"(timeLimit={time_limit}s, scale={video_scale}, fps={video_fps})."
+                )
+                return True
+            except Exception as mobile_err:
+                print(f"[ScreenRecorder] 'mobile: startScreenRecording' fallback: {mobile_err}")
+            # 2. Fallback to standard driver API
+            driver.start_recording_screen(**recording_options)
             self._is_recording = True
-            print("[ScreenRecorder] Screen recording started successfully.")
+            print("[ScreenRecorder] Screen recording started successfully via driver API.")
             return True
         except Exception as e:
             print(f"[ScreenRecorder] Failed to start screen recording: {e}")
@@ -65,7 +87,13 @@ class ScreenRecorder:
             return None
         try:
             print("[ScreenRecorder] Stopping screen recording...")
-            raw_base64_video = driver.stop_recording_screen()
+            raw_base64_video = None
+            try:
+                raw_base64_video = driver.execute_script("mobile: stopScreenRecording")
+            except Exception as mobile_stop_err:
+                print(f"[ScreenRecorder] 'mobile: stopScreenRecording' fallback: {mobile_stop_err}")
+            if not raw_base64_video:
+                raw_base64_video = driver.stop_recording_screen()
             self._is_recording = False
             if not raw_base64_video:
                 print("[ScreenRecorder] No video data received from Appium.")
@@ -79,7 +107,8 @@ class ScreenRecorder:
             video_bytes = base64.b64decode(raw_base64_video)
             with open(video_path, "wb") as f:
                 f.write(video_bytes)
-            print(f"[ScreenRecorder] Screen recording saved to: {video_path}")
+            file_size_mb = len(video_bytes) / (1024 * 1024)
+            print(f"[ScreenRecorder] Screen recording saved to: {video_path} (Size: {file_size_mb:.2f} MB)")
             return video_path
         except Exception as e:
             print(f"[ScreenRecorder] Failed to stop/save screen recording: {e}")
