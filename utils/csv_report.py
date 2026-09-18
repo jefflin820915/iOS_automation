@@ -4,11 +4,26 @@ import csv
 import json
 import urllib.request
 from datetime import datetime
-
+from pathlib import Path
 from common import constants
 from utils import logging_utils
+
+
 logger = logging_utils.get_logger(__name__, "csv_report")
-CSV_FILE_PATH = "/Users/enlin/iOS_Automation/log/test_results.csv"
+
+def _get_project_root() -> Path:
+    """Traverse upwards to locate the project root directory containing main.py or core/."""
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "main.py").exists() or (parent / "core").exists():
+            return parent
+    return current.parents[2] if len(current.parents) > 2 else current.parent
+
+PROJECT_ROOT = _get_project_root()
+LOG_DIR = PROJECT_ROOT / "log"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+CSV_FILE_PATH = str(LOG_DIR / "test_results.csv")
+
 CSV_HEADERS = [
     "Timestamp", "Iteration", "Test Name", "Status", "Duration (s)",
     "GHA Version", "iOS Version", "Device Name", "Wi-Fi SSID",
@@ -16,6 +31,7 @@ CSV_HEADERS = [
     "Phone IP Address", "Router Gateway", "Subnet Mask",
     "Device ID", "Serial Number", "Software Version", "Device IP"
 ]
+
 def append_test_result_to_csv(
         test_name: str,
         device_name: str,
@@ -102,14 +118,23 @@ def append_test_result_to_csv(
         "row": row,
         "values": row
     }
+    webhook_url = getattr(constants, "GOOGLE_SHEET_WEBHOOK_URL", "")
+    if not webhook_url:
+        logger.warning("[WEBHOOK] GOOGLE_SHEET_WEBHOOK_URL is not defined in constants. Skipping sync.")
+        return
     try:
         logger.info(f"[WEBHOOK] Uploading telemetry for '{test_name}' to Google Sheet...")
         req = urllib.request.Request(
-            constants.GOOGLE_SHEET_WEBHOOK_URL,
+            webhook_url,
             data=json.dumps(payload_data).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*"
+            },
+            method="POST"
         )
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=15) as response:
             res_body = response.read().decode("utf-8")
             logger.info(f"[GOOGLE SHEET SYNC] Webhook upload response: {res_body}")
     except Exception as e:
