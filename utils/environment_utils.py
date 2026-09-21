@@ -125,8 +125,8 @@ def get_ios_device_info(driver: WebDriver) -> Dict[str, Any]:
 
 def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
     """Accurately retrieve current connected Wi-Fi network configuration from iOS Settings.
-    Extracts the exact connected SSID from the Selected Wi-Fi cell, then enters its detail page
-    via the (i) More Info button to fetch IPv4 parameters. Fully resilient to StaleElementReferenceException.
+    Strictly identifies the active network via the 'checkmark' icon and 'Selected' trait,
+    excluding all other networks from 'Other Networks' or 'Public Networks'.
     """
     wifi_info = {
         "ssid": "Unknown",
@@ -158,23 +158,49 @@ def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
                     time.sleep(2.0)
                 except Exception as click_err:
                     logger.debug(f"Failed to click Wi-Fi cell in Settings: {click_err}")
-        connected_cell_xpath = (
+        checkmark_xpath = (
             '//XCUIElementTypeCell['
-            './/XCUIElementTypeImage[@name="checkmark" or contains(@name, "Checkmark")] or '
-            '@selected="true" or '
-            'contains(@name, "Signal strength") or contains(@label, "Signal strength") or '
-            'contains(@name, "Selected") or contains(@label, "Selected")'
+            './/XCUIElementTypeImage[@name="checkmark" or contains(@name, "Checkmark") or contains(@name, "checkmark")]'
             ']'
         )
+        selected_xpath = (
+            '//XCUIElementTypeCell['
+            '@selected="true" or @selected="1" or '
+            'starts-with(@label, "Selected") or starts-with(@name, "Selected")'
+            ']'
+        )
+        connected_cell = None
+        ignored_sections = ["other networks", "public networks", "my networks"]
         for attempt in range(5):
             try:
-                cells = driver.find_elements(AppiumBy.XPATH, connected_cell_xpath)
-                if not cells:
+                # Priority 1: Cell with checkmark image
+                cells = driver.find_elements(AppiumBy.XPATH, checkmark_xpath)
+                for c in cells:
+                    lbl = (c.get_attribute("label") or c.get_attribute("name") or "").lower()
+                    if not any(header in lbl for header in ignored_sections):
+                        connected_cell = c
+                        break
+                if not connected_cell:
+                    cells = driver.find_elements(AppiumBy.XPATH, selected_xpath)
+                    for c in cells:
+                        lbl = (c.get_attribute("label") or c.get_attribute("name") or "").lower()
+                        if not any(header in lbl for header in ignored_sections):
+                            connected_cell = c
+                            break
+                if not connected_cell:
+                    all_cells = driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeCell")
+                    for c in all_cells:
+                        lbl = c.get_attribute("label") or c.get_attribute("name") or ""
+                        if lbl in ["Wi-Fi"] or any(h in lbl.lower() for h in ignored_sections):
+                            continue
+                        if c.find_elements(AppiumBy.XPATH, './/XCUIElementTypeImage[contains(@name, "checkmark") or contains(@name, "Checkmark")]'):
+                            connected_cell = c
+                            break
+                if not connected_cell:
                     time.sleep(0.8)
                     continue
-                c = cells[0]
                 try:
-                    texts = c.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText")
+                    texts = connected_cell.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText")
                     for st in texts:
                         val = (st.get_attribute("value") or st.get_attribute("name") or st.text or "").strip()
                         if (
@@ -184,94 +210,57 @@ def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
                                 and "SwiftUI" not in val
                         ):
                             wifi_info["ssid"] = val
-                            logger.info(f"Extracted active Wi-Fi SSID directly from cell text: '{wifi_info['ssid']}'")
+                            logger.info(f"Extracted active Wi-Fi SSID from checkmark cell: '{wifi_info['ssid']}'")
                             break
                     if wifi_info["ssid"] == "Unknown":
-                        cell_name = c.get_attribute("name") or c.get_attribute("label") or ""
-                        if cell_name and "," in cell_name:
-                            candidate = cell_name.split(",")[0].strip()
-                            if not candidate.startswith("_Tt") and "SwiftUI" not in candidate:
+                        cell_name = connected_cell.get_attribute("name") or connected_cell.get_attribute("label") or ""
+                        if cell_name:
+                            clean_name = cell_name.replace("Selected,", "").strip()
+                            candidate = clean_name.split(",")[0].strip()
+                            if candidate and not candidate.startswith("_Tt") and "SwiftUI" not in candidate:
                                 wifi_info["ssid"] = candidate
                                 logger.info(f"Extracted active Wi-Fi SSID by splitting cell name: '{wifi_info['ssid']}'")
                 except (StaleElementReferenceException, WebDriverException) as read_err:
                     logger.debug(f"[Attempt {attempt + 1}] Stale cell while reading text: {read_err}")
                 info_btn = None
                 try:
-                    cell_buttons = c.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeButton")
+                    cell_buttons = connected_cell.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeButton")
                     if cell_buttons:
                         info_btn = cell_buttons[-1]
-                        logger.info(f"Located More Info button inside cell via ClassName.")
                 except Exception:
                     pass
                 if not info_btn:
                     try:
-                        xpath_candidates = [
-                            f'{connected_cell_xpath}//XCUIElementTypeButton[@name="More Info" or contains(@label, "More") or contains(@name, "info")]',
-                            f'{connected_cell_xpath}//XCUIElementTypeButton'
-                        ]
-                        for xp in xpath_candidates:
-                            found = driver.find_elements(AppiumBy.XPATH, xp)
-                            if found:
-                                info_btn = found[-1]
-                                break
+                        found_btns = connected_cell.find_elements(
+                            AppiumBy.XPATH,
+                            './/XCUIElementTypeButton[@name="More Info" or contains(@label, "More")]'
+                        )
+                        if found_btns:
+                            info_btn = found_btns[-1]
                     except Exception:
                         pass
                 if info_btn:
-                    logger.info(f"Clicking More Info button for '{wifi_info['ssid']}' (Attempt {attempt + 1})...")
+                    logger.info(f"Clicking More Info button for verified '{wifi_info['ssid']}'...")
                     info_btn.click()
                     time.sleep(1.8)
                     break
                 else:
-                    logger.info("More Info button element not exposed. Coordinate-tapping right edge (i icon) of cell...")
-                    rect = c.rect
+                    logger.info(f"Coordinate-tapping right edge (i icon) of verified '{wifi_info['ssid']}' cell...")
+                    rect = connected_cell.rect
                     target_x = int(rect['x'] + rect['width'] - 25)
                     target_y = int(rect['y'] + rect['height'] / 2)
-                    logger.info(f"Executing mobile: tap at ({target_x}, {target_y}) on (i) More Info icon...")
                     driver.execute_script("mobile: tap", {"x": target_x, "y": target_y})
                     time.sleep(1.8)
                     break
             except (StaleElementReferenceException, WebDriverException) as stale_err:
                 logger.debug(f"[Attempt {attempt + 1}] Wi-Fi list refreshed during inspection ({stale_err}). Retrying...")
                 time.sleep(0.8)
-        if wifi_info["ssid"] == "Unknown":
-            try:
-                nav_bars = driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeNavigationBar")
-                for nb in nav_bars:
-                    nb_texts = nb.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText")
-                    candidate_title = ""
-                    for nbt in nb_texts:
-                        t = (nbt.get_attribute("value") or nbt.get_attribute("name") or nbt.text or "").strip()
-                        if (
-                                t
-                                and not t.startswith("_Tt")
-                                and "SwiftUI" not in t
-                                and t not in ["Wi-Fi", "Settings", "Back"]
-                        ):
-                            candidate_title = t
-                            break
-                    if not candidate_title:
-                        title = (nb.get_attribute("name") or nb.get_attribute("label") or "").strip()
-                        if (
-                                title
-                                and not title.startswith("_Tt")
-                                and "SwiftUI" not in title
-                                and title not in ["Wi-Fi", "Settings", "Back"]
-                        ):
-                            candidate_title = title
-                    if candidate_title:
-                        wifi_info["ssid"] = candidate_title
-                        logger.info(f"Recovered Wi-Fi SSID from detail page navigation bar: '{candidate_title}'")
-                        break
-            except Exception as nav_err:
-                logger.debug(f"Failed to read navigation bar title: {nav_err}")
-        else:
-            logger.info(f"Retained verified active Wi-Fi SSID: '{wifi_info['ssid']}'")
         logger.info("Swiping up to reveal IPv4 Address section...")
         for _ in range(4):
             try:
                 subnets = driver.find_elements(
                     AppiumBy.XPATH,
-                    '//XCUIElementTypeStaticText[@name="Subnet Mask" or @name="Subnet網路遮罩" or @name="Mask网掩码"]'
+                    '//XCUIElementTypeStaticText[@name="Subnet Mask" or @name="Subnet" or @name="Mask网掩码"]'
                 )
                 if subnets and subnets[0].is_displayed():
                     break
@@ -279,6 +268,7 @@ def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
                 pass
             _swipe_up_to_scroll_down(driver)
             time.sleep(0.6)
+
         def extract_cell_value(xpath_query: str, pattern: str, exclude_words: list) -> str:
             try:
                 cells = driver.find_elements(AppiumBy.XPATH, xpath_query)
@@ -294,15 +284,15 @@ def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
             except Exception:
                 pass
             return "Unknown"
-        ip_cell_xpath = '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="IP Address" or @name="IP址" or @name="Address"]]'
-        ip_val = extract_cell_value(ip_cell_xpath, r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ["IP Address", "IP址", "Address址"])
+        ip_cell_xpath = '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="IP Address" or @name="IP" or @name="Address"]]'
+        ip_val = extract_cell_value(ip_cell_xpath, r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ["IP Address", "IP", "Address址"])
         if ip_val != "Unknown":
             wifi_info["ip_address"] = ip_val
-        subnet_cell_xpath = '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="Subnet Mask" or @name="子網路遮罩" or @name="子网掩码"]]'
+        subnet_cell_xpath = '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="Subnet Mask" or @name="Subnet網路遮罩" or @name="Mask"]]'
         subnet_val = extract_cell_value(subnet_cell_xpath, r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ["Subnet", "遮罩", "掩码"])
         if subnet_val != "Unknown":
             wifi_info["subnet_mask"] = subnet_val
-        router_cell_xpath = '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="Router" or @name="路由器"]]'
+        router_cell_xpath = '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="Router"]]'
         router_val = extract_cell_value(router_cell_xpath, r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ["Router"])
         if router_val != "Unknown":
             wifi_info["router_gateway"] = router_val
