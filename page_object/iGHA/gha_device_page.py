@@ -42,7 +42,6 @@ class GHADevicePage(BasePage):
                 for elem in elems:
                     if elem.is_displayed():
                         rect = elem.rect
-                        # 確保元件在合理的可視範圍內 (y > 50 排除頂部導航列干擾)
                         if rect["y"] > 50 and rect["height"] > 10:
                             return elem
             except Exception:
