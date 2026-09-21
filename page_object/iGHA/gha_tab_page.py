@@ -3,7 +3,12 @@ import time
 from typing import Optional, Union, List
 from appium.webdriver.common.appiumby import AppiumBy
 from appium.webdriver.webelement import WebElement
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    TimeoutException,
+    WebDriverException,
+    StaleElementReferenceException
+)
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from common import constants
@@ -18,36 +23,158 @@ class GHATabPage(BasePage):
     ACTIVITY_TAB_BTN = "activityTabBarButtonAccessibilityID"
     AUTOMATIONS_TAB_BTN = "automationTabBarButtonAccessibilityID"
     CHIPS_CONTAINER = "HomeRootViewController.AccessibilityID.categoryChips"
-    SETTINGS_NAV_BAR = '**/XCUIElementTypeNavigationBar[`name == "Settings"`]'
+    SETTINGS_NAV_BAR = '**/XCUIElementTypeNavigationBar[`name == "Settings" OR name == "Home settings"`]'
 
-
-    def _find_element(self, by: AppiumBy, locator_value: str) -> Optional[WebElement]:
+    def _find_element(self, by: AppiumBy, locator_value: str, timeout: float = 2.0) -> Optional[WebElement]:
         """Find an element using specified locator strategy with explicit wait."""
         try:
-            return WebDriverWait(self.driver, 1.0).until(
+            return WebDriverWait(self.driver, timeout).until(
                 EC.presence_of_element_located((by, locator_value))
             )
         except TimeoutException:
-            self._logger.error(f"Timed out waiting for element: by={by}, value='{locator_value}'")
+            self._logger.debug(f"Timed out waiting for element: by={by}, value='{locator_value}'")
+            return None
+        except Exception as e:
+            self._logger.debug(f"Error finding element: {e}")
             return None
 
-    def _find_elements(self, by: AppiumBy, value: str) -> List[WebElement]:
-        """Find an element using specified locator strategy with explicit wait."""
+    def _find_elements(self, by: AppiumBy, value: str, timeout: float = 1.0) -> List[WebElement]:
+        """Find all elements matching locator strategy with explicit wait."""
         try:
-            return WebDriverWait(self.driver, 1.0).until(
+            elems = WebDriverWait(self.driver, timeout).until(
                 EC.presence_of_all_elements_located((by, value))
             )
+            return elems if elems else []
         except TimeoutException:
-            self._logger.error(f"Timed out waiting for element: by={by}, value='{value}'")
-            return None
+            return []
+        except Exception as e:
+            self._logger.debug(f"Error finding elements: {e}")
+            return []
 
-    def get_active_tab(self) -> constants.TAB:
+    def _get_element_safe(self, by: AppiumBy, value: str, timeout: float = 1.0) -> Optional[WebElement]:
+        """Safely find a visible element without throwing exceptions."""
+        try:
+            elems = self._find_elements(by, value, timeout=timeout)
+            for elem in elems:
+                if elem and elem.is_displayed():
+                    return elem
+        except Exception:
+            pass
+        return None
+
+    def _click_element_with_fallback(self, element: WebElement, description: str = "element") -> bool:
+        """Click an element, falling back to coordinate tap if standard click fails."""
+        try:
+            element.click()
+            time.sleep(1.5)
+            self._logger.info(f"Successfully clicked {description}.")
+            return True
+        except (WebDriverException, StaleElementReferenceException) as e:
+            self._logger.warning(f"Standard click on {description} failed ({e}). Trying coordinate tap...")
+            try:
+                rect = element.rect
+                tap_x = rect["x"] + (rect["width"] // 2)
+                tap_y = rect["y"] + (rect["height"] // 2)
+                self.driver.execute_script("mobile: tap", {"x": tap_x, "y": tap_y})
+                time.sleep(1.5)
+                self._logger.info(f"Successfully coordinate-tapped {description} at ({tap_x}, {tap_y}).")
+                return True
+            except Exception as coord_err:
+                self._logger.error(f"Coordinate tap failed for {description}: {coord_err}")
+                return False
+
+    def _find_home_settings_button(self, timeout: float = 2.0) -> Optional[WebElement]:
+        """Locate 'Home settings' button in the account dialog using prioritized locators."""
+        locators = [
+            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "Home settings" OR label == "Home settings"`]'),
+            (AppiumBy.ACCESSIBILITY_ID, getattr(constants, "GHA_SETTING_PAGE_ACCESSIBILITY_ID", "Home settings")),
+            (AppiumBy.XPATH, '//XCUIElementTypeButton[@name="Home settings" or @label="Home settings"]'),
+            (AppiumBy.IOS_CLASS_CHAIN, getattr(constants, "GHA_SETTING_PAGE_CLASS_CHAIN", '**/XCUIElementTypeStaticText[`name == "Home settings"`]')),
+        ]
+        for by, val in locators:
+            try:
+                elem = self._get_element_safe(by, val, timeout=timeout)
+                if elem:
+                    return elem
+            except Exception:
+                continue
+        return None
+
+    def enter_home_settings_page(self) -> bool:
+        """Open Settings page by clicking the top-right account avatar, with recovery resilience."""
+        self._logger.info("Opening Settings page from account avatar...")
+        time.sleep(1.0)
+        home_settings_btn = self._find_home_settings_button(timeout=1.5)
+        if home_settings_btn:
+            self._logger.info("Account menu is already open on screen. Clicking 'Home settings' directly...")
+            return self._click_element_with_fallback(home_settings_btn, "'Home settings' button")
+        account_icon = self._get_element_safe(
+            AppiumBy.ACCESSIBILITY_ID,
+            constants.GHA_ACCOUNT_PARTICLE_BTN_ACCESSIBILITY_ID,
+            timeout=5.0
+        )
+        if not account_icon:
+            self._logger.warning("AccountParticleButton not found. Attempting to dismiss modal or navigate back...")
+            self._dismiss_modal_or_go_back()
+            account_icon = self._get_element_safe(
+                AppiumBy.ACCESSIBILITY_ID,
+                constants.GHA_ACCOUNT_PARTICLE_BTN_ACCESSIBILITY_ID,
+                timeout=3.0
+            )
+        if not account_icon:
+            self._logger.error("Could not find AccountParticleButton on current screen.")
+            return False
+        if not self._click_element_with_fallback(account_icon, "AccountParticleButton"):
+            return False
+        time.sleep(1.5)
+        home_settings_btn = self._find_home_settings_button(timeout=5.0)
+        if not home_settings_btn:
+            self._logger.info("'Home settings' not immediately visible, swiping up slightly...")
+            self._swipe_up_slightly()
+            home_settings_btn = self._find_home_settings_button(timeout=3.0)
+        if not home_settings_btn:
+            self._logger.error("Failed to find 'Home settings' button in account menu.")
+            return False
+        return self._click_element_with_fallback(home_settings_btn, "'Home settings' button")
+
+    def _swipe_up_slightly(self) -> None:
+        """Perform a gentle swipe up to reveal content below the fold in dialogs."""
+        try:
+            size = self.driver.get_window_size()
+            start_x = size["width"] // 2
+            start_y = int(size["height"] * 0.7)
+            end_y = int(size["height"] * 0.4)
+            self.driver.swipe(start_x, start_y, start_x, end_y, duration=300)
+            time.sleep(1.0)
+        except Exception as e:
+            self._logger.debug(f"Swipe up failed: {e}")
+
+    def _dismiss_modal_or_go_back(self) -> None:
+        """Try clicking Done, Back, or Close if stuck on an unexpected screen."""
+        dismiss_locators = [
+            (AppiumBy.ACCESSIBILITY_ID, "Done"),
+            (AppiumBy.ACCESSIBILITY_ID, "Back"),
+            (AppiumBy.ACCESSIBILITY_ID, "Close"),
+            (AppiumBy.ACCESSIBILITY_ID, "close"),
+        ]
+        for by, val in dismiss_locators:
+            try:
+                elem = self._get_element_safe(by, val, timeout=0.8)
+                if elem:
+                    elem.click()
+                    time.sleep(1.0)
+                    return
+            except Exception:
+                pass
+
+    def get_active_tab(self) -> Optional[constants.TAB]:
         """Return the currently active tab (FAVORITES, DEVICES, AUTOMATIONS, ACTIVITY, SETTINGS, etc.).
+
         Returns:
-            TAB: Enum value representing the active tab.
+            Optional[constants.TAB]: Enum value representing the active tab, or None if unknown.
         """
         try:
-            settings_bar = self._find_elements(AppiumBy.IOS_CLASS_CHAIN, self.SETTINGS_NAV_BAR)
+            settings_bar = self._find_elements(AppiumBy.IOS_CLASS_CHAIN, self.SETTINGS_NAV_BAR, timeout=0.8)
             if settings_bar and settings_bar[0].is_displayed():
                 self._logger.info("Active Tab: SETTINGS")
                 return constants.TAB.SETTINGS
@@ -67,20 +194,18 @@ class GHATabPage(BasePage):
                     self._logger.info("Active Tab: HOME")
                     return constants.TAB.HOME
             activity_btn = self._get_element_safe(AppiumBy.ACCESSIBILITY_ID, self.ACTIVITY_TAB_BTN)
-
             if activity_btn and str(activity_btn.get_attribute("value") or "0") == "1":
                 self._logger.info("Active Tab: ACTIVITY")
                 return constants.TAB.ACTIVITY
             automations_btn = self._get_element_safe(AppiumBy.ACCESSIBILITY_ID, self.AUTOMATIONS_TAB_BTN)
-
             if automations_btn and str(automations_btn.get_attribute("value") or "0") == "1":
                 self._logger.info("Active Tab: AUTOMATIONS")
                 return constants.TAB.AUTOMATIONS
         except Exception as e:
             self._logger.debug(f"Error querying active tab state: {e}")
-            return False
+            return None
         self._logger.info("Active Tab: UNKNOWN")
-        return False
+        return None
 
     def _get_active_chip_under_home(self) -> Optional[constants.CHIP]:
         """Check which chip under Home tab is currently selected."""
@@ -110,7 +235,8 @@ class GHATabPage(BasePage):
         if active_tab == tab:
             self._logger.info(f"Already on tab: {tab.value}")
             return True
-        self._logger.info(f"Navigating from {active_tab.value} to {tab.value}...")
+        current_tab_name = active_tab.value if active_tab and hasattr(active_tab, "value") else "UNKNOWN"
+        self._logger.info(f"Navigating from {current_tab_name} to {tab.value}...")
         if active_tab == constants.TAB.SETTINGS:
             self._close_settings_page()
         match tab:
@@ -131,6 +257,7 @@ class GHATabPage(BasePage):
             case _:
                 self._logger.error(f"Tab '{tab}' is not supported.")
                 return False
+
     def enter_chip_under_home_tab(self, chip: Union[constants.CHIP, str]) -> bool:
         """Click on a specific category chip (Favorites, All devices, Cameras, Lights) under Home tab.
         Args:
@@ -158,24 +285,6 @@ class GHATabPage(BasePage):
         self._logger.error(f"Failed to find chip '{chip_label}' under Home tab.")
         return False
 
-    def enter_home_settings_page(self) -> bool:
-        """Open Settings page by clicking the top-right account avatar."""
-        self._logger.info("Opening Settings page from account avatar...")
-        time.sleep(2)
-        try:
-            account_icon = self._find_element(AppiumBy.ACCESSIBILITY_ID, constants.GHA_ACCOUNT_PARTICLE_BTN_ACCESSIBILITY_ID)
-            if account_icon.is_displayed():
-                account_icon.click()
-                time.sleep(5.0)
-            home_settings_opts = self._find_element(AppiumBy.IOS_CLASS_CHAIN, constants.GHA_SETTING_PAGE_CLASS_CHAIN)
-            if home_settings_opts.is_displayed():
-                home_settings_opts.click()
-                time.sleep(2.0)
-                return True
-        except Exception as e:
-            self._logger.error(f"Failed to open Home Settings page: {e}")
-        return False
-
     def _click_bottom_tab(self, accessibility_id: str, tab_name: str) -> bool:
         """Click on a bottom navigation bar button by accessibility ID."""
         try:
@@ -190,27 +299,20 @@ class GHATabPage(BasePage):
         return False
 
     def _close_settings_page(self) -> None:
-        """Dismiss settings page by clicking the top-left close (X) button."""
+        """Dismiss settings page by clicking the top-left close (X) or back button."""
         close_locators = [
-            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeNavigationBar[`name == "Settings"`]/**/XCUIElementTypeButton[1]'),
+            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeNavigationBar[`name == "Settings" OR name == "Home settings"`]/**/XCUIElementTypeButton[1]'),
             (AppiumBy.ACCESSIBILITY_ID, "close"),
             (AppiumBy.ACCESSIBILITY_ID, "Close"),
+            (AppiumBy.ACCESSIBILITY_ID, "Back"),
+            (AppiumBy.ACCESSIBILITY_ID, "Done"),
         ]
         for by, val in close_locators:
             try:
-                elems = self._find_elements(by, val)
+                elems = self._find_elements(by, val, timeout=0.8)
                 if elems and elems[0].is_displayed():
                     elems[0].click()
                     time.sleep(1.5)
                     return
             except Exception:
                 pass
-    def _get_element_safe(self, by: AppiumBy, value: str) -> Optional[WebElement]:
-        """Safely find a visible element without throwing exceptions."""
-        try:
-            elems = self._find_elements(by, value)
-            if elems and elems[0].is_displayed():
-                return elems[0]
-        except Exception:
-            pass
-        return None
