@@ -242,18 +242,27 @@ class GHASession:
         return False
 
     def handle_device_selection_steps(self) -> bool:
-        """Navigate to Add Device page and verify target device is listed."""
+        """Navigate to Add Device page and select target device.
+
+        Handles both:
+        1. Single device branch: Directly shows 'Next' button -> Clicks Next.
+        2. Multi-device branch: Shows nearby device list -> Selects device from list.
+        """
         GHAAddPage.navigate_to_setup_device_page(self)
+        target_name = getattr(self, "device_name", "")
+        self._logger.info(f"Checking for Single Device Found screen before checking list...")
+        try:
+            if GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name, timeout=3.0):
+                self._logger.info(f"Target device '{target_name}' successfully confirmed and selected via Single Device screen!")
+                time.sleep(2.0)
+                return True
+        except Exception as e:
+            self._logger.warning(f"Error checking Single Device screen: {e}")
+        self._logger.info(f"Single device not present or switched to list. Searching '{target_name}' in device list...")
         return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
 
     def pair_device_with_pairing_code(self) -> bool:
         """Proceed to enter pairing code screen and input manual pairing code."""
-        target_name = getattr(self, "device_name", "")
-        self._logger.info(f"Checking for Single Device Found screen for '{target_name}'...")
-        try:
-            GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name)
-        except Exception as e:
-            self._logger.warning(f"Single device check skipped or failed: {e}")
         GHAAddDevicePage.click_use_pairing_code_btn(self)
         GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=self.pairing_code)
 
