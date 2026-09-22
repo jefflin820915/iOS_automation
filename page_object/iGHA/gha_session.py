@@ -249,11 +249,11 @@ class GHASession:
     def pair_device_with_pairing_code(self) -> bool:
         """Proceed to enter pairing code screen and input manual pairing code."""
         target_name = getattr(self, "device_name", "")
-        self._logger.info(f"Checking for 'Single Device Found' screen for '{target_name}'...")
+        self._logger.info(f"Checking for Single Device Found screen for '{target_name}'...")
         try:
             GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name)
-        except Exception as check_err:
-            self._logger.warning(f"Single device check exception (ignored): {check_err}")
+        except Exception as e:
+            self._logger.warning(f"Single device check skipped or failed: {e}")
         GHAAddDevicePage.click_use_pairing_code_btn(self)
         GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=self.pairing_code)
 
