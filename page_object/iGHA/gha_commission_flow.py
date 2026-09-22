@@ -13,6 +13,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from common import constants
 from common.base_page import BasePage
+from page_object.iGHA.gha_tab_page import GHATabPage
 from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDevicePage
 from page_object.iGHA.gha_device_connected_page import GHADeviceConnectedPage
 from page_object.iGHA.gha_camera_activated_page import GHACameraActivatedPage
@@ -35,6 +36,52 @@ class GHACommissioningPageObject(BasePage):
     APPLE_TEXT_FIELD_CHAIN = (
         '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]/**/XCUIElementTypeTextField[`visible == 1`]'
     )
+
+    def _is_gha_running(self) -> bool:
+        """Check if GHA is currently running in the active foreground."""
+        try:
+            return self.driver.query_app_state(constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
+        except WebDriverException as e:
+            self._logger.error(f"Failed to query GHA app state: {e}")
+            return False
+
+    def stop_gha(self) -> bool:
+        """Terminate the GHA application."""
+        try:
+            app_state = self.driver.query_app_state(constants.GHA_BUNDLE_ID)
+            if app_state != constants.APP_STATE_NOT_RUNNING:
+                self.driver.terminate_app(constants.GHA_BUNDLE_ID)
+                self._logger.info("GHA stopped successfully.")
+            else:
+                self._logger.info("GHA is not running.")
+            return True
+        except WebDriverException as e:
+            self._logger.error(f"Failed to stop GHA: {e}")
+            return False
+
+    def start_gha(self, timeout: float = 10.0) -> bool:
+        """Start GHA and ensure it is running in the active foreground."""
+        if self._is_gha_running():
+            self._logger.info("GHA is already running in foreground.")
+            return True
+        self._logger.info("Starting Google Home App on iOS...")
+        try:
+            self.driver.activate_app(constants.GHA_BUNDLE_ID)
+        except WebDriverException as e:
+            self._logger.error(f"Failed to activate GHA: {e}")
+            return False
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self._is_gha_running():
+                self._logger.info("GHA launched successfully in foreground.")
+                return True
+            try:
+                self.driver.activate_app(constants.GHA_BUNDLE_ID)
+            except WebDriverException:
+                pass
+            time.sleep(0.5)
+        self._logger.error(f"Timed out after {timeout}s waiting for GHA.")
+        return False
 
     def is_apple_sheet_present(self) -> bool:
         """Check if Apple's native Matter commissioning sheet (SBTransientOverlayWindow) is currently visible."""
@@ -264,6 +311,17 @@ class GHACommissioningPageObject(BasePage):
         """Locates all device tiles containing 'plug' or 'outlet' in their name/label,
         and sequentially cycles power for EACH device: OFF -> wait -> ON -> wait.
         """
+        self._logger.info("[PowerCycle] Resetting GHA state: stopping and restarting app...")
+        self.stop_gha()
+        time.sleep(2.0)
+        self.start_gha()
+        time.sleep(3.0)
+        self._logger.info("[PowerCycle] Navigating to Devices tab...")
+        try:
+            GHATabPage.go_to_tab(self, constants.TAB.DEVICES)
+        except TypeError:
+            GHATabPage(self.driver).go_to_tab(constants.TAB.DEVICES)
+        time.sleep(2.0)
         if keywords is None:
             keywords = ["plug", "outlet", "插頭"]
         self._logger.info(f"[PowerCycle] Scanning for all smart plug/outlet devices matching keywords: {keywords}...")
