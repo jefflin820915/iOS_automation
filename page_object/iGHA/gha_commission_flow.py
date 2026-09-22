@@ -318,7 +318,7 @@ class GHACommissioningPageObject(BasePage):
         time.sleep(3.0)
         self._logger.info("[PowerCycle] Navigating to Devices tab...")
         try:
-            GHATabPage.go_to_tab(self, constants.TAB.DEVICES)
+            GHATabPage(self.driver).go_to_tab(constants.TAB.DEVICES)
         except TypeError:
             GHATabPage(self.driver).go_to_tab(constants.TAB.DEVICES)
         time.sleep(2.0)

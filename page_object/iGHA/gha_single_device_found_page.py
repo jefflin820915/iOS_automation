@@ -6,6 +6,8 @@ from appium.webdriver.webelement import WebElement
 from selenium.common.exceptions import WebDriverException, StaleElementReferenceException
 from common.base_page import BasePage
 from utils import logging_utils
+from page_object.iGHA import gha_session
+from page_object.iGHA.gha_add_page import GHAAddPage
 
 logger = logging_utils.get_logger(__name__, "single_device_found_page")
 
@@ -125,6 +127,49 @@ class GHASingleDeviceFoundPage(BasePage):
                 self._logger.error(f"Coordinate tap also failed: {tap_err}")
                 return False
 
+    def click_back_btn(self) -> bool:
+        """Click the top-left back/close button to exit the Camera Live stream page."""
+        self._logger.info("Exiting Camera Live screen: looking for back/close button...")
+        back_locators = [
+            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "closeButton"`]'),
+            (AppiumBy.ACCESSIBILITY_ID, "closeButton"),
+            (AppiumBy.ACCESSIBILITY_ID, "close"),
+            (AppiumBy.ACCESSIBILITY_ID, "Close"),
+            (AppiumBy.ACCESSIBILITY_ID, "Back"),
+            (AppiumBy.ACCESSIBILITY_ID, "back"),
+            (AppiumBy.IOS_PREDICATE, 'label == "Back" OR name == "Back" OR label == "Close" OR name == "close"'),
+        ]
+        try:
+            self.driver.execute_script("mobile: tap", {"x": 50, "y": 100})
+            time.sleep(0.5)
+            elems = self.driver.find_element(AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "closeButton"`]')
+            elems.click()
+            self._logger.info("Successfully clicked back button.")
+            return True
+        except Exception:
+            pass
+        self._logger.info("Navigation bar may be hidden. Tapping screen to reveal controls...")
+        try:
+            self.driver.execute_script("mobile: tap", {"x": 200, "y": 300})
+            time.sleep(1.0)
+            for by, val in back_locators:
+                elems = self.driver.find_elements(by, val)
+                if elems and elems[0].is_displayed():
+                    elems[0].click()
+                    time.sleep(1.5)
+                    self._logger.info("Successfully clicked back button after revealing controls.")
+                    return True
+        except Exception as e:
+            self._logger.warning(f"Error tapping screen to reveal controls: {e}")
+        self._logger.warning("Fallback: Tapping top-left corner coordinates to exit live view...")
+        try:
+            self.driver.execute_script("mobile: tap", {"x": 25, "y": 55})
+            time.sleep(1.5)
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to click back: {e}")
+            return False
+
     def click_different_device_button(self) -> bool:
         """Click 'Set up a different device' if detected device is not what we want."""
         diff_btn = self._get_different_device_button()
@@ -159,4 +204,7 @@ class GHASingleDeviceFoundPage(BasePage):
                 f"Clicking 'Set up a different device'..."
             )
             page.click_different_device_button()
+            page.click_back_btn()
+            gha_session.GHAHomePage(driver).click_add_devices_button()
+            GHAAddPage(driver).navigate_to_setup_device_page()
             return False
