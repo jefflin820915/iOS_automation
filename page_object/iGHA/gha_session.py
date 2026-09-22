@@ -246,7 +246,7 @@ class GHASession:
         GHAAddPage.navigate_to_setup_device_page(self)
         return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
 
-    def handle_device_selection_steps(self) -> bool:
+    def pair_device_with_pairing_code(self) -> bool:
         """Proceed to enter pairing code screen and input manual pairing code."""
         target_name = getattr(self, "device_name", "")
         self._logger.info(f"Checking for 'Single Device Found' screen for '{target_name}'...")
