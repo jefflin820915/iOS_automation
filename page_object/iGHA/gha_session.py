@@ -33,6 +33,7 @@ from page_object.iGHA.gha_setting_page import GHASettingsPage
 from page_object.iGHA.gha_tab_page import GHATabPage
 from page_object.iGHA.gha_device_setting_page import GHADeviceSettingPage
 from page_object.iGHA.gha_camera_live_page import GHACameraLivePage
+from page_object.iGHA.gha_single_device_found_page import GHASingleDeviceFoundPage
 from utils import logging_utils
 from appium.webdriver.common.appiumby import AppiumBy
 from selenium.common.exceptions import TimeoutException
@@ -241,9 +242,15 @@ class GHASession:
         return False
 
     def handle_device_selection_steps(self) -> bool:
-        """Navigate to Add Device page and verify target device is listed."""
-        GHAAddPage.navigate_to_setup_device_page(self)
-        return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
+        """Proceed to enter pairing code screen and input manual pairing code."""
+        target_name = getattr(self, "device_name", "")
+        self._logger.info(f"Checking for 'Single Device Found' screen for '{target_name}'...")
+        try:
+            GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name)
+        except Exception as check_err:
+            self._logger.warning(f"Single device check exception (ignored): {check_err}")
+        GHAAddDevicePage.click_use_pairing_code_btn(self)
+        GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=self.pairing_code)
 
     def pair_device_with_pairing_code(self) -> None:
         """Proceed to enter pairing code screen and input manual pairing code."""
