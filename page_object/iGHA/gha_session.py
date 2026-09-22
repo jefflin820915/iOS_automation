@@ -242,6 +242,11 @@ class GHASession:
         return False
 
     def handle_device_selection_steps(self) -> bool:
+        """Navigate to Add Device page and verify target device is listed."""
+        GHAAddPage.navigate_to_setup_device_page(self)
+        return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
+
+    def handle_device_selection_steps(self) -> bool:
         """Proceed to enter pairing code screen and input manual pairing code."""
         target_name = getattr(self, "device_name", "")
         self._logger.info(f"Checking for 'Single Device Found' screen for '{target_name}'...")
@@ -249,11 +254,6 @@ class GHASession:
             GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name)
         except Exception as check_err:
             self._logger.warning(f"Single device check exception (ignored): {check_err}")
-        GHAAddDevicePage.click_use_pairing_code_btn(self)
-        GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=self.pairing_code)
-
-    def pair_device_with_pairing_code(self) -> None:
-        """Proceed to enter pairing code screen and input manual pairing code."""
         GHAAddDevicePage.click_use_pairing_code_btn(self)
         GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=self.pairing_code)
 
