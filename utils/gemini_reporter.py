@@ -18,6 +18,7 @@ class GeminiReporter:
         self.model_name = model
         self.api_key = api_key or constants.GEMINI_API_KEY
         self.client = None
+        logger = logging_utils.get_logger("")
         if self.api_key:
             try:
                 from google import genai
@@ -78,14 +79,12 @@ Generate an executive, professional Markdown report formatted for Google Buganiz
 6. Keep the formatting clean, professional, and directly in Markdown.
 """
         try:
-            logger.info("Calling Gemini API to generate intelligent Markdown report...")
             response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=prompt
             )
             return response.text.strip()
         except Exception as e:
-            logger.error(f"Gemini API call failed: {e}. Falling back to standard template.")
             return self._build_template_report(
                 test_name, dut_name, overall_status, status_icon,
                 total_runs, passed_runs, failed_runs, pass_rate,
