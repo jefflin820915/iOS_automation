@@ -26,4 +26,4 @@ class TestGHAHome(BaseTestCase):
         gha_session.GHASession.handle_verify_camera_live_stream_and_remove(self)
         gha_session.GHASession.refresh_gha_devices(self)
         assert gha_session.GHASession.stop_gha(self)
-        time.sleep(15)
+        time.sleep(10)
