@@ -297,6 +297,7 @@ class GHASession:
             GHACameraLivePage.verify_camera_live_stream(self)
         finally:
             self.handle_remove_device()
+            GHACommissioningPageObject.power_cycle_smart_plug(self)
 
     def handle_remove_device(self) -> None:
         """Navigate to Settings and completely remove/unpair the camera device."""
