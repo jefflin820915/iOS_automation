@@ -5,9 +5,6 @@ from utils import logging_utils
 from common import constants
 
 
-logger = logging_utils.get_logger(__name__, "gemini_reporter")
-
-
 class GeminiReporter:
     """Generates structured Markdown test reports and root cause analysis using Gemini API."""
 

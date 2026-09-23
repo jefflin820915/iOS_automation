@@ -16,7 +16,6 @@ class GHAAccountPicker:
             driver (WebDriver): The iOS Appium driver instance.
         """
         self.driver = driver
-        self._logger = logging_utils.get_logger(__name__, "account_picker")
         self.add_another_account_id = "Add another account"
 
     # ==================== Helper Methods ====================

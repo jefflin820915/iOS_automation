@@ -9,8 +9,6 @@ from utils import logging_utils
 from page_object.iGHA import gha_session
 from page_object.iGHA.gha_add_page import GHAAddPage
 
-logger = logging_utils.get_logger(__name__, "single_device_found_page")
-
 
 class GHASingleDeviceFoundPage(BasePage):
     """Class for handling Single Device Found screen during GHA setup."""
