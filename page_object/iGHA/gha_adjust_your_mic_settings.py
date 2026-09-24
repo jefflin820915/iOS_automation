@@ -14,6 +14,7 @@ from common.base_page import BasePage
 class OOBEInternalErrorException(Exception):
     """Raised when GHA displays 'Internal error encountered.' modal during post-commissioning OOBE."""
 
+
 class GHAAdjustYourMicSettingsPage(BasePage):
     """Class for managing microphone and audio recording toggles on the mic settings page."""
     MICROPHONE_SWITCH_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Microphone"`]/**/XCUIElementTypeSwitch'
@@ -26,8 +27,10 @@ class GHAAdjustYourMicSettingsPage(BasePage):
     INTERNAL_ERROR_PREDICATE = 'label == "Internal error encountered." OR name == "Internal error encountered."'
     ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
     SWITCH_ON_VALUES = ("1", "true")
-    IDLE_TIMEOUT = 20.0          # Max wait for loading spinner to disappear / Next to be enabled
-    LEAVE_PAGE_TIMEOUT = 8.0     # Max wait for page transition after tapping Next
+    IDLE_TIMEOUT = 20.0            # Max wait for loading spinner to disappear / Next to be enabled
+    LEAVE_PAGE_TIMEOUT = 8.0       # Max wait for page transition after tapping Next
+    SWITCH_LOCATE_TIMEOUT = 5.0    # Max wait for a switch to appear
+    SWITCH_STATE_TIMEOUT = 3.0     # Max wait for a switch value to flip after tapping
     MAX_NEXT_ATTEMPTS = 3
     POLL_INTERVAL = 0.5
 
@@ -65,6 +68,14 @@ class GHAAdjustYourMicSettingsPage(BasePage):
                 return elements[0] if elements else None
             except WebDriverException:
                 return None
+
+    def _tap_element_center(self, element: WebElement) -> None:
+        """Coordinate tap at the element's center (avoids stale elementId references)."""
+        rect = element.rect
+        self.driver.execute_script("mobile: tap", {
+            "x": int(rect["x"] + rect["width"] / 2),
+            "y": int(rect["y"] + rect["height"] / 2),
+        })
 
     def _get_next_btn(self) -> Optional[WebElement]:
         """Get the 'Next' button using ACCESSIBILITY_ID or predicate."""
@@ -125,41 +136,79 @@ class GHAAdjustYourMicSettingsPage(BasePage):
             self._logger.warning(f"[MicSettings] Failed to click OK on alert: {dismiss_err}")
         raise OOBEInternalErrorException("GHA displayed 'Internal error encountered.' during Mic settings.")
 
-    def _is_switch_on(self, switch_element: WebElement) -> bool:
-        return str(switch_element.get_attribute("value") or "0") in self.SWITCH_ON_VALUES
-
-    def _turn_on_switch(self, switch_element: WebElement, switch_name: str) -> bool:
-        """Turn the switch ON if it is currently OFF, then wait for the backend save to finish."""
-        try:
-            if self._is_switch_on(switch_element):
-                self._logger.info(f"'{switch_name}' is already ON.")
-                return True
-            self._logger.info(f"'{switch_name}' is OFF. Clicking to turn ON...")
-            switch_element.click()
-            time.sleep(1.0)
-            if not self._is_switch_on(switch_element):
-                self._logger.warning(f"Click on '{switch_name}' did not change state. Trying tap fallback...")
-                self.driver.execute_script("mobile: tap", {"elementId": switch_element.id})
-                time.sleep(1.0)
-            is_on = self._is_switch_on(switch_element)
-            if is_on:
-                self._logger.info(f"Successfully turned ON '{switch_name}'.")
-            else:
-                self._logger.warning(f"Failed to turn ON '{switch_name}'.")
-            self._wait_until_page_idle()
-            return is_on
-        except WebDriverException as e:
-            self._logger.error(f"Failed to toggle '{switch_name}': {e}")
-            return False
-
-    def _find_switch(self, class_chain: str, fallback_index: int) -> Optional[WebElement]:
-        """Find a switch by class chain, falling back to index among all switches."""
-        switch = self._find_element(AppiumBy.IOS_CLASS_CHAIN, class_chain)
+    def _locate_switch(self, class_chain: str, fallback_index: int) -> Optional[WebElement]:
+        """Freshly locate a switch by class chain, falling back to its index among all switches."""
+        switch = self._quick_find(AppiumBy.IOS_CLASS_CHAIN, class_chain)
         if switch:
             return switch
         with self._no_implicit_wait():
-            switches = self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeSwitch")
+            try:
+                switches = self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeSwitch")
+            except WebDriverException:
+                return None
         return switches[fallback_index] if len(switches) > fallback_index else None
+
+    def _read_switch_state(self, class_chain: str, fallback_index: int) -> Optional[bool]:
+        """Return True (ON) / False (OFF), or None if the switch cannot be read."""
+        for _ in range(3):
+            switch = self._locate_switch(class_chain, fallback_index)
+            if switch is None:
+                return None
+            try:
+                return str(switch.get_attribute("value") or "0") in self.SWITCH_ON_VALUES
+            except WebDriverException:  # includes StaleElementReferenceException
+                time.sleep(0.3)
+        return None
+
+    def _wait_for_switch_state(self, class_chain: str, fallback_index: int, expected: bool,
+                               timeout: float = SWITCH_STATE_TIMEOUT) -> bool:
+        """Poll (with fresh lookups) until the switch reaches the expected state."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._read_switch_state(class_chain, fallback_index) is expected:
+                return True
+            time.sleep(self.POLL_INTERVAL)
+        return False
+
+    def _tap_switch(self, class_chain: str, fallback_index: int, use_coordinates: bool) -> bool:
+        """Tap a freshly located switch via element click or coordinate tap."""
+        switch = self._locate_switch(class_chain, fallback_index)
+        if switch is None:
+            return False
+        try:
+            if use_coordinates:
+                self._tap_element_center(switch)
+            else:
+                switch.click()
+            return True
+        except WebDriverException as e:
+            self._logger.debug(f"Tap on switch failed: {e}")
+            return False
+
+    def _turn_on_switch(self, switch_name: str, class_chain: str, fallback_index: int) -> bool:
+        """Turn the switch ON if it is currently OFF, then wait for the backend save to finish."""
+        deadline = time.time() + self.SWITCH_LOCATE_TIMEOUT
+        state = self._read_switch_state(class_chain, fallback_index)
+        while state is None and time.time() < deadline:
+            time.sleep(self.POLL_INTERVAL)
+            state = self._read_switch_state(class_chain, fallback_index)
+        if state is None:
+            self._logger.warning(f"'{switch_name}' switch element not found.")
+            return False
+        if state:
+            self._logger.info(f"'{switch_name}' is already ON.")
+            return True
+        self._logger.info(f"'{switch_name}' is OFF. Clicking to turn ON...")
+        for use_coordinates in (False, True):
+            if use_coordinates:
+                self._logger.warning(f"'{switch_name}' still OFF after click. Trying coordinate tap...")
+            if self._tap_switch(class_chain, fallback_index, use_coordinates) and \
+                    self._wait_for_switch_state(class_chain, fallback_index, expected=True):
+                self._logger.info(f"Successfully turned ON '{switch_name}'.")
+                self._wait_until_page_idle()
+                return True
+        self._logger.error(f"Failed to turn ON '{switch_name}'.")
+        return False
 
     def _turn_on_all_mic_toggles(self) -> bool:
         """Turn ON both 'Microphone' and 'Audio recording' switches.
@@ -167,25 +216,20 @@ class GHAAdjustYourMicSettingsPage(BasePage):
             True if both switches are ON, False otherwise.
         """
         self._logger.info("Starting to enable all mic settings toggles...")
-        results = []
-        for name, class_chain, index in (
-                ("Microphone", self.MICROPHONE_SWITCH_CLASS_CHAIN, 0),
-                ("Audio recording", self.AUDIO_RECORDING_SWITCH_CLASS_CHAIN, 1),
-        ):
-            switch = self._find_switch(class_chain, index)
-            if switch is None:
-                self._logger.warning(f"'{name}' switch element not found.")
-                results.append(False)
-                continue
-            results.append(self._turn_on_switch(switch, name))
+        results = [
+            self._turn_on_switch("Microphone", self.MICROPHONE_SWITCH_CLASS_CHAIN, 0),
+            self._turn_on_switch("Audio recording", self.AUDIO_RECORDING_SWITCH_CLASS_CHAIN, 1),
+        ]
         return all(results)
 
     def _tap_next(self, btn: WebElement) -> None:
         try:
             btn.click()
         except WebDriverException as e:
-            self._logger.warning(f"Direct click failed: {e}. Trying tap fallback...")
-            self.driver.execute_script("mobile: tap", {"elementId": btn.id})
+            self._logger.warning(f"Direct click failed: {e}. Trying coordinate tap fallback...")
+            fresh_btn = self._get_next_btn()
+            if fresh_btn is not None:
+                self._tap_element_center(fresh_btn)
 
     def _click_next_btn(self) -> bool:
         """Click 'Next' and verify the page actually transitioned, retrying if the tap was swallowed.
