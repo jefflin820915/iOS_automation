@@ -155,6 +155,7 @@ def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
     }
     opened_settings = False
     try:
+        driver.implicitly_wait(0)
         logger.info("Opening iOS Settings to inspect Wi-Fi details...")
         driver.activate_app("com.apple.Preferences")
         opened_settings = True
