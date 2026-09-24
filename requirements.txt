@@ -4,3 +4,4 @@ page_objects==1.1.0
 protobuf==3.20.1
 selenium==4.48.0
 tidevice[openssl]
+zeroconf
