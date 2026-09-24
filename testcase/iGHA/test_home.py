@@ -24,6 +24,5 @@ class TestGHAHome(BaseTestCase):
         gha_session.GHASession.handle_setup_requirement_pages(self)
         gha_session.GHASession.handle_pairing_until_device_connected(self)
         gha_session.GHASession.handle_verify_camera_live_stream_and_remove(self)
-        gha_session.GHASession.refresh_gha_devices(self)
         assert gha_session.GHASession.stop_gha(self)
         time.sleep(10)
