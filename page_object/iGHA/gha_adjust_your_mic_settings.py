@@ -1,10 +1,14 @@
-"""Page object for handling the 'Adjust your mic settings' page on iOS."""
+"""Page object for handling the 'Adjust your mic settings' page on iOS.
+NOTE: GHASession inherits from many page classes, so every private helper / constant here
+is prefixed with `_mic_` / `MIC_` to avoid being shadowed via MRO by same-named members
+of other pages (e.g. `_click_next_btn` of the live video page).
+"""
 import time
 from contextlib import contextmanager
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 from appium.webdriver.common.appiumby import AppiumBy
 from appium.webdriver.webelement import WebElement
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from common import constants
@@ -17,25 +21,27 @@ class OOBEInternalErrorException(Exception):
 
 class GHAAdjustYourMicSettingsPage(BasePage):
     """Class for managing microphone and audio recording toggles on the mic settings page."""
-    MICROPHONE_SWITCH_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Microphone"`]/**/XCUIElementTypeSwitch'
-    AUDIO_RECORDING_SWITCH_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Audio recording"`]/**/XCUIElementTypeSwitch'
-    PAGE_INDICATOR_PREDICATE = (
-        'type == "XCUIElementTypeCell" AND (label == "Microphone" OR label == "Audio recording")'
+    MIC_MICROPHONE_SWITCH_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Microphone"`]/**/XCUIElementTypeSwitch'
+    MIC_AUDIO_RECORDING_SWITCH_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Audio recording"`]/**/XCUIElementTypeSwitch'
+    MIC_PAGE_INDICATOR_PREDICATE = (
+        '(type == "XCUIElementTypeStaticText" AND label == "Adjust your mic settings") OR '
+        '(type == "XCUIElementTypeCell" AND (label == "Microphone" OR label == "Audio recording"))'
     )
-    NEXT_BTN_PREDICATE = 'label == "Next" OR name == "actionBarPrimaryButton"'
-    LOADING_PREDICATE = 'type == "XCUIElementTypeActivityIndicator" AND visible == 1'
-    INTERNAL_ERROR_PREDICATE = 'label == "Internal error encountered." OR name == "Internal error encountered."'
-    ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
-    SWITCH_ON_VALUES = ("1", "true")
-    IDLE_TIMEOUT = 20.0            # Max wait for loading spinner to disappear / Next to be enabled
-    LEAVE_PAGE_TIMEOUT = 8.0       # Max wait for page transition after tapping Next
-    SWITCH_LOCATE_TIMEOUT = 5.0    # Max wait for a switch to appear
-    SWITCH_STATE_TIMEOUT = 3.0     # Max wait for a switch value to flip after tapping
-    MAX_NEXT_ATTEMPTS = 3
-    POLL_INTERVAL = 0.5
+    MIC_NEXT_BTN_PREDICATE = 'label == "Next" OR name == "actionBarPrimaryButton"'
+    MIC_LOADING_PREDICATE = 'type == "XCUIElementTypeActivityIndicator" AND visible == 1'
+    MIC_INTERNAL_ERROR_PREDICATE = 'label == "Internal error encountered." OR name == "Internal error encountered."'
+    MIC_ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
+    MIC_SWITCH_ON_VALUES = ("1", "true")
+    MIC_IDLE_TIMEOUT = 20.0          # Max wait for page to become idle
+    MIC_IDLE_STABLE_SECONDS = 1.5    # Idle state must hold this long before tapping Next
+    MIC_LEAVE_PAGE_TIMEOUT = 8.0     # Max wait for page transition after tapping Next
+    MIC_SWITCH_LOCATE_TIMEOUT = 5.0
+    MIC_SWITCH_STATE_TIMEOUT = 3.0
+    MIC_MAX_NEXT_ATTEMPTS = 3
+    MIC_POLL_INTERVAL = 0.5
 
     @contextmanager
-    def _no_implicit_wait(self) -> Iterator[None]:
+    def _mic_no_implicit_wait(self) -> Iterator[None]:
         """Temporarily disable implicit wait so quick existence checks return immediately."""
         try:
             previous = self.driver.timeouts.implicit_wait
@@ -50,26 +56,34 @@ class GHAAdjustYourMicSettingsPage(BasePage):
             except WebDriverException:
                 pass
 
-    def _find_element(self, by: str, locator_value: str) -> Optional[WebElement]:
-        """Find an element using specified locator strategy with explicit wait."""
+    @contextmanager
+    def _mic_no_idle_wait(self) -> Iterator[None]:
+        """Temporarily disable WDA's wait-for-app-idle so taps are not delayed ~10s during loading."""
+        previous: Any = None
         try:
-            return WebDriverWait(self.driver, self.timeout).until(
-                EC.presence_of_element_located((by, locator_value))
-            )
-        except TimeoutException:
-            self._logger.error(f"Timed out waiting for element: by={by}, value='{locator_value}'")
-            return None
+            previous = self.driver.get_settings().get("waitForIdleTimeout")
+            self.driver.update_settings({"waitForIdleTimeout": 0})
+        except Exception:
+            pass
+        try:
+            yield
+        finally:
+            if previous is not None:
+                try:
+                    self.driver.update_settings({"waitForIdleTimeout": previous})
+                except Exception:
+                    pass
 
-    def _quick_find(self, by: str, locator_value: str) -> Optional[WebElement]:
+    def _mic_quick_find(self, by: str, locator_value: str) -> Optional[WebElement]:
         """Return the first matching element immediately (no waiting), or None."""
-        with self._no_implicit_wait():
+        with self._mic_no_implicit_wait():
             try:
                 elements = self.driver.find_elements(by, locator_value)
                 return elements[0] if elements else None
             except WebDriverException:
                 return None
 
-    def _tap_element_center(self, element: WebElement) -> None:
+    def _mic_tap_element_center(self, element: WebElement) -> None:
         """Coordinate tap at the element's center (avoids stale elementId references)."""
         rect = element.rect
         self.driver.execute_script("mobile: tap", {
@@ -77,58 +91,62 @@ class GHAAdjustYourMicSettingsPage(BasePage):
             "y": int(rect["y"] + rect["height"] / 2),
         })
 
-    def _get_next_btn(self) -> Optional[WebElement]:
-        """Get the 'Next' button using ACCESSIBILITY_ID or predicate."""
+    def _mic_get_next_btn(self) -> Optional[WebElement]:
         next_id = getattr(constants, "GHA_NEXT_BTN_ACCESSIBILITY_ID", "Next")
         return (
-                self._quick_find(AppiumBy.ACCESSIBILITY_ID, next_id)
-                or self._quick_find(AppiumBy.IOS_PREDICATE, self.NEXT_BTN_PREDICATE)
+                self._mic_quick_find(AppiumBy.ACCESSIBILITY_ID, next_id)
+                or self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_NEXT_BTN_PREDICATE)
         )
 
-    def _is_on_mic_settings_page(self) -> bool:
-        """Check whether the mic settings cells are still on screen."""
-        return self._quick_find(AppiumBy.IOS_PREDICATE, self.PAGE_INDICATOR_PREDICATE) is not None
+    def _mic_is_on_page(self) -> bool:
+        return self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_PAGE_INDICATOR_PREDICATE) is not None
 
-    def _is_loading(self) -> bool:
-        return self._quick_find(AppiumBy.IOS_PREDICATE, self.LOADING_PREDICATE) is not None
+    def _mic_is_idle_now(self) -> bool:
+        """Next button is enabled and no loading spinner is visible."""
+        if self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_LOADING_PREDICATE):
+            return False
+        btn = self._mic_get_next_btn()
+        try:
+            return btn is not None and btn.is_enabled()
+        except WebDriverException:
+            return False
 
-    def _wait_until_page_idle(self, timeout: float = IDLE_TIMEOUT) -> bool:
-        """Wait until no loading spinner is visible and the Next button is enabled."""
+    def _mic_wait_until_idle(self, timeout: float = MIC_IDLE_TIMEOUT) -> bool:
+        """Wait until the page stays idle for MIC_IDLE_STABLE_SECONDS continuously."""
         deadline = time.time() + timeout
+        idle_since: Optional[float] = None
         while time.time() < deadline:
-            self._check_for_internal_error()
-            btn = self._get_next_btn()
-            try:
-                next_enabled = btn is not None and btn.is_enabled()
-            except WebDriverException:
-                next_enabled = False
-            if next_enabled and not self._is_loading():
-                return True
-            time.sleep(self.POLL_INTERVAL)
+            self._mic_check_for_internal_error()
+            if self._mic_is_idle_now():
+                idle_since = idle_since or time.time()
+                if time.time() - idle_since >= self.MIC_IDLE_STABLE_SECONDS:
+                    return True
+            else:
+                idle_since = None
+            time.sleep(self.MIC_POLL_INTERVAL)
         self._logger.warning(f"[MicSettings] Page still busy after {timeout:.0f}s.")
         return False
 
-    def _wait_until_left_page(self, timeout: float = LEAVE_PAGE_TIMEOUT) -> bool:
-        """Wait until the mic settings page is gone (page transition completed)."""
+    def _mic_wait_until_left_page(self, timeout: float = MIC_LEAVE_PAGE_TIMEOUT) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            self._check_for_internal_error()
-            if not self._is_on_mic_settings_page():
+            self._mic_check_for_internal_error()
+            if not self._mic_is_on_page():
                 return True
-            time.sleep(self.POLL_INTERVAL)
+            time.sleep(self.MIC_POLL_INTERVAL)
         return False
 
-    def _check_for_internal_error(self) -> None:
+    def _mic_check_for_internal_error(self) -> None:
         """Dismiss 'Internal error encountered.' alert if present and raise.
         Raises:
             OOBEInternalErrorException: If the internal error alert is displayed.
         """
-        if not self._quick_find(AppiumBy.IOS_PREDICATE, self.INTERNAL_ERROR_PREDICATE):
+        if not self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_INTERNAL_ERROR_PREDICATE):
             return
         self._logger.warning("[MicSettings] Detected 'Internal error encountered.' alert dialog!")
         try:
             ok_btn = WebDriverWait(self.driver, 2.0).until(
-                EC.element_to_be_clickable((AppiumBy.IOS_PREDICATE, self.ALERT_OK_PREDICATE))
+                EC.element_to_be_clickable((AppiumBy.IOS_PREDICATE, self.MIC_ALERT_OK_PREDICATE))
             )
             ok_btn.click()
             self._logger.info("[MicSettings] Clicked 'OK' on internal error alert.")
@@ -136,62 +154,59 @@ class GHAAdjustYourMicSettingsPage(BasePage):
             self._logger.warning(f"[MicSettings] Failed to click OK on alert: {dismiss_err}")
         raise OOBEInternalErrorException("GHA displayed 'Internal error encountered.' during Mic settings.")
 
-    def _locate_switch(self, class_chain: str, fallback_index: int) -> Optional[WebElement]:
-        """Freshly locate a switch by class chain, falling back to its index among all switches."""
-        switch = self._quick_find(AppiumBy.IOS_CLASS_CHAIN, class_chain)
+    def _mic_locate_switch(self, class_chain: str, fallback_index: int) -> Optional[WebElement]:
+        switch = self._mic_quick_find(AppiumBy.IOS_CLASS_CHAIN, class_chain)
         if switch:
             return switch
-        with self._no_implicit_wait():
+        with self._mic_no_implicit_wait():
             try:
                 switches = self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeSwitch")
             except WebDriverException:
                 return None
         return switches[fallback_index] if len(switches) > fallback_index else None
 
-    def _read_switch_state(self, class_chain: str, fallback_index: int) -> Optional[bool]:
+    def _mic_read_switch_state(self, class_chain: str, fallback_index: int) -> Optional[bool]:
         """Return True (ON) / False (OFF), or None if the switch cannot be read."""
         for _ in range(3):
-            switch = self._locate_switch(class_chain, fallback_index)
+            switch = self._mic_locate_switch(class_chain, fallback_index)
             if switch is None:
                 return None
             try:
-                return str(switch.get_attribute("value") or "0") in self.SWITCH_ON_VALUES
-            except WebDriverException:  # includes StaleElementReferenceException
+                return str(switch.get_attribute("value") or "0") in self.MIC_SWITCH_ON_VALUES
+            except WebDriverException:
                 time.sleep(0.3)
         return None
 
-    def _wait_for_switch_state(self, class_chain: str, fallback_index: int, expected: bool,
-                               timeout: float = SWITCH_STATE_TIMEOUT) -> bool:
-        """Poll (with fresh lookups) until the switch reaches the expected state."""
-        deadline = time.time() + timeout
+    def _mic_wait_for_switch_state(self, class_chain: str, fallback_index: int, expected: bool) -> bool:
+        deadline = time.time() + self.MIC_SWITCH_STATE_TIMEOUT
         while time.time() < deadline:
-            if self._read_switch_state(class_chain, fallback_index) is expected:
+            if self._mic_read_switch_state(class_chain, fallback_index) is expected:
                 return True
-            time.sleep(self.POLL_INTERVAL)
+            time.sleep(self.MIC_POLL_INTERVAL)
         return False
 
-    def _tap_switch(self, class_chain: str, fallback_index: int, use_coordinates: bool) -> bool:
-        """Tap a freshly located switch via element click or coordinate tap."""
-        switch = self._locate_switch(class_chain, fallback_index)
+    def _mic_tap_switch(self, class_chain: str, fallback_index: int, use_coordinates: bool) -> bool:
+        switch = self._mic_locate_switch(class_chain, fallback_index)
         if switch is None:
             return False
         try:
-            if use_coordinates:
-                self._tap_element_center(switch)
-            else:
-                switch.click()
+            with self._mic_no_idle_wait():
+                if use_coordinates:
+                    self._mic_tap_element_center(switch)
+                else:
+                    switch.click()
             return True
         except WebDriverException as e:
             self._logger.debug(f"Tap on switch failed: {e}")
             return False
 
-    def _turn_on_switch(self, switch_name: str, class_chain: str, fallback_index: int) -> bool:
+    def _mic_turn_on_switch(self, switch_name: str, class_chain: str, fallback_index: int) -> bool:
         """Turn the switch ON if it is currently OFF, then wait for the backend save to finish."""
-        deadline = time.time() + self.SWITCH_LOCATE_TIMEOUT
-        state = self._read_switch_state(class_chain, fallback_index)
+        deadline = time.time() + self.MIC_SWITCH_LOCATE_TIMEOUT
+        state = self._mic_read_switch_state(class_chain, fallback_index)
         while state is None and time.time() < deadline:
-            time.sleep(self.POLL_INTERVAL)
-            state = self._read_switch_state(class_chain, fallback_index)
+            time.sleep(self.MIC_POLL_INTERVAL)
+            state = self._mic_read_switch_state(class_chain, fallback_index)
         if state is None:
             self._logger.warning(f"'{switch_name}' switch element not found.")
             return False
@@ -202,64 +217,61 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         for use_coordinates in (False, True):
             if use_coordinates:
                 self._logger.warning(f"'{switch_name}' still OFF after click. Trying coordinate tap...")
-            if self._tap_switch(class_chain, fallback_index, use_coordinates) and \
-                    self._wait_for_switch_state(class_chain, fallback_index, expected=True):
+            if self._mic_tap_switch(class_chain, fallback_index, use_coordinates) and \
+                    self._mic_wait_for_switch_state(class_chain, fallback_index, expected=True):
                 self._logger.info(f"Successfully turned ON '{switch_name}'.")
-                self._wait_until_page_idle()
+                self._mic_wait_until_idle()
                 return True
         self._logger.error(f"Failed to turn ON '{switch_name}'.")
         return False
 
-    def _turn_on_all_mic_toggles(self) -> bool:
-        """Turn ON both 'Microphone' and 'Audio recording' switches.
-        Returns:
-            True if both switches are ON, False otherwise.
-        """
+    def _mic_turn_on_all_toggles(self) -> bool:
         self._logger.info("Starting to enable all mic settings toggles...")
         results = [
-            self._turn_on_switch("Microphone", self.MICROPHONE_SWITCH_CLASS_CHAIN, 0),
-            self._turn_on_switch("Audio recording", self.AUDIO_RECORDING_SWITCH_CLASS_CHAIN, 1),
+            self._mic_turn_on_switch("Microphone", self.MIC_MICROPHONE_SWITCH_CLASS_CHAIN, 0),
+            self._mic_turn_on_switch("Audio recording", self.MIC_AUDIO_RECORDING_SWITCH_CLASS_CHAIN, 1),
         ]
         return all(results)
 
-    def _tap_next(self, btn: WebElement) -> None:
-        try:
-            btn.click()
-        except WebDriverException as e:
-            self._logger.warning(f"Direct click failed: {e}. Trying coordinate tap fallback...")
-            fresh_btn = self._get_next_btn()
-            if fresh_btn is not None:
-                self._tap_element_center(fresh_btn)
+    def _mic_tap_next(self, btn: WebElement) -> None:
+        with self._mic_no_idle_wait():
+            try:
+                btn.click()
+            except WebDriverException as e:
+                self._logger.warning(f"Direct click failed: {e}. Trying coordinate tap fallback...")
+                fresh_btn = self._mic_get_next_btn()
+                if fresh_btn is not None:
+                    self._mic_tap_element_center(fresh_btn)
 
-    def _click_next_btn(self) -> bool:
+    def _mic_click_next_and_verify(self) -> bool:
         """Click 'Next' and verify the page actually transitioned, retrying if the tap was swallowed.
-        Returns:
-            True if the page left the mic settings screen, False otherwise.
         Raises:
             OOBEInternalErrorException: If internal error dialog appears.
         """
-        for attempt in range(1, self.MAX_NEXT_ATTEMPTS + 1):
-            self._wait_until_page_idle()
-            btn = self._get_next_btn()
+        for attempt in range(1, self.MIC_MAX_NEXT_ATTEMPTS + 1):
+            self._mic_wait_until_idle()
+            btn = self._mic_get_next_btn()
             if btn is None:
-                if not self._is_on_mic_settings_page():
-                    self._logger.info("Already left mic settings page.")
+                if not self._mic_is_on_page():
+                    self._logger.info("[MicSettings] Already left mic settings page.")
                     return True
-                self._logger.error("Cannot click 'Next': Button element not found.")
+                self._logger.error("[MicSettings] Cannot click 'Next': Button element not found.")
                 return False
-            self._logger.info(f"Clicking 'Next' button (attempt {attempt}/{self.MAX_NEXT_ATTEMPTS})...")
+            self._logger.info(
+                f"[MicSettings] Clicking 'Next' button (attempt {attempt}/{self.MIC_MAX_NEXT_ATTEMPTS})..."
+            )
             try:
-                self._tap_next(btn)
+                self._mic_tap_next(btn)
             except WebDriverException as tap_err:
-                self._logger.warning(f"Failed to tap 'Next': {tap_err}")
-            if self._wait_until_left_page():
-                self._logger.info("Successfully left mic settings page.")
+                self._logger.warning(f"[MicSettings] Failed to tap 'Next': {tap_err}")
+            if self._mic_wait_until_left_page():
+                self._logger.info("[MicSettings] Successfully left mic settings page.")
                 return True
             self._logger.warning(
-                f"[Attempt {attempt}/{self.MAX_NEXT_ATTEMPTS}] Still on mic settings page after tapping 'Next' "
-                f"(tap likely swallowed during loading). Retrying..."
+                f"[MicSettings] [Attempt {attempt}/{self.MIC_MAX_NEXT_ATTEMPTS}] Still on mic settings page "
+                f"after tapping 'Next' (tap likely swallowed during loading). Retrying..."
             )
-        self._logger.error("Failed to leave mic settings page after all 'Next' attempts.")
+        self._logger.error("[MicSettings] Failed to leave mic settings page after all 'Next' attempts.")
         return False
 
     def enable_all_mic_settings_and_proceed(self) -> bool:
@@ -267,5 +279,5 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         Returns:
             True if the page transitioned successfully, False otherwise.
         """
-        self._turn_on_all_mic_toggles()
-        return self._click_next_btn()
+        self._mic_turn_on_all_toggles()
+        return self._mic_click_next_and_verify()
