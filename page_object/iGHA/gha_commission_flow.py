@@ -1,421 +1,242 @@
-"""Page object for handling Matter device commissioning and iOS system sheets with StaleElement resilience."""
+"""Page object for Matter device commissioning and iOS system sheets with StaleElement resilience."""
 import time
-from typing import Optional, List
+from contextlib import contextmanager
+from typing import Callable, Iterator, List, NoReturn, Optional, Sequence, Tuple
 from appium.webdriver.common.appiumby import AppiumBy
-from selenium.common.exceptions import (
-    WebDriverException,
-    StaleElementReferenceException,
-    NoSuchElementException,
-    TimeoutException
-)
 from appium.webdriver.webelement import WebElement
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import WebDriverException
 from common import constants
 from common.base_page import BasePage
-from page_object.iGHA.gha_tab_page import GHATabPage
-from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDevicePage
-from page_object.iGHA.gha_device_connected_page import GHADeviceConnectedPage
 from page_object.iGHA.gha_camera_activated_page import GHACameraActivatedPage
-from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShouldNowSeeLiveVideoPage
-from page_object.iGHA.gha_watch_setup_video_page import GHAWatchSetupVideoPage
 from page_object.iGHA.gha_connect_device_to_google_account_page import GHAConnectDeviceToGoogleAccountPage
+from page_object.iGHA.gha_device_connected_page import GHADeviceConnectedPage
+from page_object.iGHA.gha_tab_page import GHATabPage
+from page_object.iGHA.gha_watch_setup_video_page import GHAWatchSetupVideoPage
+from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDevicePage
+from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShouldNowSeeLiveVideoPage
 
+
+Locator = Tuple[str, str]
+HeadlineHandler = Callable[[str], bool]
+
+def _contains_any(text: str, keywords: Sequence[str]) -> bool:
+    lowered = text.lower()
+    return any(kw.lower() in lowered for kw in keywords)
 
 class GHACommissioningPageObject(BasePage):
-    """Unified handler for Apple Matter system sheets and Google Home App commissioning steps."""
-
-    HEADLINE_LOCATOR = (AppiumBy.ACCESSIBILITY_ID, constants.GHA_CONNECTING_TITLE_ACCESSIBILITY_ID)
-
+    """Unified handler for Apple Matter system sheets and Google Home App commissioning steps.
+    NOTE: Private helpers are prefixed with `_cm_` to avoid MRO name collisions in GHASession.
+    """
+    HEADLINE_LOCATOR: Locator = (AppiumBy.ACCESSIBILITY_ID, constants.GHA_CONNECTING_TITLE_ACCESSIBILITY_ID)
     APPLE_OVERLAY_WINDOW_CHAIN = '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]'
-
-    APPLE_CARD_TITLE_CHAIN = (
-        '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]/**/XCUIElementTypeTextView[`visible == 1`]'
+    APPLE_CARD_TITLE_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeTextView[`visible == 1`]'
+    APPLE_TEXT_FIELD_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeTextField[`visible == 1`]'
+    APPLE_ADD_BTN_CHAIN = (
+        f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/'
+        'XCUIElementTypeButton[`name CONTAINS "Add to" OR label CONTAINS "Add to"`]'
     )
-
-    APPLE_TEXT_FIELD_CHAIN = (
-        '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]/**/XCUIElementTypeTextField[`visible == 1`]'
+    RECOVERY_EXIT_BTN: Locator = (
+        AppiumBy.IOS_PREDICATE,
+        'type == "XCUIElementTypeButton" AND '
+        '(name IN {"Exit setup", "Exit", "Leave", "Cancel", "Close", "Done", "Dismiss"} OR '
+        'label IN {"Exit setup", "Exit", "Leave", "Cancel", "Close", "Done", "Dismiss"})',
     )
+    DEVICES_TAB_BTN: Locator = (
+        AppiumBy.IOS_CLASS_CHAIN,
+        '**/XCUIElementTypeTabBar/**/XCUIElementTypeButton[`name == "Devices" OR label == "Devices"`]',
+    )
+    DEVICE_TILE: Locator = (AppiumBy.NAME, "deviceTile")
+    DEVICE_TILE_TITLE: Locator = (AppiumBy.NAME, "deviceTileTitleTextView")
+    DEVICE_TILE_CELL: Locator = (AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeCell" AND name CONTAINS "deviceTileCell"')
+    SYSTEM_ALERT_BUTTONS = ("Add Anyway", "Set up anyway", "OK", "Allow")
+    FAILURE_KEYWORDS = (
+        "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect", "Unable to connect",
+        "Something went wrong", "Check your connection", "Device not found", "Setup failed",
+    )
+    PROGRESS_KEYWORDS = (
+        "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
+        "Setting up", "Activating camera", "Downloading update", "Update finished",
+    )
+    DEFAULT_PLUG_KEYWORDS = ("plug", "outlet")
+    PLUG_ON_VALUES = ("on", "1", "true")
+    PLUG_OFF_VALUES = ("off", "0", "false")
+    CM_POLL_INTERVAL = 1.5
+    CM_PROGRESS_INTERVAL = 2.5
 
-    def _is_gha_running(self) -> bool:
-        """Check if GHA is currently running in the active foreground."""
+    @contextmanager
+    def _cm_no_implicit_wait(self) -> Iterator[None]:
+        """Temporarily disable implicit wait and always restore the previous value."""
+        try:
+            previous = self.driver.timeouts.implicit_wait
+        except Exception:
+            previous = getattr(constants, "DEFAULT_IMPLICIT_WAIT", 10.0)
+        self.driver.implicitly_wait(0)
+        try:
+            yield
+        finally:
+            try:
+                self.driver.implicitly_wait(previous)
+            except WebDriverException:
+                pass
+
+    def _cm_find_all(self, by: str, value: str, root: Optional[WebElement] = None) -> List[WebElement]:
+        with self._cm_no_implicit_wait():
+            try:
+                return (root or self.driver).find_elements(by, value)
+            except WebDriverException:
+                return []
+
+    def _cm_find_displayed(self, by: str, value: str) -> Optional[WebElement]:
+        """Return the first displayed element immediately (stale-safe), or None."""
+        for elem in self._cm_find_all(by, value):
+            try:
+                if elem.is_displayed():
+                    return elem
+            except WebDriverException:
+                continue
+        return None
+
+    def _cm_click_displayed(self, by: str, value: str) -> bool:
+        elem = self._cm_find_displayed(by, value)
+        if elem is None:
+            return False
+        try:
+            elem.click()
+            return True
+        except WebDriverException:
+            return False
+
+    @staticmethod
+    def _cm_read_text(elem: WebElement, attrs: Sequence[str] = ("value", "label", "name")) -> str:
+        try:
+            for attr in attrs:
+                text = (elem.get_attribute(attr) or "").strip()
+                if text:
+                    return text
+            return (elem.text or "").strip()
+        except WebDriverException:
+            return ""
+
+    def _cm_is_gha_foreground(self) -> bool:
         try:
             return self.driver.query_app_state(constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
         except WebDriverException as e:
             self._logger.error(f"Failed to query GHA app state: {e}")
             return False
-
     def stop_gha(self) -> bool:
         """Terminate the GHA application."""
         try:
-            app_state = self.driver.query_app_state(constants.GHA_BUNDLE_ID)
-            if app_state != constants.APP_STATE_NOT_RUNNING:
+            if self.driver.query_app_state(constants.GHA_BUNDLE_ID) == constants.APP_STATE_NOT_RUNNING:
+                self._logger.info("GHA is not running.")
+            else:
                 self.driver.terminate_app(constants.GHA_BUNDLE_ID)
                 self._logger.info("GHA stopped successfully.")
-            else:
-                self._logger.info("GHA is not running.")
             return True
         except WebDriverException as e:
             self._logger.error(f"Failed to stop GHA: {e}")
             return False
-
     def start_gha(self, timeout: float = 10.0) -> bool:
-        """Start GHA and ensure it is running in the active foreground."""
-        if self._is_gha_running():
+        """Start GHA and ensure it is running in the foreground."""
+        if self._cm_is_gha_foreground():
             self._logger.info("GHA is already running in foreground.")
             return True
         self._logger.info("Starting Google Home App on iOS...")
-        try:
-            self.driver.activate_app(constants.GHA_BUNDLE_ID)
-        except WebDriverException as e:
-            self._logger.error(f"Failed to activate GHA: {e}")
-            return False
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if self._is_gha_running():
-                self._logger.info("GHA launched successfully in foreground.")
-                return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
             try:
                 self.driver.activate_app(constants.GHA_BUNDLE_ID)
-            except WebDriverException:
-                pass
+            except WebDriverException as e:
+                self._logger.debug(f"activate_app failed: {e}")
+            if self._cm_is_gha_foreground():
+                self._logger.info("GHA launched successfully in foreground.")
+                return True
             time.sleep(0.5)
         self._logger.error(f"Timed out after {timeout}s waiting for GHA.")
         return False
 
     def is_apple_sheet_present(self) -> bool:
-        """Check if Apple's native Matter commissioning sheet (SBTransientOverlayWindow) is currently visible."""
-        try:
-            self.driver.implicitly_wait(0)
-            windows = self.driver.find_elements(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_OVERLAY_WINDOW_CHAIN)
-            for w in windows:
-                try:
-                    if w.is_displayed():
-                        return True
-                except (StaleElementReferenceException, WebDriverException):
-                    continue
-        except Exception:
-            pass
-        return False
-
-    def _get_gha_headline(self) -> str:
-        """Fetch the current GHA page headline text via HeaderView_headlineLabel."""
-        try:
-            self.driver.implicitly_wait(0)
-            elements = self.driver.find_elements(*self.HEADLINE_LOCATOR)
-            for elem in elements:
-                try:
-                    if elem.is_displayed():
-                        text = elem.get_attribute("value") or elem.get_attribute("label") or elem.text
-                        if text and text.strip():
-                            return text.strip()
-                except (StaleElementReferenceException, WebDriverException):
-                    continue
-        except Exception:
-            pass
-        return ""
-
-    def _click_if_visible(self, by: AppiumBy, value: str) -> bool:
-        """Safely click an element if it exists and is displayed."""
-        try:
-            self.driver.implicitly_wait(0)
-            elements = self.driver.find_elements(by=by, value=value)
-            for elem in elements:
-                try:
-                    if elem.is_displayed():
-                        elem.click()
-                        return True
-                except (StaleElementReferenceException, WebDriverException):
-                    continue
-        except Exception:
-            pass
-        return False
-
-    def _click_apple_sheet_button(self, name_or_label: str) -> bool:
-        """Click a button located specifically within SBTransientOverlayWindow."""
-        chain = (
-            f'**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]/**/'
-            f'XCUIElementTypeButton[`name == "{name_or_label}" OR label == "{name_or_label}"`]'
-        )
-        try:
-            self.driver.implicitly_wait(0)
-            buttons = self.driver.find_elements(AppiumBy.IOS_CLASS_CHAIN, chain)
-            for btn in buttons:
-                try:
-                    if btn.is_displayed():
-                        btn.click()
-                        return True
-                except (StaleElementReferenceException, WebDriverException):
-                    continue
-        except Exception:
-            pass
-        return False
+        """Check if Apple's native Matter sheet (SBTransientOverlayWindow) is visible."""
+        return self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_OVERLAY_WINDOW_CHAIN) is not None
 
     def handle_system_alert(self) -> bool:
-        """Handle iOS system alerts like 'Uncertified Accessory', 'Bridge Accessories Can Automatically Add'."""
-        try:
-            self.driver.implicitly_wait(0)
-            alerts = self.driver.find_elements(AppiumBy.CLASS_NAME, constants.GHA_COMMISSION_WINDOW_ALERT)
-            if alerts and alerts[0].is_displayed():
-                self._logger.warning("Detected iOS System Alert dialog!")
-                for btn_text in ["Add Anyway", "Set up anyway", "OK", "Allow"]:
-                    if self._click_if_visible(AppiumBy.ACCESSIBILITY_ID, btn_text):
-                        self._logger.info(f"Dismissed system alert via '{btn_text}'.")
-                        return True
-        except Exception:
-            pass
+        """Dismiss iOS system alerts like 'Uncertified Accessory'."""
+        if self._cm_find_displayed(AppiumBy.CLASS_NAME, constants.GHA_COMMISSION_WINDOW_ALERT) is None:
+            return False
+        self._logger.warning("Detected iOS System Alert dialog!")
+        for btn_text in self.SYSTEM_ALERT_BUTTONS:
+            if self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, btn_text):
+                self._logger.info(f"Dismissed system alert via '{btn_text}'.")
+                return True
         return False
 
-    def _get_apple_card_title(self) -> str:
-        """Safely fetch Apple sheet card title strictly from inside SBTransientOverlayWindow."""
+    def _cm_get_apple_card_title(self) -> str:
         for _ in range(3):
-            try:
-                self.driver.implicitly_wait(0)
-                titles = self.driver.find_elements(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_CARD_TITLE_CHAIN)
-                for t in titles:
-                    try:
-                        if t.is_displayed():
-                            name = t.get_attribute("name") or t.get_attribute("label") or t.text or ""
-                            if name.strip():
-                                return name.strip()
-                    except (StaleElementReferenceException, WebDriverException):
-                        break
-            except (StaleElementReferenceException, WebDriverException):
-                pass
-                time.sleep(0.4)
+            elem = self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_CARD_TITLE_CHAIN)
+            if elem is not None:
+                title = self._cm_read_text(elem, ("name", "label", "value"))
+                if title:
+                    return title
+            time.sleep(0.4)
         return ""
 
-    def _find_element(self, by: AppiumBy, locator_value: str) -> Optional[WebElement]:
-        """Find an element using specified locator strategy with explicit wait."""
-        try:
-            return WebDriverWait(self.driver, 3.0).until(
-                EC.presence_of_element_located((by, locator_value))
+    def _cm_click_apple_sheet_button(self, *names: str) -> bool:
+        """Click the first matching button inside SBTransientOverlayWindow."""
+        for name in names:
+            chain = (
+                f'{self.APPLE_OVERLAY_WINDOW_CHAIN}/**/'
+                f'XCUIElementTypeButton[`name == "{name}" OR label == "{name}"`]'
             )
-        except TimeoutException:
-            self._logger.error(f"Timed out waiting for element: by={by}, value='{locator_value}'")
-            return None
-
-    def _click_if_exists(self, by: AppiumBy, value: str) -> bool:
-        """Safely find and click an element if it exists and is displayed (Never throws)."""
-        try:
-            elements = self.driver.find_elements(by=by, value=value)
-            if elements and elements[0].is_displayed():
-                elements[0].click()
+            if self._cm_click_displayed(AppiumBy.IOS_CLASS_CHAIN, chain):
                 return True
-        except (NoSuchElementException, StaleElementReferenceException, WebDriverException):
-            pass
         return False
 
-    def _dismiss_commissioning_and_go_to_devices(self) -> None:
-        """Dismisses any error dialogs/sheets and returns GHA to the Devices or Home tab."""
-        self._logger.info("[Recovery] Attempting to dismiss commissioning failure screens and return to Devices tab...")
-        exit_predicates = [
-            'label == "Exit setup" OR name == "Exit setup"',
-            'label == "Exit" OR name == "Exit"',
-            'label == "Cancel" OR name == "Cancel"',
-            'label == "Close" OR name == "Close"',
-            'label == "Done" OR name == "Done"'
-        ]
-        for _ in range(3):
-            found_btn = False
-            for pred in exit_predicates:
-                try:
-                    btns = self.driver.find_elements(AppiumBy.IOS_PREDICATE, pred)
-                    for btn in btns:
-                        if btn.is_displayed():
-                            btn_text = btn.text or btn.get_attribute("label") or "Exit"
-                            self._logger.info(f"[Recovery] Clicking exit/cancel button: '{btn_text}'")
-                            btn.click()
-                            time.sleep(1.5)
-                            found_btn = True
-                            break
-                except Exception:
-                    pass
-                if found_btn:
-                    break
-            if not found_btn:
-                break
-        try:
-            confirm_btns = self.driver.find_elements(
-                AppiumBy.XPATH,
-                '//XCUIElementTypeButton[@name="Exit setup" or @name="Exit" or @name="Leave"]'
-            )
-            for b in confirm_btns:
-                if b.is_displayed():
-                    b.click()
-                    time.sleep(1.5)
-        except Exception:
-            pass
-        try:
-            dismiss_btns = self.driver.find_elements(
-                AppiumBy.XPATH,
-                '//XCUIElementTypeButton[@name="Dismiss" or @name="Cancel" or @name="好"]'
-            )
-            for b in dismiss_btns:
-                if b.is_displayed():
-                    b.click()
-                    time.sleep(1.0)
-        except Exception:
-            pass
+    def _cm_on_apple_added(self) -> None:
+        self._logger.info("[AppleSheet] Device successfully added! Clicking 'Done'...")
+        done_id = getattr(constants, "GHA_DONE_BTN_ACCESSIBILITY_ID", "Done")
+        if self._cm_click_apple_sheet_button(done_id, "Done"):
+            time.sleep(1.5)
+
+    def _cm_on_apple_failure(self, card_title: str) -> NoReturn:
+        self._logger.error(f"[AppleSheet] Reported failure: '{card_title}'")
+        self._cm_click_apple_sheet_button("OK", "Done")
         time.sleep(1.5)
-        try:
-            device_tabs = self.driver.find_elements(
-                AppiumBy.XPATH,
-                '//XCUIElementTypeTabBar//XCUIElementTypeButton[@name="Devices" or @label="Devices"]'
-            )
-            for tab in device_tabs:
-                if tab.is_displayed():
-                    self._logger.info("[Recovery] Tapping Devices tab...")
-                    tab.click()
-                    time.sleep(2.0)
-                    break
-        except Exception as e:
-            self._logger.warning(f"[Recovery] Could not tap Devices tab: {e}")
+        self._cm_recover_and_fail(f"Apple sheet failed with '{card_title}'")
 
-    def _locate_plug_button_by_name(self, target_name: str) -> Optional[WebElement]:
-        """Dynamically re-locate a specific plug button to prevent StaleElementReferenceException."""
-        try:
-            device_tiles = self.driver.find_elements(AppiumBy.NAME, "deviceTile")
-            for tile in device_tiles:
-                lbl = (tile.get_attribute("label") or "").lower()
-                name_attr = (tile.get_attribute("name") or "").lower()
-                title_val = ""
-                try:
-                    title_elem = tile.find_elements(AppiumBy.NAME, "deviceTileTitleTextView")
-                    if title_elem:
-                        title_val = (title_elem[0].get_attribute("value") or "").lower()
-                except Exception:
-                    pass
-                target_lower = target_name.lower()
-                if target_lower in lbl or target_lower in name_attr or (title_val and target_lower in title_val):
-                    return tile
-        except Exception:
-            pass
-        try:
-            cells = self.driver.find_elements(AppiumBy.XPATH, '//XCUIElementTypeCell[contains(@name, "deviceTileCell")]')
-            for cell in cells:
-                cell_lbl = (cell.get_attribute("label") or "").lower()
-                if target_name.lower() in cell_lbl:
-                    inner_btns = cell.find_elements(AppiumBy.NAME, "deviceTile")
-                    return inner_btns[0] if inner_btns else cell
-        except Exception:
-            pass
-        return None
-
-    def power_cycle_smart_plug(
-            self,
-            keywords: Optional[List[str]] = None,
-            off_wait: float = 5.0,
-            on_wait: float = 8.0
-    ) -> bool:
-        """Locates all device tiles containing 'plug' or 'outlet' in their name/label,
-        and sequentially cycles power for EACH device: OFF -> wait -> ON -> wait.
-        """
-        self._logger.info("[PowerCycle] Resetting GHA state: stopping and restarting app...")
-        self.stop_gha()
-        time.sleep(2.0)
-        self.start_gha()
-        time.sleep(3.0)
-        self._logger.info("[PowerCycle] Navigating to Devices tab...")
-        try:
-            GHATabPage(self.driver).go_to_tab(constants.TAB.DEVICES)
-        except TypeError:
-            GHATabPage(self.driver).go_to_tab(constants.TAB.DEVICES)
-        time.sleep(2.0)
-        if keywords is None:
-            keywords = ["plug", "outlet", "插頭"]
-        self._logger.info(f"[PowerCycle] Scanning for all smart plug/outlet devices matching keywords: {keywords}...")
-        def is_plug_match(elem) -> bool:
-            lbl = (elem.get_attribute("label") or "").lower()
-            val = (elem.get_attribute("value") or "").lower()
-            name = (elem.get_attribute("name") or "").lower()
-            return any(kw.lower() in lbl or kw.lower() in val or kw.lower() in name for kw in keywords)
-        discovered_plugs: List[str] = []
-        for attempt in range(2):
-            try:
-                device_tiles = self.driver.find_elements(AppiumBy.NAME, "deviceTile")
-                for tile in device_tiles:
-                    if is_plug_match(tile):
-                        title_val = ""
-                        try:
-                            t_elem = tile.find_elements(AppiumBy.NAME, "deviceTileTitleTextView")
-                            if t_elem:
-                                title_val = (t_elem[0].get_attribute("value") or "").strip()
-                        except Exception:
-                            pass
-                        ident = title_val or (tile.get_attribute("label") or "").split(",")[0].strip() or tile.get_attribute("name")
-                        if ident and ident not in discovered_plugs:
-                            discovered_plugs.append(ident)
-            except Exception as e:
-                self._logger.warning(f"[PowerCycle] Error scanning deviceTile buttons: {e}")
-            try:
-                cells = self.driver.find_elements(AppiumBy.XPATH, '//XCUIElementTypeCell[contains(@name, "deviceTileCell")]')
-                for cell in cells:
-                    if is_plug_match(cell):
-                        ident = (cell.get_attribute("label") or "").split(",")[0].strip()
-                        if ident and ident not in discovered_plugs:
-                            discovered_plugs.append(ident)
-            except Exception as e:
-                self._logger.warning(f"[PowerCycle] Error scanning cells: {e}")
-            if discovered_plugs:
-                break
-            if attempt == 0:
-                self._logger.info("[PowerCycle] No plugs found on top fold, scrolling down...")
-                try:
-                    self.driver.execute_script("mobile: scroll", {"direction": "down"})
-                    time.sleep(1.5)
-                except Exception:
-                    pass
-        if not discovered_plugs:
-            self._logger.error(f"[PowerCycle] FAILED to find any smart plug/outlet matching keywords: {keywords}")
-            return False
-        self._logger.info(
-            f"[PowerCycle] Discovered {len(discovered_plugs)} target plug/outlet device(s): {discovered_plugs}. "
-            f"Power-cycling each sequentially..."
+    def _cm_on_apple_bridge_name(self, device_name: str) -> None:
+        self._logger.info(f"[AppleSheet] Naming step detected. Setting device name to '{device_name}'...")
+        field = (
+                self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_TEXT_FIELD_CHAIN)
+                or self._cm_find_displayed(AppiumBy.CLASS_NAME, constants.GHA_TEXT_EDIT_VIEW_CLASS_NAME)
         )
-        all_success = True
-        for idx, plug_name in enumerate(discovered_plugs, start=1):
-            self._logger.info(f"[PowerCycle] [{idx}/{len(discovered_plugs)}] Processing device: '{plug_name}'...")
-            btn = self._locate_plug_button_by_name(plug_name)
-            if not btn:
-                self._logger.warning(f"[PowerCycle] [{idx}/{len(discovered_plugs)}] Could not re-locate button for '{plug_name}'. Skipping.")
-                all_success = False
-                continue
-            current_val = (btn.get_attribute("value") or "").strip().lower()
-            is_on = current_val in ["on", "1", "true"]
-            self._logger.info(f"[PowerCycle] Initial power state of '{plug_name}': value='{current_val}' (is_on={is_on})")
-            try:
-                if is_on or current_val not in ["off", "0", "false"]:
-                    self._logger.info(f"[PowerCycle] Tapping to turn OFF '{plug_name}'...")
-                    btn.click()
-                    self._logger.info(f"[PowerCycle] '{plug_name}' turned OFF. Waiting {off_wait}s to discharge...")
-                    time.sleep(off_wait)
-                    self._logger.info(f"[PowerCycle] Re-locating '{plug_name}' to turn back ON...")
-                    btn_on = self._locate_plug_button_by_name(plug_name)
-                    if btn_on:
-                        self._logger.info(f"[PowerCycle] Tapping to turn ON '{plug_name}'...")
-                        btn_on.click()
-                    else:
-                        self._logger.warning(f"[PowerCycle] Re-locating '{plug_name}' failed, trying fallback click...")
-                        btn.click()
-                    self._logger.info(f"[PowerCycle] '{plug_name}' turned ON! Waiting {on_wait}s for boot...")
-                    time.sleep(on_wait)
-                else:
-                    self._logger.info(f"[PowerCycle] '{plug_name}' is currently OFF. Tapping to turn ON...")
-                    btn.click()
-                    self._logger.info(f"[PowerCycle] '{plug_name}' turned ON! Waiting {on_wait}s for boot...")
-                    time.sleep(on_wait)
-                self._logger.info(f"[PowerCycle] [{idx}/{len(discovered_plugs)}] Successfully power-cycled '{plug_name}'.")
-            except Exception as plug_err:
-                self._logger.error(f"[PowerCycle] Failed power-cycling '{plug_name}': {plug_err}")
-                all_success = False
-        self._logger.info(f"[PowerCycle] Finished sequential power cycle for all {len(discovered_plugs)} devices.")
-        return all_success
+        if field is None:
+            self._logger.debug("[AppleSheet] Name field not found yet (sheet transitioning).")
+            return
+        try:
+            field.clear()
+            time.sleep(0.5)
+            field.send_keys(device_name)
+            time.sleep(0.5)
+        except WebDriverException as e:
+            self._logger.debug(f"[AppleSheet] Naming field transition: {e}")
+            return
+        if self._cm_click_apple_sheet_button("Continue") or \
+                self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, "Continue"):
+            self._logger.info("[AppleSheet] Submitted custom device name.")
+            time.sleep(2.0)
+
+    def _cm_click_apple_add_button(self) -> bool:
+        if self._cm_click_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_ADD_BTN_CHAIN):
+            self._logger.info("[AppleSheet] Clicked 'Add to Google Home'.")
+            time.sleep(1.0)
+            return True
+        return False
 
     def handle_apple_commissioning_sheet(self, device_name: str) -> bool:
-        """Observe and act on foreground Apple Matter ProxCard sheet.
+        """Observe and act on the foreground Apple Matter sheet.
         Returns:
-            bool: True if Apple sheet was present and handled, False if not present.
+            True if a system alert / Apple sheet was present (and handled), False otherwise.
+        Raises:
+            AssertionError: If the Apple sheet reports 'Unable to Add Accessory'.
         """
         try:
             if self.handle_system_alert():
@@ -423,176 +244,279 @@ class GHACommissioningPageObject(BasePage):
                 return True
             if not self.is_apple_sheet_present():
                 return False
-            card_title = self._get_apple_card_title()
+            card_title = self._cm_get_apple_card_title()
             if not card_title:
                 return True
-            self._logger.info(f"Active Apple Commissioning Sheet: '{card_title}'")
-            if "Added to" in card_title or "added to" in card_title.lower():
-                self._logger.info("Apple sheet: Device successfully added! Clicking 'Done' inside sheet...")
-                done_id = getattr(constants, "GHA_DONE_BTN_ACCESSIBILITY_ID", "Done")
-                if self._click_apple_sheet_button(done_id) or self._click_apple_sheet_button("Done"):
-                    time.sleep(1.5)
-                    return True
-            if "Unable to Add Accessory" in card_title or "unable to add accessory" in card_title.lower():
-                self._logger.error(f"Apple sheet reported failure: '{card_title}'")
-                ok_id = getattr(constants, "GHA_DONE_BTN_ACCESSIBILITY_ID", "OK")
-                self._click_apple_sheet_button(ok_id) or self._click_apple_sheet_button("OK")
-                time.sleep(1.5)
-                self._dismiss_commissioning_and_go_to_devices()
-                cycle_ok = self.power_cycle_smart_plug()
-                raise AssertionError(
-                    f"FATAL: Apple sheet failed with '{card_title}'. "
-                    f"Smart plug power-cycle: {'SUCCESS' if cycle_ok else 'FAILED'}."
-                )
-            if "Bridge Name" in card_title:
-                self._logger.info(f"Apple sheet: Detected naming step '{card_title}'. Updating device name to '{device_name}'...")
-                try:
-                    self._logger.info("Detected 'Bridge Name' step. Edit the device name...")
-                    self._find_element(AppiumBy.CLASS_NAME, constants.GHA_TEXT_EDIT_VIEW_CLASS_NAME).clear()
-                    time.sleep(1)
-                    self._find_element(AppiumBy.CLASS_NAME, constants.GHA_TEXT_EDIT_VIEW_CLASS_NAME).send_keys(device_name)
-                    time.sleep(1)
-                    if self._click_apple_sheet_button("Continue") or self._click_if_visible(AppiumBy.ACCESSIBILITY_ID, "Continue"):
-                        self._logger.info("Submitted custom device name on Apple sheet.")
-                        time.sleep(2.0)
-                        return True
-                except (StaleElementReferenceException, WebDriverException) as e:
-                    self._logger.debug(f"Naming step element transition: {e}")
-                    return True
-            add_chain = (
-                '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]/**/'
-                'XCUIElementTypeButton[`name CONTAINS "Add to" OR label CONTAINS "Add to"`]'
-            )
-            try:
-                add_buttons = self.driver.find_elements(AppiumBy.IOS_CLASS_CHAIN, add_chain)
-                for btn in add_buttons:
-                    try:
-                        if btn.is_displayed():
-                            btn.click()
-                            self._logger.info("Clicked 'Add to Google Home' on Apple sheet.")
-                            time.sleep(1.0)
-                            return True
-                    except (StaleElementReferenceException, WebDriverException):
-                        continue
-            except Exception:
-                pass
-            self._logger.info(f"Apple sheet in progress: '{card_title}'... Waiting.")
-            time.sleep(2.0)
+            self._logger.info(f"[AppleSheet] Active card: '{card_title}'")
+            if _contains_any(card_title, ("added to",)):
+                self._cm_on_apple_added()
+            elif _contains_any(card_title, ("unable to add accessory",)):
+                self._cm_on_apple_failure(card_title)
+            elif "Bridge Name" in card_title:
+                self._cm_on_apple_bridge_name(device_name)
+            elif not self._cm_click_apple_add_button():
+                self._logger.info(f"[AppleSheet] In progress: '{card_title}'... Waiting.")
+                time.sleep(2.0)
             return True
         except AssertionError:
             raise
-        except (StaleElementReferenceException, WebDriverException) as e:
-            self._logger.debug(f"Apple sheet transition in progress ({e.__class__.__name__}). Retrying next cycle...")
+        except WebDriverException as e:
+            self._logger.debug(f"[AppleSheet] Transition in progress ({e.__class__.__name__}). Retrying...")
             time.sleep(1.0)
             return True
+
+    def _cm_dismiss_commissioning_and_go_to_devices(self) -> None:
+        """Dismiss error dialogs / setup screens and return GHA to the Devices tab."""
+        self._logger.info("[Recovery] Dismissing commissioning screens and returning to Devices tab...")
+        for _ in range(5):
+            btn = self._cm_find_displayed(*self.RECOVERY_EXIT_BTN)
+            if btn is None:
+                break
+            label = self._cm_read_text(btn, ("label", "name")) or "Exit"
+            self._logger.info(f"[Recovery] Clicking '{label}'...")
+            try:
+                btn.click()
+            except WebDriverException:
+                pass
+            time.sleep(1.5)
+        if self._cm_click_displayed(*self.DEVICES_TAB_BTN):
+            self._logger.info("[Recovery] Tapped Devices tab.")
+            time.sleep(2.0)
+
+    def _cm_recover_and_fail(self, reason: str) -> NoReturn:
+        """Dismiss commissioning screens, power-cycle smart plugs, then raise."""
+        self._cm_dismiss_commissioning_and_go_to_devices()
+        cycle_ok = self.power_cycle_smart_plug()
+        raise AssertionError(
+            f"FATAL: {reason}. Smart plug power-cycle: {'SUCCESS' if cycle_ok else 'FAILED'}."
+        )
+
+    def _cm_tile_identity(self, tile: WebElement) -> str:
+        """Human-readable device name of a tile (title text > first part of label > name)."""
+        titles = self._cm_find_all(*self.DEVICE_TILE_TITLE, root=tile)
+        if titles:
+            title = self._cm_read_text(titles[0], ("value",))
+            if title:
+                return title
+        label = self._cm_read_text(tile, ("label",))
+        return label.split(",")[0].strip() if label else self._cm_read_text(tile, ("name",))
+
+    def _cm_is_plug(self, elem: WebElement, keywords: Sequence[str]) -> bool:
+        text = " ".join(self._cm_read_text(elem, (attr,)) for attr in ("label", "value", "name"))
+        return _contains_any(text, keywords)
+
+    def _cm_discover_plugs(self, keywords: Sequence[str]) -> List[str]:
+        """Collect unique names of plug/outlet tiles on the Devices tab (scrolls once if needed)."""
+        found: List[str] = []
+        for attempt in range(2):
+            candidates = self._cm_find_all(*self.DEVICE_TILE) + self._cm_find_all(*self.DEVICE_TILE_CELL)
+            for elem in candidates:
+                try:
+                    if not self._cm_is_plug(elem, keywords):
+                        continue
+                    name = self._cm_tile_identity(elem)
+                except WebDriverException:
+                    continue
+                if name and name not in found:
+                    found.append(name)
+            if found or attempt == 1:
+                break
+            self._logger.info("[PowerCycle] No plugs found on top fold, scrolling down...")
+            try:
+                self.driver.execute_script("mobile: scroll", {"direction": "down"})
+                time.sleep(1.5)
+            except WebDriverException:
+                pass
+        return found
+
+    def _cm_locate_plug_tile(self, target_name: str) -> Optional[WebElement]:
+        """Freshly locate a plug tile by name (avoids stale references)."""
+        target = target_name.lower()
+        for tile in self._cm_find_all(*self.DEVICE_TILE):
+            try:
+                if target in self._cm_tile_identity(tile).lower() or \
+                        target in self._cm_read_text(tile, ("label",)).lower():
+                    return tile
+            except WebDriverException:
+                continue
+        for cell in self._cm_find_all(*self.DEVICE_TILE_CELL):
+            if target in self._cm_read_text(cell, ("label",)).lower():
+                inner = self._cm_find_all(*self.DEVICE_TILE, root=cell)
+                return inner[0] if inner else cell
+        return None
+
+    def _cm_power_cycle_one(self, plug_name: str, off_wait: float, on_wait: float) -> bool:
+        """Turn a plug OFF (if not already), wait, then turn it back ON."""
+        tile = self._cm_locate_plug_tile(plug_name)
+        if tile is None:
+            self._logger.warning(f"[PowerCycle] Could not locate '{plug_name}'. Skipping.")
+            return False
+        state = self._cm_read_text(tile, ("value",)).lower()
+        self._logger.info(f"[PowerCycle] '{plug_name}' initial state: '{state or 'unknown'}'")
+        try:
+            if state not in self.PLUG_OFF_VALUES:
+                self._logger.info(f"[PowerCycle] Turning OFF '{plug_name}', waiting {off_wait}s...")
+                tile.click()
+                time.sleep(off_wait)
+                tile = self._cm_locate_plug_tile(plug_name) or tile
+            self._logger.info(f"[PowerCycle] Turning ON '{plug_name}', waiting {on_wait}s for boot...")
+            tile.click()
+            time.sleep(on_wait)
+            return True
+        except WebDriverException as e:
+            self._logger.error(f"[PowerCycle] Failed power-cycling '{plug_name}': {e}")
+            return False
+
+    def power_cycle_smart_plug(
+            self,
+            keywords: Optional[Sequence[str]] = None,
+            off_wait: float = 5.0,
+            on_wait: float = 8.0,
+    ) -> bool:
+        """Restart GHA, then power-cycle every plug/outlet device on the Devices tab.
+        Returns:
+            True if all discovered plugs were power-cycled successfully.
+        """
+        keywords = tuple(keywords or self.DEFAULT_PLUG_KEYWORDS)
+        self._logger.info("[PowerCycle] Restarting GHA and navigating to Devices tab...")
+        self.stop_gha()
+        time.sleep(2.0)
+        self.start_gha()
+        time.sleep(3.0)
+        GHATabPage(self.driver).go_to_tab(constants.TAB.DEVICES)
+        time.sleep(2.0)
+        plugs = self._cm_discover_plugs(keywords)
+        if not plugs:
+            self._logger.error(f"[PowerCycle] No smart plug/outlet found matching {list(keywords)}.")
+            return False
+        self._logger.info(f"[PowerCycle] Found {len(plugs)} plug(s): {plugs}. Power-cycling sequentially...")
+        results = []
+        for idx, name in enumerate(plugs, start=1):
+            self._logger.info(f"[PowerCycle] [{idx}/{len(plugs)}] Processing '{name}'...")
+            results.append(self._cm_power_cycle_one(name, off_wait, on_wait))
+        self._logger.info(f"[PowerCycle] Finished: {sum(results)}/{len(plugs)} succeeded.")
+        return all(results)
+
+    def _cm_get_headline(self) -> str:
+        elem = self._cm_find_displayed(*self.HEADLINE_LOCATOR)
+        return self._cm_read_text(elem) if elem is not None else ""
+    def _cm_on_watch_setup_video(self, _headline: str) -> bool:
+        self._logger.info("Detected 'Watch setup video'. Clicking Next/Done...")
+        GHAWatchSetupVideoPage(self.driver).handle_watch_setup_video_page_process()
+        time.sleep(1.0)
+        return False
+
+    def _cm_on_connect_google_account(self, _headline: str) -> bool:
+        self._logger.info("Detected 'Connect device to Google Account'. Clicking I agree...")
+        GHAConnectDeviceToGoogleAccountPage(self.driver).click_i_agree_btn()
+        time.sleep(1.0)
+        return False
+
+    def _cm_on_where_is_this_device(self, room_name: str) -> bool:
+        self._logger.info(f"Reached room selection. Selecting room '{room_name}'...")
+        try:
+            GHAWhereIsThisDevicePage(self.driver).select_room_or_add_custom(room_name=room_name)
+        except Exception as e:
+            self._logger.warning(f"select_room_or_add_custom error: {e}. Falling back to first visible cell...")
+            cells = self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeCell[`visible == 1`]')
+            if cells:
+                cells[0].click()
+            self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, constants.GHA_NEXT_BTN_ACCESSIBILITY_ID)
+        time.sleep(1.0)
+        return False
+
+    def _cm_on_device_connected(self, _headline: str) -> bool:
+        self._logger.info("Device connected! Clicking Done...")
+        try:
+            GHADeviceConnectedPage(self.driver).click_done_btn()
+        except Exception:
+            self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, constants.GHA_DONE_BTN_ACCESSIBILITY_ID)
+        return False
+
+    def _cm_on_camera_activated(self, headline: str) -> bool:
+        self._logger.info(f"Device paired and transitioned to '{headline}'!")
+        GHACameraActivatedPage(self.driver).handle_camera_activated_page_process()
+        return False
+
+    def _cm_on_live_video(self, headline: str) -> bool:
+        self._logger.info(f"Device paired and transitioned to '{headline}'!")
+        GHAYouShouldNowSeeLiveVideoPage(self.driver).handle_you_should_now_see_live_video_page_process()
+        return True
+
+    def _cm_on_uncertified_warning(self, headline: str) -> bool:
+        self._logger.warning(f"Encountered warning: '{headline}'. Clicking 'Set up anyway'...")
+        if not self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, "Set up anyway"):
+            self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, "Exit")
+        time.sleep(2.0)
+        return False
+
+    def _cm_build_headline_handlers(self, room_name: str) -> List[Tuple[Tuple[str, ...], HeadlineHandler]]:
+        """Ordered (keywords, handler) table; the first matching entry wins."""
+        return [
+            (("Watch setup video",), self._cm_on_watch_setup_video),
+            (("Connect this device to your Google Account",), self._cm_on_connect_google_account),
+            (("Where is this device",), lambda _h: self._cm_on_where_is_this_device(room_name)),
+            (("Device connected", "Device added"), self._cm_on_device_connected),
+            (("Camera activated",), self._cm_on_camera_activated),
+            (("You should now see live video",), self._cm_on_live_video),
+            (("Uncertified", "Service failure"), self._cm_on_uncertified_warning),
+        ]
 
     def complete_commissioning_and_pairing_flow(
             self, device_name: str, room_name: str = "Attic", timeout: float = 300
     ) -> bool:
-        """Unified State Machine handling Apple system sheets, GHA loading, room setup, and completion.
+        """State machine handling Apple sheets, GHA loading, room setup, and completion.
         Args:
-            device_name (str): Desired device name to fill in Apple sheet.
-            room_name (str): Target room to assign in 'Where is this device?'.
-            timeout (float): Total timeout in seconds for complete pairing. Defaults to 300s.
+            device_name: Desired device name to fill in the Apple sheet.
+            room_name: Target room for 'Where is this device?'.
+            timeout: Total timeout in seconds.
         Returns:
-            bool: True if device connected successfully, False otherwise.
+            True when the live video page is reached.
+        Raises:
+            AssertionError: On failure headline, Apple sheet failure, timeout, or unexpected error
+                (after dismissing screens and power-cycling smart plugs).
         """
-        self._logger.info(f"Starting Commissioning & Pairing Flow for '{device_name}' (Timeout: {int(timeout)}s)...")
+        self._logger.info(f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
+        handlers = self._cm_build_headline_handlers(room_name)
         start_time = time.time()
         apple_sheet_active = False
-        failure_keywords = [
-            "Can’t connect", "Can't connect", "Something went wrong", "Unable to connect",
-            "Check your connection", "Device not found", "Setup failed", "Could not connect",
-            "Couldn't connect"
-        ]
         try:
             while time.time() - start_time < timeout:
-                elapsed = int(time.time() - start_time)
                 if self.handle_apple_commissioning_sheet(device_name):
                     apple_sheet_active = True
                     continue
                 if apple_sheet_active:
-                    self._logger.info("Apple Commissioning Sheet dismissed. Back in GHA foreground.")
+                    self._logger.info("[Commissioning] Apple sheet dismissed. Back in GHA foreground.")
                     apple_sheet_active = False
                     time.sleep(1.0)
-                headline = self._get_gha_headline()
+                headline = self._cm_get_headline()
                 if not headline:
-                    time.sleep(1.5)
+                    time.sleep(self.CM_POLL_INTERVAL)
                     continue
-                self._logger.info(f"[{elapsed}s] GHA Headline: '{headline}'")
-                if any(fail.lower() in headline.lower() for fail in failure_keywords):
+                self._logger.info(f"[{int(time.time() - start_time)}s] GHA Headline: '{headline}'")
+                if _contains_any(headline, self.FAILURE_KEYWORDS):
                     self._logger.error(f"[Commissioning] Failure headline detected: '{headline}'")
-                    self._dismiss_commissioning_and_go_to_devices()
-                    cycle_ok = self.power_cycle_smart_plug()
-                    raise AssertionError(
-                        f"FATAL: Commissioning failed with headline: '{headline}'. "
-                        f"Smart plug power-cycle: {'SUCCESS' if cycle_ok else 'FAILED'}."
-                    )
-                if any(status in headline for status in [
-                    "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
-                    "Setting up", "Activating camera", "Downloading update", "Update finished"
-                ]):
+                    self._cm_recover_and_fail(f"Commissioning failed with headline '{headline}'")
+                if _contains_any(headline, self.PROGRESS_KEYWORDS):
                     self._logger.info(f"Waiting for GHA background progress: '{headline}'...")
-                    time.sleep(2.5)
+                    time.sleep(self.CM_PROGRESS_INTERVAL)
                     continue
-                if "Watch setup video" in headline:
-                    self._logger.info("Detected 'Watch setup video'. Clicking Next/Done...")
-                    GHAWatchSetupVideoPage(self.driver).handle_watch_setup_video_page_process()
-                    time.sleep(1.0)
+                handler = next((h for kws, h in handlers if _contains_any(headline, kws)), None)
+                if handler is None:
+                    time.sleep(self.CM_POLL_INTERVAL)
                     continue
-                if "Connect this device to your Google Account" in headline:
-                    self._logger.info("Detected 'Connect device to Google Account'. Clicking I agree...")
-                    GHAConnectDeviceToGoogleAccountPage(self.driver).click_i_agree_btn()
-                    time.sleep(1.0)
-                    continue
-                if "Where is this device" in headline:
-                    self._logger.info("Reached room selection. Delegating to GHAWhereIsThisDevicePage instance...")
-                    try:
-                        GHAWhereIsThisDevicePage(self.driver).select_room_or_add_custom(room_name=room_name)
-                    except Exception as e:
-                        self._logger.warning(f"select_room_or_add_custom error: {e}. Executing fallback cell selection...")
-                        cells = self.driver.find_elements(AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeCell[`visible == 1`]')
-                        if cells:
-                            cells[0].click()
-                        self._click_if_visible(AppiumBy.ACCESSIBILITY_ID, constants.GHA_NEXT_BTN_ACCESSIBILITY_ID)
-                    time.sleep(1.0)
-                    continue
-                if "Device connected" in headline or "Device added" in headline:
-                    self._logger.info("Device connected! Delegating to GHADeviceConnectedPage.click_done_btn...")
-                    try:
-                        GHADeviceConnectedPage(self.driver).click_done_btn()
-                    except Exception:
-                        self._click_if_visible(AppiumBy.ACCESSIBILITY_ID, constants.GHA_DONE_BTN_ACCESSIBILITY_ID)
-                    continue
-                if "Camera activated" in headline:
-                    self._logger.info(f"Device paired and transitioned directly to '{headline}'!")
-                    GHACameraActivatedPage(self.driver).handle_camera_activated_page_process()
-                    continue
-                if "You should now see live video" in headline:
-                    self._logger.info(f"Device paired and transitioned directly to '{headline}'!")
-                    GHAYouShouldNowSeeLiveVideoPage(self.driver).handle_you_should_now_see_live_video_page_process()
+                if handler(headline):
+                    self._logger.info("[Commissioning] Flow completed successfully.")
                     return True
-                if "Uncertified" in headline or "Service failure" in headline:
-                    self._logger.warning(f"Encountered warning: '{headline}'. Clicking Set up anyway...")
-                    if not self._click_if_visible(AppiumBy.ACCESSIBILITY_ID, "Set up anyway"):
-                        self._click_if_visible(AppiumBy.ACCESSIBILITY_ID, "Exit")
-                    time.sleep(2.0)
-                    continue
-                time.sleep(1.5)
             self._logger.error(f"[Commissioning] Flow timed out after {int(timeout)}s!")
-            self._dismiss_commissioning_and_go_to_devices()
-            cycle_ok = self.power_cycle_smart_plug()
-            raise AssertionError(
-                f"FATAL: Commissioning timed out after {int(timeout)}s. "
-                f"Smart plug power-cycle: {'SUCCESS' if cycle_ok else 'FAILED'}."
-            )
+            self._cm_recover_and_fail(f"Commissioning timed out after {int(timeout)}s")
         except AssertionError:
             raise
         except Exception as e:
-            self._logger.error(f"[Commissioning] Unexpected exception during pairing flow: {e}")
+            self._logger.error(f"[Commissioning] Unexpected exception: {e}")
             try:
-                self._dismiss_commissioning_and_go_to_devices()
+                self._cm_dismiss_commissioning_and_go_to_devices()
                 self.power_cycle_smart_plug()
             except Exception as recovery_err:
-                self._logger.warning(f"[Commissioning] Recovery power cycle error: {recovery_err}")
+                self._logger.warning(f"[Commissioning] Recovery error: {recovery_err}")
             raise AssertionError(f"Commissioning flow failed with unexpected exception: {e}") from e
