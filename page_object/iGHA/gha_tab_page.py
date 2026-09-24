@@ -25,10 +25,18 @@ class GHATabPage(BasePage):
         AppiumBy.IOS_CLASS_CHAIN,
         '**/XCUIElementTypeNavigationBar[`name == "Settings" OR name == "Home settings"`]',
     )
-    HOME_SETTINGS_BTN: Locator = (
+    # Prefer tappable containers; StaticText inside a cell does not forward taps
+    HOME_SETTINGS_BTN_LOCATORS: List[Locator] = [
+        (AppiumBy.IOS_PREDICATE,
+         'type IN {"XCUIElementTypeCell", "XCUIElementTypeButton"} AND '
+         '(name == "Home settings" OR label == "Home settings")'),
+        (AppiumBy.IOS_PREDICATE,
+         'type == "XCUIElementTypeStaticText" AND (name == "Home settings" OR label == "Home settings")'),
+    ]
+    # Elements only present on the account menu sheet
+    ACCOUNT_MENU_MARKER: Locator = (
         AppiumBy.IOS_PREDICATE,
-        '(type == "XCUIElementTypeButton" OR type == "XCUIElementTypeStaticText") AND '
-        '(name == "Home settings" OR label == "Home settings")',
+        '(type == "XCUIElementTypeButton" AND name == "Done") OR label == "Manage your Google Account"',
     )
     DISMISS_BTN: Locator = (
         AppiumBy.IOS_PREDICATE,
@@ -42,6 +50,10 @@ class GHATabPage(BasePage):
     ]
     TAB_POLL_INTERVAL = 0.3
     TAB_ACTION_SETTLE = 1.0
+    TAB_MENU_OPEN_TIMEOUT = 5.0
+    TAB_MENU_SETTLE_TIMEOUT = 3.0
+    TAB_MENU_LEAVE_TIMEOUT = 5.0
+    TAB_MAX_HOME_SETTINGS_ATTEMPTS = 3
 
     @contextmanager
     def _tab_no_implicit_wait(self) -> Iterator[None]:
@@ -58,6 +70,24 @@ class GHATabPage(BasePage):
                 self.driver.implicitly_wait(previous)
             except WebDriverException:
                 pass
+
+    @contextmanager
+    def _tab_no_idle_wait(self) -> Iterator[None]:
+        """Temporarily disable WDA wait-for-idle so taps are not delayed during animations."""
+        previous = None
+        try:
+            previous = self.driver.get_settings().get("waitForIdleTimeout")
+            self.driver.update_settings({"waitForIdleTimeout": 0})
+        except Exception:
+            pass
+        try:
+            yield
+        finally:
+            if previous is not None:
+                try:
+                    self.driver.update_settings({"waitForIdleTimeout": previous})
+                except Exception:
+                    pass
 
     def _tab_find_displayed_now(self, by: str, value: str) -> Optional[WebElement]:
         """Return the first displayed element immediately, or None."""
@@ -80,7 +110,7 @@ class GHATabPage(BasePage):
             time.sleep(self.TAB_POLL_INTERVAL)
 
     def _tab_wait_any(self, locators: List[Locator], timeout: float = 1.0) -> Optional[WebElement]:
-        """Poll multiple locators until any displayed element appears."""
+        """Poll multiple locators (in priority order) until any displayed element appears."""
         deadline = time.time() + timeout
         while True:
             for by, value in locators:
@@ -90,6 +120,32 @@ class GHATabPage(BasePage):
             if time.time() >= deadline:
                 return None
             time.sleep(self.TAB_POLL_INTERVAL)
+
+    def _tab_wait_rect_stable(self, locators: List[Locator], timeout: float) -> Optional[WebElement]:
+        """Wait until the element exists and its rect stops changing (animation finished)."""
+        deadline = time.time() + timeout
+        last_rect = None
+        elem = None
+        while time.time() < deadline:
+            elem = self._tab_wait_any(locators, timeout=0)
+            if elem is not None:
+                try:
+                    rect = elem.rect
+                except WebDriverException:
+                    rect = None
+                if rect is not None and rect == last_rect:
+                    return elem
+                last_rect = rect
+            time.sleep(self.TAB_POLL_INTERVAL)
+        return elem
+
+    def _tab_tap_center(self, element: WebElement) -> None:
+        """Coordinate tap at the element center."""
+        rect = element.rect
+        self.driver.execute_script("mobile: tap", {
+            "x": int(rect["x"] + rect["width"] / 2),
+            "y": int(rect["y"] + rect["height"] / 2),
+        })
 
     def _tab_click(self, element: WebElement, description: str = "element") -> bool:
         """Click an element, falling back to a coordinate tap."""
@@ -101,12 +157,9 @@ class GHATabPage(BasePage):
         except WebDriverException as e:
             self._logger.warning(f"Standard click on {description} failed ({e}). Trying coordinate tap...")
         try:
-            rect = element.rect
-            tap_x = int(rect["x"] + rect["width"] / 2)
-            tap_y = int(rect["y"] + rect["height"] / 2)
-            self.driver.execute_script("mobile: tap", {"x": tap_x, "y": tap_y})
+            self._tab_tap_center(element)
             time.sleep(self.TAB_ACTION_SETTLE)
-            self._logger.info(f"Successfully coordinate-tapped {description} at ({tap_x}, {tap_y}).")
+            self._logger.info(f"Successfully coordinate-tapped {description}.")
             return True
         except WebDriverException as coord_err:
             self._logger.error(f"Coordinate tap failed for {description}: {coord_err}")
@@ -136,13 +189,50 @@ class GHATabPage(BasePage):
         if elem is not None:
             self._tab_click(elem, f"dismiss button '{elem.get_attribute('name')}'")
 
+    def _tab_is_account_menu_open(self) -> bool:
+        return self._tab_find_displayed_now(*self.ACCOUNT_MENU_MARKER) is not None
+
+    def _tab_click_home_settings_and_verify(self) -> bool:
+        """Tap 'Home settings' in the account menu and verify the menu closed."""
+        for attempt in range(1, self.TAB_MAX_HOME_SETTINGS_ATTEMPTS + 1):
+            btn = self._tab_wait_rect_stable(self.HOME_SETTINGS_BTN_LOCATORS, self.TAB_MENU_SETTLE_TIMEOUT)
+            if btn is None:
+                self._logger.info("'Home settings' not visible yet, swiping up slightly...")
+                self._tab_swipe_up_slightly()
+                btn = self._tab_wait_rect_stable(self.HOME_SETTINGS_BTN_LOCATORS, self.TAB_MENU_SETTLE_TIMEOUT)
+            if btn is None:
+                self._logger.error("Failed to find 'Home settings' in account menu.")
+                return False
+            use_coordinates = attempt > 1
+            self._logger.info(
+                f"Clicking 'Home settings' ({'coordinate tap' if use_coordinates else 'click'}, "
+                f"attempt {attempt}/{self.TAB_MAX_HOME_SETTINGS_ATTEMPTS})..."
+            )
+            try:
+                with self._tab_no_idle_wait():
+                    if use_coordinates:
+                        self._tab_tap_center(btn)
+                    else:
+                        btn.click()
+            except WebDriverException as e:
+                self._logger.warning(f"Tap on 'Home settings' failed: {e}")
+            deadline = time.time() + self.TAB_MENU_LEAVE_TIMEOUT
+            while time.time() < deadline:
+                if not self._tab_is_account_menu_open():
+                    self._logger.info("Entered Home settings page (account menu closed).")
+                    time.sleep(self.TAB_ACTION_SETTLE)
+                    return True
+                time.sleep(self.TAB_POLL_INTERVAL)
+            self._logger.warning("Account menu still open after tapping 'Home settings'. Retrying...")
+        self._logger.error("Failed to enter Home settings page from account menu.")
+        return False
+
     def enter_home_settings_page(self) -> bool:
-        """Open Home settings via the top-right account avatar."""
+        """Open Home settings via the top-right account avatar and verify navigation."""
         self._logger.info("Opening Settings page from account avatar...")
-        home_settings_btn = self._tab_find_displayed_now(*self.HOME_SETTINGS_BTN)
-        if home_settings_btn is not None:
-            self._logger.info("Account menu already open. Clicking 'Home settings' directly...")
-            return self._tab_click(home_settings_btn, "'Home settings' button")
+        if self._tab_is_account_menu_open():
+            self._logger.info("Account menu already open.")
+            return self._tab_click_home_settings_and_verify()
         account_id = constants.GHA_ACCOUNT_PARTICLE_BTN_ACCESSIBILITY_ID
         account_icon = self._tab_wait_displayed(AppiumBy.ACCESSIBILITY_ID, account_id, timeout=5.0)
         if account_icon is None:
@@ -152,17 +242,13 @@ class GHATabPage(BasePage):
         if account_icon is None:
             self._logger.error("Could not find AccountParticleButton on current screen.")
             return False
-        if not self._tab_click(account_icon, "AccountParticleButton"):
+        with self._tab_no_idle_wait():
+            if not self._tab_click(account_icon, "AccountParticleButton"):
+                return False
+        if self._tab_wait_displayed(*self.ACCOUNT_MENU_MARKER, timeout=self.TAB_MENU_OPEN_TIMEOUT) is None:
+            self._logger.error("Account menu did not open after tapping avatar.")
             return False
-        home_settings_btn = self._tab_wait_displayed(*self.HOME_SETTINGS_BTN, timeout=5.0)
-        if home_settings_btn is None:
-            self._logger.info("'Home settings' not visible yet, swiping up slightly...")
-            self._tab_swipe_up_slightly()
-            home_settings_btn = self._tab_wait_displayed(*self.HOME_SETTINGS_BTN, timeout=3.0)
-        if home_settings_btn is None:
-            self._logger.error("Failed to find 'Home settings' button in account menu.")
-            return False
-        return self._tab_click(home_settings_btn, "'Home settings' button")
+        return self._tab_click_home_settings_and_verify()
 
     def _tab_close_settings_page(self) -> None:
         """Dismiss settings page via the top-left close / back button."""
