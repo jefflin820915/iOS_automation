@@ -25,7 +25,6 @@ class GHATabPage(BasePage):
         AppiumBy.IOS_CLASS_CHAIN,
         '**/XCUIElementTypeNavigationBar[`name == "Settings" OR name == "Home settings"`]',
     )
-    # Prefer tappable containers; StaticText inside a cell does not forward taps
     HOME_SETTINGS_BTN_LOCATORS: List[Locator] = [
         (AppiumBy.IOS_PREDICATE,
          'type IN {"XCUIElementTypeCell", "XCUIElementTypeButton"} AND '
@@ -33,7 +32,6 @@ class GHATabPage(BasePage):
         (AppiumBy.IOS_PREDICATE,
          'type == "XCUIElementTypeStaticText" AND (name == "Home settings" OR label == "Home settings")'),
     ]
-    # Elements only present on the account menu sheet
     ACCOUNT_MENU_MARKER: Locator = (
         AppiumBy.IOS_PREDICATE,
         '(type == "XCUIElementTypeButton" AND name == "Done") OR label == "Manage your Google Account"',
