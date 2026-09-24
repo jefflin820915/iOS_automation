@@ -261,10 +261,19 @@ class GHASession:
         self._logger.info(f"Single device not present or switched to list. Searching '{target_name}' in device list...")
         return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
 
-    def pair_device_with_pairing_code(self) -> bool:
-        """Proceed to enter pairing code screen and input manual pairing code."""
-        GHAAddDevicePage.click_use_pairing_code_btn(self)
-        GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=self.pairing_code)
+    def pair_device_with_pairing_code(self) -> None:
+        """Open the Enter pairing code page and submit the manual pairing code.
+        Raises:
+            RuntimeError: If any step of pairing code entry fails.
+        """
+        code = str(getattr(self, "pairing_code", "") or "")
+        self._logger.info(
+            f"[PairingCode] Device='{getattr(self, 'device_name', '')}' | pairing_code length={len(code)}"
+        )
+        if not GHAAddDevicePage.click_use_pairing_code_btn(self):
+            raise RuntimeError("Failed to open 'Enter pairing code' page.")
+        if not GHAEnterPairingCodePage.enter_pairing_code(self, pairing_code=code):
+            raise RuntimeError("Failed to enter pairing code or proceed with 'Continue'.")
 
     def handle_setup_requirement_pages(self) -> None:
         """Handle privacy guidelines and product improvement consent screens."""
