@@ -19,13 +19,8 @@ from page_object.iGHA.gha_watch_setup_video_page import GHAWatchSetupVideoPage
 from page_object.iGHA.gha_connect_device_to_google_account_page import GHAConnectDeviceToGoogleAccountPage
 from page_object.iGHA.gha_commission_flow import GHACommissioningPageObject
 from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDevicePage
-from page_object.iGHA.gha_device_connected_page import GHADeviceConnectedPage
 from page_object.iGHA.gha_camera_activated_page import GHACameraActivatedPage
 from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShouldNowSeeLiveVideoPage
-from page_object.iGHA.gha_choose_whether_you_want_to_turn_on_video_history import (
-    GHAChooseWhetherYouWantToTurnOnVideoPage,
-    OOBEInternalErrorException,
-)
 from page_object.iGHA.gha_adjust_your_mic_settings import GHAAdjustYourMicSettingsPage
 from page_object.iGHA.gha_stay_in_the_know_page import GHAStayInTheKnowPage
 from page_object.iGHA.gha_your_camera_device_is_ready_page import GHAYourCameraDeviceIsReadyPage
@@ -43,10 +38,15 @@ from selenium.webdriver.common.actions.action_builder import ActionBuilder
 from selenium.webdriver.common.actions.pointer_input import PointerInput
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from page_object.iGHA.gha_choose_whether_you_want_to_turn_on_video_history import (
+    GHAChooseWhetherYouWantToTurnOnVideoPage,
+)
+from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 
 
 class GHASession:
     """Central entry point managing iGHA application lifecycle and sub-page objects."""
+    EMERGENCY_REMOVE_ATTEMPTS = 2
 
     def __init__(self, driver: WebDriver) -> None:
         """Initialize GHASession with Appium driver and instantiate all iGHA page objects.
@@ -155,19 +155,35 @@ class GHASession:
         self._logger.info("No 'Set up new devices?' bottom sheet detected. Continuing.")
         return False
 
-    def _emergency_recover_and_remove_device(self) -> None:
-        """Restarts GHA and removes the partially paired device to restore a clean uncommissioned state."""
-        self._logger.warning("[Emergency Teardown] Initiating GHA restart to reset navigation state...")
+    def _emergency_recover_and_remove_device(self, attempts: int = EMERGENCY_REMOVE_ATTEMPTS) -> bool:
+        """Restart GHA and remove the (already commissioned) device so the next run starts clean.
+        Mirrors the normal teardown: remove device -> refresh -> power-cycle smart plug.
+        Returns:
+            True if handle_remove_device() completed without raising.
+        """
+        removed = False
+        for attempt in range(1, attempts + 1):
+            self._logger.warning(
+                f"[Emergency Teardown] Attempt {attempt}/{attempts}: restarting GHA to reset navigation state..."
+            )
+            try:
+                self.stop_gha()
+                time.sleep(2.0)
+                self.start_gha()
+                time.sleep(5.0)
+                self._logger.info("[Emergency Teardown] Navigating to Settings to remove device...")
+                self.handle_remove_device()
+                removed = True
+                self._logger.info("[Emergency Teardown] Device successfully removed during emergency cleanup.")
+                break
+            except Exception as cleanup_err:
+                self._logger.error(f"[Emergency Teardown] Attempt {attempt}/{attempts} failed: {cleanup_err}")
         try:
-            self.stop_gha()
-            time.sleep(2.0)
-            self.start_gha()
-            time.sleep(5.0)
-            self._logger.info("[Emergency Teardown] Navigating to Settings to remove device...")
-            self.handle_remove_device()
-            self._logger.info("[Emergency Teardown] Device successfully removed during emergency cleanup.")
-        except Exception as cleanup_err:
-            self._logger.error(f"[Emergency Teardown] Failed to remove device during recovery: {cleanup_err}")
+            self.refresh_gha_devices()
+            GHACommissioningPageObject.power_cycle_smart_plug(self)
+        except Exception as plug_err:
+            self._logger.warning(f"[Emergency Teardown] Refresh / power-cycle failed: {plug_err}")
+        return removed
 
     def refresh_gha_devices(self, timeout: float = 5.0) -> None:
         """Refresh all devices in the Google Home App (iOS).
@@ -281,23 +297,36 @@ class GHASession:
         GHAHelpImproveCameraDevicePage.click_yes_i_m_in_btn(self)
 
     def handle_pairing_until_device_connected(self) -> bool:
-        """Commission the Matter device through Apple sheets and GHA setup steps until connected."""
+        """Commission the Matter device through Apple sheets and GHA setup steps until connected.
+        Once commissioning succeeds the device is already in the home, so any failure in the
+        post-commissioning OOBE pages restarts GHA and removes the device before failing the test.
+        """
         device_name = getattr(self, "device_name", None)
         room_name = getattr(self, "room_name", "Attic")
-
         GHACommissioningPageObject(self.driver).complete_commissioning_and_pairing_flow(
             device_name=device_name, room_name=room_name
         )
+        step = "Video history"
         try:
             GHAChooseWhetherYouWantToTurnOnVideoPage.enable_video_history_and_proceed(self)
+            step = "Adjust your mic settings"
             GHAAdjustYourMicSettingsPage.enable_all_mic_settings_and_proceed(self)
+            step = "Stay in the know"
             GHAStayInTheKnowPage.handle_stay_in_the_know_page_process(self)
+            step = "Your camera device is ready"
             GHAYourCameraDeviceIsReadyPage.click_done_btn(self)
             return True
         except OOBEInternalErrorException as e:
-            self._logger.error(f"[OOBE Failure] Intercepted internal error: {e}")
+            self._logger.error(f"[OOBE Failure] Internal error at '{step}' (OK already clicked): {e}")
+            removed = self._emergency_recover_and_remove_device()
+            raise AssertionError(
+                f"Commissioning OOBE failed at '{step}' due to internal error: {e} "
+                f"Emergency device removal: {'SUCCESS' if removed else 'FAILED'}."
+            ) from e
+        except Exception as e:
+            self._logger.error(f"[OOBE Failure] Unexpected error at '{step}': {e}. Removing commissioned device...")
             self._emergency_recover_and_remove_device()
-            raise AssertionError(f"Commissioning OOBE failed due to internal error: {e}") from e
+            raise
 
     def handle_verify_camera_live_stream_and_remove(self):
         try:

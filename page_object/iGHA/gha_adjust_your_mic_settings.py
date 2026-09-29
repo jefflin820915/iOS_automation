@@ -13,11 +13,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from common import constants
 from common.base_page import BasePage
-
-
-class OOBEInternalErrorException(Exception):
-    """Raised when GHA displays 'Internal error encountered.' modal during post-commissioning OOBE."""
-
+from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 
 class GHAAdjustYourMicSettingsPage(BasePage):
     """Class for managing microphone and audio recording toggles on the mic settings page."""
