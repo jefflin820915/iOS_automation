@@ -15,7 +15,6 @@ from page_object.iGHA.gha_watch_setup_video_page import GHAWatchSetupVideoPage
 from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDevicePage
 from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShouldNowSeeLiveVideoPage
 
-
 Locator = Tuple[str, str]
 HeadlineHandler = Callable[[str], bool]
 
@@ -23,9 +22,23 @@ def _contains_any(text: str, keywords: Sequence[str]) -> bool:
     lowered = text.lower()
     return any(kw.lower() in lowered for kw in keywords)
 
+
+class _CMAppleSheetFailure(AssertionError):
+    """Signals that the Apple Matter sheet reported a failure.
+    Caught in complete_commissioning_and_pairing_flow and re-raised there as a plain
+    AssertionError, so the reported Failure Stage stays COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
+    Subclasses AssertionError so a standalone call of handle_apple_commissioning_sheet still fails.
+    """
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class GHACommissioningPageObject(BasePage):
     """Unified handler for Apple Matter system sheets and Google Home App commissioning steps.
     NOTE: Private helpers are prefixed with `_cm_` to avoid MRO name collisions in GHASession.
+    NOTE: Failure Stage is derived from the innermost page_object frame of the traceback, so
+          private helpers must NOT raise the final AssertionError; the public flow method does.
     """
     HEADLINE_LOCATOR: Locator = (AppiumBy.ACCESSIBILITY_ID, constants.GHA_CONNECTING_TITLE_ACCESSIBILITY_ID)
     APPLE_OVERLAY_WINDOW_CHAIN = '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]'
@@ -123,6 +136,7 @@ class GHACommissioningPageObject(BasePage):
         except WebDriverException as e:
             self._logger.error(f"Failed to query GHA app state: {e}")
             return False
+
     def stop_gha(self) -> bool:
         """Terminate the GHA application."""
         try:
@@ -135,6 +149,7 @@ class GHACommissioningPageObject(BasePage):
         except WebDriverException as e:
             self._logger.error(f"Failed to stop GHA: {e}")
             return False
+
     def start_gha(self, timeout: float = 10.0) -> bool:
         """Start GHA and ensure it is running in the foreground."""
         if self._cm_is_gha_foreground():
@@ -197,10 +212,11 @@ class GHACommissioningPageObject(BasePage):
             time.sleep(1.5)
 
     def _cm_on_apple_failure(self, card_title: str) -> NoReturn:
+        """Dismiss the failed Apple sheet and signal the main flow (which recovers and raises)."""
         self._logger.error(f"[AppleSheet] Reported failure: '{card_title}'")
         self._cm_click_apple_sheet_button("OK", "Done")
         time.sleep(1.5)
-        self._cm_recover_and_fail(f"Apple sheet failed with '{card_title}'")
+        raise _CMAppleSheetFailure(f"Apple sheet failed with '{card_title}'")
 
     def _cm_on_apple_bridge_name(self, device_name: str) -> None:
         self._logger.info(f"[AppleSheet] Naming step detected. Setting device name to '{device_name}'...")
@@ -236,7 +252,8 @@ class GHACommissioningPageObject(BasePage):
         Returns:
             True if a system alert / Apple sheet was present (and handled), False otherwise.
         Raises:
-            AssertionError: If the Apple sheet reports 'Unable to Add Accessory'.
+            _CMAppleSheetFailure (an AssertionError): If the Apple sheet reports
+                'Unable to Add Accessory'. Recovery is performed by the caller.
         """
         try:
             if self.handle_system_alert():
@@ -283,13 +300,22 @@ class GHACommissioningPageObject(BasePage):
             self._logger.info("[Recovery] Tapped Devices tab.")
             time.sleep(2.0)
 
-    def _cm_recover_and_fail(self, reason: str) -> NoReturn:
-        """Dismiss commissioning screens, power-cycle smart plugs, then raise."""
-        self._cm_dismiss_commissioning_and_go_to_devices()
-        cycle_ok = self.power_cycle_smart_plug()
-        raise AssertionError(
-            f"FATAL: {reason}. Smart plug power-cycle: {'SUCCESS' if cycle_ok else 'FAILED'}."
-        )
+    def _cm_recover(self, reason: str) -> str:
+        """Dismiss commissioning screens and power-cycle smart plugs. Never raises.
+        Returns:
+            The FATAL error message. The CALLER must raise it, so that the innermost
+            page_object frame (used as Failure Stage) is the caller, not this helper.
+        """
+        try:
+            self._cm_dismiss_commissioning_and_go_to_devices()
+        except Exception as e:
+            self._logger.warning(f"[Recovery] Dismiss step error: {e}")
+        try:
+            cycle_ok = self.power_cycle_smart_plug()
+        except Exception as e:
+            self._logger.warning(f"[Recovery] Power-cycle step error: {e}")
+            cycle_ok = False
+        return f"FATAL: {reason}. Smart plug power-cycle: {'SUCCESS' if cycle_ok else 'FAILED'}."
 
     def _cm_tile_identity(self, tile: WebElement) -> str:
         """Human-readable device name of a tile (title text > first part of label > name)."""
@@ -400,6 +426,7 @@ class GHACommissioningPageObject(BasePage):
     def _cm_get_headline(self) -> str:
         elem = self._cm_find_displayed(*self.HEADLINE_LOCATOR)
         return self._cm_read_text(elem) if elem is not None else ""
+
     def _cm_on_watch_setup_video(self, _headline: str) -> bool:
         self._logger.info("Detected 'Watch setup video'. Clicking Next/Done...")
         GHAWatchSetupVideoPage(self.driver).handle_watch_setup_video_page_process()
@@ -474,7 +501,8 @@ class GHACommissioningPageObject(BasePage):
             True when the live video page is reached.
         Raises:
             AssertionError: On failure headline, Apple sheet failure, timeout, or unexpected error
-                (after dismissing screens and power-cycling smart plugs).
+                (after dismissing screens and power-cycling smart plugs). All final raises happen in
+                THIS method so the reported Failure Stage is COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
         """
         self._logger.info(f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
         handlers = self._cm_build_headline_handlers(room_name)
@@ -496,7 +524,7 @@ class GHACommissioningPageObject(BasePage):
                 self._logger.info(f"[{int(time.time() - start_time)}s] GHA Headline: '{headline}'")
                 if _contains_any(headline, self.FAILURE_KEYWORDS):
                     self._logger.error(f"[Commissioning] Failure headline detected: '{headline}'")
-                    self._cm_recover_and_fail(f"Commissioning failed with headline '{headline}'")
+                    raise AssertionError(self._cm_recover(f"Commissioning failed with headline '{headline}'"))
                 if _contains_any(headline, self.PROGRESS_KEYWORDS):
                     self._logger.info(f"Waiting for GHA background progress: '{headline}'...")
                     time.sleep(self.CM_PROGRESS_INTERVAL)
@@ -509,14 +537,12 @@ class GHACommissioningPageObject(BasePage):
                     self._logger.info("[Commissioning] Flow completed successfully.")
                     return True
             self._logger.error(f"[Commissioning] Flow timed out after {int(timeout)}s!")
-            self._cm_recover_and_fail(f"Commissioning timed out after {int(timeout)}s")
+            raise AssertionError(self._cm_recover(f"Commissioning timed out after {int(timeout)}s"))
+        except _CMAppleSheetFailure as e:
+            raise AssertionError(self._cm_recover(e.reason)) from None
         except AssertionError:
             raise
         except Exception as e:
             self._logger.error(f"[Commissioning] Unexpected exception: {e}")
-            try:
-                self._cm_dismiss_commissioning_and_go_to_devices()
-                self.power_cycle_smart_plug()
-            except Exception as recovery_err:
-                self._logger.warning(f"[Commissioning] Recovery error: {recovery_err}")
+            self._cm_recover(f"Unexpected exception: {e}")
             raise AssertionError(f"Commissioning flow failed with unexpected exception: {e}") from e
