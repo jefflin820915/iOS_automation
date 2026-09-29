@@ -490,7 +490,7 @@ class GHACommissioningPageObject(BasePage):
         ]
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 300
+            self, device_name: str, room_name: str = "Attic", timeout: float = 600
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, and completion.
         Args:
