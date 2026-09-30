@@ -1,4 +1,5 @@
 """Module for managing test execution lifecycles, iterations, session setup, teardown, and reporting."""
+import inspect
 import os
 import re
 import signal
@@ -16,6 +17,7 @@ from page_object.iGHA.gha_session import GHASession
 from page_object.iGHP.ghp_session import GHPSession
 from testcase.iGHA.test_home import TestGHAHome
 from utils import logging_utils
+from utils.drive_uploader import DriveUploader
 from utils.environment_utils import log_all_version_information, get_wifi_information
 from utils.screen_recorder import ScreenRecorder
 from utils.gemini_reporter import GeminiReporter
@@ -97,6 +99,90 @@ class MultiProjectTestRunner:
         self.software_version: str = "UNKNOWN"
         self.device_ip: str = "UNKNOWN"
         self.env_info_collected: bool = False
+        self.drive_uploader: Optional[DriveUploader] = DriveUploader.create_if_enabled()
+        host_short = socket.gethostname().split(".")[0]
+        self.drive_run_folder_name: str = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_name}_{host_short}"
+        self._drive_last_case_folder_id: Optional[str] = None
+        self._container_paths: List[str] = []
+        self._csv_accepts_drive_url: bool = self._csv_accepts_param("drive_url")
+        if self.drive_uploader and not self._csv_accepts_drive_url:
+            logger.warning(
+                "[DRIVE] csv_report.append_test_result_to_csv() has no 'drive_url' parameter; "
+                "Drive links will be logged but not written to CSV / Google Sheet."
+            )
+
+
+    @staticmethod
+    def _csv_accepts_param(param: str) -> bool:
+        """Check whether csv_report.append_test_result_to_csv accepts a given keyword."""
+        try:
+            return param in inspect.signature(csv_report.append_test_result_to_csv).parameters
+        except (TypeError, ValueError):
+            return False
+
+
+    @staticmethod
+    def _safe_drive_name(text: str) -> str:
+        """Sanitize a string for use as a Drive folder name."""
+        return re.sub(r'[\\/:*?"<>|]+', "-", text).strip() or "unknown"
+
+
+    def _drive_reserve_case_folder(
+            self, iteration: int, test_status: str, device: Optional[str], class_name: str, test_name: str
+    ) -> Tuple[Optional[str], str]:
+        """Create the Drive folder for this test case. Returns (folder_id, url) or (None, '')."""
+        if not self.drive_uploader:
+            return None, ""
+        folder_name = self._safe_drive_name(
+            f"iter{iteration:03d}_{test_status}_{device or 'unknown'}_{class_name}.{test_name}"
+        )
+        reserved = self.drive_uploader.reserve_folder(self.drive_run_folder_name, folder_name)
+        if not reserved:
+            return None, ""
+        folder_id, url = reserved
+        logger.info(f"[DRIVE] Case folder: {url}")
+        return folder_id, url
+
+
+    def _drive_upload_case_dir(self, folder_id: Optional[str], case_dir: str, label: str) -> None:
+        """Queue background upload of the whole case directory."""
+        if not self.drive_uploader or not folder_id:
+            return
+        if self.drive_uploader.upload_async(folder_id, local_dir=case_dir, label=label):
+            self._drive_last_case_folder_id = folder_id
+
+
+    def _drive_finalize(self) -> None:
+        """Upload app container + session-level logs, then wait for all uploads to finish."""
+        if not self.drive_uploader:
+            return
+        try:
+            reserved = self.drive_uploader.reserve_folder(self.drive_run_folder_name)
+            run_folder_id, run_url = reserved if reserved else (None, "")
+            if self._container_paths:
+                target = self._drive_last_case_folder_id or run_folder_id
+                if target:
+                    self.drive_uploader.upload_async(
+                        target, extra_paths=self._container_paths, label="app container")
+            session_dir = constants.SESSION_LOG_DIR
+            if run_folder_id and os.path.isdir(session_dir):
+                session_files = [
+                    os.path.join(session_dir, name)
+                    for name in sorted(os.listdir(session_dir))
+                    if os.path.isfile(os.path.join(session_dir, name))
+                ]
+                if session_files:
+                    self.drive_uploader.upload_async(
+                        run_folder_id, extra_paths=session_files, label="session logs")
+            logger.info(f"[DRIVE] Run folder: {run_url}")
+            logger.info("[DRIVE] Waiting for uploads to finish... (Press Ctrl+C to skip)")
+            self.drive_uploader.wait_all(timeout_s=getattr(constants, "DRIVE_UPLOAD_WAIT_TIMEOUT_S", 1800))
+        except KeyboardInterrupt:
+            self.drive_uploader.abort()
+            logger.warning("[DRIVE] Upload wait skipped by user.")
+        except Exception as e:
+            logger.warning(f"[DRIVE] Finalize failed: {e}")
+
 
     def get_iteration_targets(self, iteration: int) -> Tuple[Optional[str], Optional[str]]:
         """Resolve target device and its corresponding pairing code for the given iteration.
@@ -115,6 +201,7 @@ class MultiProjectTestRunner:
         else:
             target_code = self.pairing_codes[device_idx % len(self.pairing_codes)]
         return target_device, target_code
+
 
     def setup(self) -> None:
         """Initialize Appium session and configure implicit wait."""
@@ -143,6 +230,8 @@ class MultiProjectTestRunner:
             logger.info("-" * 65)
         if self.room_name:
             logger.info(f"       Assigned Room Name : {self.room_name}")
+        if self.drive_uploader:
+            logger.info(f"       Drive Run Folder   : {self.drive_run_folder_name}")
         logger.info("=" * 65)
         logger.info(f"Connecting to Appium Server at: {constants.APPIUM_SERVER_URL}")
         options = AppiumOptions()
@@ -152,8 +241,11 @@ class MultiProjectTestRunner:
         self.driver.implicitly_wait(implicit_wait)
         logger.info(f"Global driver implicit wait configured to: {implicit_wait}s")
 
+
     def teardown(self) -> None:
-        """Collect .xcappdata container, quit Appium WebDriver, and stop syslog collector."""
+        """Collect .xcappdata container, quit Appium WebDriver, and stop syslog collector.
+        Newly pulled container paths are remembered in self._container_paths for Drive upload.
+        """
         logger.info("=" * 65)
         logger.info("            TEARDOWN & COLLECTING ARTIFACTS                  ")
         logger.info("=" * 65)
@@ -163,7 +255,12 @@ class MultiProjectTestRunner:
             )
             try:
                 dest = logging_utils._current_main_log_dir or constants.SESSION_LOG_DIR
+                before = set(os.listdir(dest)) if os.path.isdir(dest) else set()
                 logging_utils.pull_ios_app_container(self.driver, target_bundle, dest)
+                after = set(os.listdir(dest)) if os.path.isdir(dest) else set()
+                self._container_paths = [os.path.join(dest, name) for name in sorted(after - before)]
+                if self._container_paths:
+                    logger.info(f"[DRIVE] App container artifacts queued for upload: {self._container_paths}")
             except Exception as e:
                 logger.error(f"Failed to pull {target_bundle} container: {e}")
             logger.info("Quitting Appium WebDriver...")
@@ -382,44 +479,53 @@ class MultiProjectTestRunner:
                             else:
                                 failure_stage = extract_failure_stage(caught_exception)
                                 logger.info(f"[FAILURE ATTRIBUTION] Failing step: {failure_stage}")
+                            # [DRIVE] Reserve the Drive folder first so its URL can go into CSV / Sheet.
+                            drive_folder_id, drive_url = self._drive_reserve_case_folder(
+                                iteration, test_status, current_device, class_name, test_name
+                            )
+                            csv_kwargs = dict(
+                                test_name=f"{class_name}.{test_name}",
+                                device_name=current_device or "iPhone 11 Pro",
+                                gha_version=self.gha_version,
+                                status=test_status,
+                                start_time=start_dt,
+                                end_time=end_dt,
+                                error_msg=test_error,
+                                iteration=iteration,
+                                ios_version=self.ios_version,
+                                wifi_ssid=self.wifi_ssid,
+                                failure_stage=failure_stage,
+                                log_dir=child_folder_name,
+                                video_file=video_filename,
+                                host_machine=socket.gethostname(),
+                                phone_ip=self.phone_ip,
+                                router_gateway=self.router_gateway,
+                                subnet_mask=self.subnet_mask,
+                                device_id=self.device_id,
+                                serial_number=self.serial_number,
+                                software_version=self.software_version,
+                                device_ip=self.device_ip
+                            )
+                            if self._csv_accepts_drive_url:
+                                csv_kwargs["drive_url"] = drive_url
                             try:
-                                csv_report.append_test_result_to_csv(
-                                    test_name=f"{class_name}.{test_name}",
-                                    device_name=current_device or "iPhone 11 Pro",
-                                    gha_version=self.gha_version,
-                                    status=test_status,
-                                    start_time=start_dt,
-                                    end_time=end_dt,
-                                    error_msg=test_error,
-                                    iteration=iteration,
-                                    ios_version=self.ios_version,
-                                    wifi_ssid=self.wifi_ssid,
-                                    failure_stage=failure_stage,
-                                    log_dir=child_folder_name,
-                                    video_file=video_filename,
-                                    host_machine=socket.gethostname(),
-                                    phone_ip=self.phone_ip,
-                                    router_gateway=self.router_gateway,
-                                    subnet_mask=self.subnet_mask,
-                                    device_id=self.device_id,
-                                    serial_number=self.serial_number,
-                                    software_version=self.software_version,
-                                    device_ip=self.device_ip
-                                )
+                                csv_report.append_test_result_to_csv(**csv_kwargs)
                             except Exception as csv_err:
                                 logger.warning(f"Failed to record result to CSV / Google Sheet: {csv_err}")
+                            self._drive_upload_case_dir(drive_folder_id, case_dir, label=child_folder_name)
         except KeyboardInterrupt:
             logger.info("\n[INTERRUPT] Received KeyboardInterrupt (Ctrl+C). Terminating test execution gracefully...")
         finally:
             total_duration = time.time() - session_start_time
             self.teardown()
-        completed_iterations = iteration if self.count is None else min(iteration, self.count)
-        logger.info("\n" + "=" * 65)
-        logger.info(f"Final Execution Summary ({completed_iterations} total iterations completed):")
-        logger.info(f"  Total Test Executions : {total_runs}")
-        logger.info(f"  Total Passed          : {total_passed}")
-        logger.info(f"  Total Failed          : {total_failed}")
-        logger.info(f"  Total Duration        : {total_duration:.2f}s")
-        logger.info("=" * 65)
+            completed_iterations = iteration if self.count is None else min(iteration, self.count)
+            logger.info("\n" + "=" * 65)
+            logger.info(f"Final Execution Summary ({completed_iterations} total iterations completed):")
+            logger.info(f"  Total Test Executions : {total_runs}")
+            logger.info(f"  Total Passed          : {total_passed}")
+            logger.info(f"  Total Failed          : {total_failed}")
+            logger.info(f"  Total Duration        : {total_duration:.2f}s")
+            logger.info("=" * 65)
+            self._drive_finalize()
         if total_failed > 0 and self.count is not None:
             exit(1)
