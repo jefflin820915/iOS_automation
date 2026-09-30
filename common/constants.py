@@ -8,6 +8,11 @@ from enum import Enum
 GEMINI_API_KEY = "AIzaSyDqPMIawhhqj3Yopaxw-CGRPK5KApMiveo"
 BUGANIZER_DEFAULT_ASSIGNEE = "enlin@google.com"
 GOOGLE_SHEET_WEBHOOK_URL =  "https://script.google.com/macros/s/AKfycbwGQD4926s_AB1Lx7JLzudJGKW5LXsQtuoR4A79vcxfT1e7OCFX3SiOPo5OoxO65_Xm/exec"
+DRIVE_UPLOAD_ENABLED = True
+DRIVE_LOCAL_ROOT_PATH = "/Users/enlin/Library/CloudStorage/GoogleDrive-enlin@google.com/Shared drives/HHPE TPE QA/QA Automation/HHPE_QA_Agent_Ecosystem/iGHA"
+DRIVE_UPLOAD_ZIP_LOGS = False
+DRIVE_ID_RESOLVE_TIMEOUT_S = 2.0
+
 # ==================== App Settings ====================
 GHA_BUNDLE_ID = "com.google.Chromecast.enterprise"
 iGHP_SAMPLE_APP_BUNDLE_ID = "com.google.homeplatform.sampleapp.gomezandres"
