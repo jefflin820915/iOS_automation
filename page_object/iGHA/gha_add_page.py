@@ -83,7 +83,7 @@ class GHAAddPage:
             if not is_selected:
                 self._logger.info(f"Clicking '{tab_name}' tab to switch...")
                 btn_element.click()
-                time.sleep(2)
+                time.sleep(10)
             else:
                 self._logger.info(f"'{tab_name}' tab is already selected.")
             return True
