@@ -64,7 +64,7 @@ class GHACommissioningPageObject(BasePage):
     SYSTEM_ALERT_BUTTONS = ("Add Anyway", "Set up anyway", "OK", "Allow")
     FAILURE_KEYWORDS = (
         "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect", "Unable to connect",
-        "Something went wrong", "Check your connection", "Device not found", "Setup failed", "Service failure",
+        "Something went wrong", "Check your connection", "Device not found", "Setup failed", "Service failure", "Reset this device",
     )
     PROGRESS_KEYWORDS = (
         "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
