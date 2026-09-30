@@ -534,7 +534,7 @@ class GHACommissioningPageObject(BasePage):
                     time.sleep(self.CM_POLL_INTERVAL)
                     continue
                 if handler(headline):
-                    self._logger.info("[Commissioning] Flow completed successfully.")
+                    self._logger.info("[Commissioning] Flow completed successfully..")
                     return True
             self._logger.error(f"[Commissioning] Flow timed out after {int(timeout)}s!")
             raise AssertionError(self._cm_recover(f"Commissioning timed out after {int(timeout)}s"))
