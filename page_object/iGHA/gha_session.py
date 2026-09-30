@@ -309,8 +309,10 @@ class GHASession:
         step = "Video history"
         try:
             GHAChooseWhetherYouWantToTurnOnVideoPage.enable_video_history_and_proceed(self)
+            time.sleep(5)
             step = "Adjust your mic settings"
             GHAAdjustYourMicSettingsPage.enable_all_mic_settings_and_proceed(self)
+            time.sleep(5)
             step = "Stay in the know"
             GHAStayInTheKnowPage.handle_stay_in_the_know_page_process(self)
             step = "Your camera device is ready"
