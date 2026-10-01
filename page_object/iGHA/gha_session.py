@@ -257,6 +257,60 @@ class GHASession:
         self._logger.error(f"Timed out after {timeout}s waiting for GHA.")
         return False
 
+    def _restart_gha_to_home(self) -> None:
+        """Terminate and relaunch GHA so navigation starts from the home screen."""
+        self.stop_gha()
+        time.sleep(2.0)
+        if not self.start_gha():
+            self._logger.warning("[Device Selection] GHA did not come to foreground after restart.")
+        time.sleep(3.0)
+
+    def _try_select_target_device_once(self, target_name: str, swallow_errors: bool) -> bool:
+        """One pass: open 'Set up device' and select the target (single-device screen or list).
+        Args:
+            target_name: Device name to select.
+            swallow_errors: If True, navigation errors are logged and treated as 'not found'
+                (so the caller can retry). If False, they propagate with their original traceback.
+        """
+        try:
+            nav_result = GHAAddPage.navigate_to_setup_device_page(self)
+            if nav_result is False:
+                self._logger.error("[Device Selection] Failed to open 'Set up device' page.")
+                return False
+        except Exception as nav_err:
+            if not swallow_errors:
+                raise
+            self._logger.error(f"[Device Selection] Navigation to 'Set up device' failed: {nav_err}")
+            return False
+        self._logger.info("Checking for Single Device Found screen before checking list...")
+        try:
+            if GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name, timeout=3.0):
+                self._logger.info(f"Target device '{target_name}' successfully confirmed and selected via Single Device screen!")
+                time.sleep(2.0)
+                return True
+        except Exception as e:
+            self._logger.warning(f"Error checking Single Device screen: {e}")
+        self._logger.info(f"Single device not present or switched to list. Searching '{target_name}' in device list...")
+        return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=target_name)
+
+    def _recover_device_discovery(self) -> None:
+        """Power-cycle the target device via smart plug so it re-advertises, then relaunch GHA.
+        Sequence mirrors teardown: GHA home -> refresh -> power-cycle -> wait for boot -> fresh GHA.
+        """
+        reboot_wait = float(getattr(constants, "DEVICE_REBOOT_WAIT_SECONDS", 60.0))
+        self._logger.warning("[Device Selection] Recovering discovery: restarting GHA and power-cycling device...")
+        self._restart_gha_to_home()
+        self.refresh_gha_devices()
+        try:
+            GHACommissioningPageObject.power_cycle_smart_plug(self)
+            self._logger.info("[Device Selection] Smart plug power-cycle done.")
+        except Exception as plug_err:
+            self._logger.error(f"[Device Selection] Smart plug power-cycle failed: {plug_err}")
+        if reboot_wait > 0:
+            self._logger.info(f"[Device Selection] Waiting {reboot_wait:.0f}s for device to boot and advertise...")
+            time.sleep(reboot_wait)
+        self._restart_gha_to_home()
+
     def handle_device_selection_steps(self) -> bool:
         """Navigate to Add Device page and select target device.
         Handles both:
