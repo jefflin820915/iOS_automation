@@ -12,6 +12,9 @@ DRIVE_UPLOAD_ENABLED = True
 DRIVE_LOCAL_ROOT_PATH = "/Users/enlin/Library/CloudStorage/GoogleDrive-enlin@google.com/Shared drives/HHPE TPE QA/QA Automation/HHPE_QA_Agent_Ecosystem/iGHA"
 DRIVE_UPLOAD_ZIP_LOGS = False
 DRIVE_ID_RESOLVE_TIMEOUT_S = 2.0
+GHA_ADD_DEVICE_SHEET_LOAD_TIMEOUT_S = 45.0
+GHA_ADD_DEVICE_SHEET_APPEAR_TIMEOUT_S = 8.0
+GHA_ADD_DEVICE_SHEET_ATTEMPTS = 2
 
 # ==================== App Settings ====================
 GHA_BUNDLE_ID = "com.google.Chromecast.enterprise"

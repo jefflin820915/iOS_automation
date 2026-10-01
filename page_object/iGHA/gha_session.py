@@ -259,23 +259,34 @@ class GHASession:
 
     def handle_device_selection_steps(self) -> bool:
         """Navigate to Add Device page and select target device.
-
         Handles both:
         1. Single device branch: Directly shows 'Next' button -> Clicks Next.
         2. Multi-device branch: Shows nearby device list -> Selects device from list.
+        If the target is not discovered, power-cycles the device via smart plug, relaunches GHA,
+        and searches again (up to constants.DEVICE_SELECTION_MAX_ATTEMPTS total attempts).
         """
-        GHAAddPage.navigate_to_setup_device_page(self)
-        target_name = getattr(self, "device_name", "")
-        self._logger.info(f"Checking for Single Device Found screen before checking list...")
-        try:
-            if GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name, timeout=3.0):
-                self._logger.info(f"Target device '{target_name}' successfully confirmed and selected via Single Device screen!")
-                time.sleep(2.0)
+        target_name = str(getattr(self, "device_name", "") or "")
+        max_attempts = max(1, int(getattr(constants, "DEVICE_SELECTION_MAX_ATTEMPTS", 2)))
+        for attempt in range(1, max_attempts + 1):
+            is_last = attempt == max_attempts
+            self._logger.info(f"[Device Selection] Attempt {attempt}/{max_attempts} for '{target_name}'...")
+            if self._try_select_target_device_once(target_name, swallow_errors=not is_last):
+                if attempt > 1:
+                    self._logger.info(
+                        f"[Device Selection] '{target_name}' found after power-cycle recovery (attempt {attempt})."
+                    )
                 return True
-        except Exception as e:
-            self._logger.warning(f"Error checking Single Device screen: {e}")
-        self._logger.info(f"Single device not present or switched to list. Searching '{target_name}' in device list...")
-        return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=self.device_name)
+            if not is_last:
+                self._logger.warning(
+                    f"[Device Selection] '{target_name}' not discovered on attempt {attempt}/{max_attempts}. "
+                    "Power-cycling device and retrying..."
+                )
+                self._recover_device_discovery()
+        self._logger.error(
+            f"[Device Selection] '{target_name}' not discovered after {max_attempts} attempt(s) "
+            "(including smart plug power-cycle)."
+        )
+        return AssertionError
 
     def pair_device_with_pairing_code(self) -> None:
         """Open the Enter pairing code page and submit the manual pairing code.
