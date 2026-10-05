@@ -14,6 +14,7 @@ from page_object.iGHA.gha_tab_page import GHATabPage
 from page_object.iGHA.gha_watch_setup_video_page import GHAWatchSetupVideoPage
 from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDevicePage
 from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShouldNowSeeLiveVideoPage
+from utils.camera_reset_utils import DeviceResetUtils
 
 Locator = Tuple[str, str]
 HeadlineHandler = Callable[[str], bool]
@@ -302,7 +303,9 @@ class GHACommissioningPageObject(BasePage):
             time.sleep(2.0)
 
     def _cm_recover(self, reason: str) -> str:
-        """Dismiss commissioning screens and power-cycle smart plugs. Never raises.
+        """Dismiss commissioning screens and reset the device. Never raises.
+        Reset method comes from DeviceResetUtils: adb factory reset for configured devices
+        (e.g. 'Ref2 Battery Camera'), smart plug power-cycle for every other device.  [DEVICE RESET]
         Returns:
             The FATAL error message. The CALLER must raise it, so that the innermost
             page_object frame (used as Failure Stage) is the caller, not this helper.
@@ -311,12 +314,16 @@ class GHACommissioningPageObject(BasePage):
             self._cm_dismiss_commissioning_and_go_to_devices()
         except Exception as e:
             self._logger.warning(f"[Recovery] Dismiss step error: {e}")
+        device = getattr(self, "_cm_reset_device_name", "") or ""  # [DEVICE RESET]
+        method = DeviceResetUtils.describe(device)
         try:
-            cycle_ok = self.power_cycle_smart_plug()
+            reset_ok = DeviceResetUtils.reset_device(
+                device, smart_plug_reset=self.power_cycle_smart_plug, reason="commissioning recovery"
+            )
         except Exception as e:
-            self._logger.warning(f"[Recovery] Power-cycle step error: {e}")
-            cycle_ok = False
-        return f"FATAL: {reason}. Smart plug power-cycle: {'SUCCESS' if cycle_ok else 'FAILED'}."
+            self._logger.warning(f"[Recovery] {method} step error: {e}")
+            reset_ok = False
+        return f"FATAL: {reason}. {method}: {'SUCCESS' if reset_ok else 'FAILED'}."
 
     def _cm_tile_identity(self, tile: WebElement) -> str:
         """Human-readable device name of a tile (title text > first part of label > name)."""
@@ -506,6 +513,7 @@ class GHACommissioningPageObject(BasePage):
                 THIS method so the reported Failure Stage is COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
         """
         self._logger.info(f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
+        self._cm_reset_device_name = device_name
         handlers = self._cm_build_headline_handlers(room_name)
         start_time = time.time()
         apple_sheet_active = False

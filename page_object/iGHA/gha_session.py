@@ -1,7 +1,10 @@
 """Session Page Object managing iGHA lifecycle and aggregating all sub-page objects."""
+import threading
 import time
 import tomllib
 from typing import Optional, Any
+from appium import webdriver
+from appium.options.common import AppiumOptions
 from appium.webdriver.webdriver import WebDriver
 from selenium.common.exceptions import WebDriverException, StaleElementReferenceException
 from common import constants
@@ -30,6 +33,7 @@ from page_object.iGHA.gha_device_setting_page import GHADeviceSettingPage
 from page_object.iGHA.gha_camera_live_page import GHACameraLivePage
 from page_object.iGHA.gha_single_device_found_page import GHASingleDeviceFoundPage
 from utils import logging_utils
+from utils.camera_reset_utils import DeviceResetUtils
 from appium.webdriver.common.appiumby import AppiumBy
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
@@ -47,6 +51,14 @@ from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 class GHASession:
     """Central entry point managing iGHA application lifecycle and sub-page objects."""
     EMERGENCY_REMOVE_ATTEMPTS = 2
+    WDA_ERROR_SIGNATURES = (
+        "ECONNREFUSED",
+        "Could not proxy command to the remote server",
+        "socket hang up",
+        "A session is either terminated or not started",
+        "invalid session id",
+        "NoSuchDriverError",
+    )
 
     def __init__(self, driver: WebDriver) -> None:
         """Initialize GHASession with Appium driver and instantiate all iGHA page objects.
@@ -56,6 +68,8 @@ class GHASession:
         self.driver = driver
         self.timeout = getattr(constants, "DEFAULT_TIMEOUT_SECONDS", 15.0)
         self._logger = logging_utils.get_logger(__name__, "gha_session")
+        self._gha_stopped_in_cleanup = False
+        self._device_removed_in_emergency = False
         page_classes = [
             GHAHomePage,
             GHAAccountPicker,
@@ -83,7 +97,9 @@ class GHASession:
         ]
         for cls in page_classes:
             attr_name = cls.__name__.lower()
-            setattr(self, attr_name, cls(driver))
+            page_instance = cls(driver)
+            page_instance.session = self
+            setattr(self, attr_name, page_instance)
 
     def __getattr__(self, name: str) -> Any:
         """Automatically delegate method lookup across all registered pages."""
@@ -93,6 +109,38 @@ class GHASession:
             if hasattr(page, name):
                 return getattr(page, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+    @classmethod
+    def _is_wda_connection_error(cls, exc: Exception) -> bool:
+        """Return True if the exception indicates WDA (127.0.0.1:8100) or the Appium session disconnected."""
+        msg = str(exc)
+        return any(sig in msg for sig in cls.WDA_ERROR_SIGNATURES)
+
+    def _reconnect_wda_driver(self) -> bool:
+        """Rebuild the Appium WebDriver session in-place when WDA (127.0.0.1:8100) disconnects."""
+        self._logger.warning(
+            "[WDA Reconnect] Detected dead WDA connection (127.0.0.1:8100). Rebuilding Appium WebDriver session..."
+        )
+        device_tech_info = getattr(self.driver, "device_tech_info", None)
+        try:
+            self.driver.quit()
+        except Exception:
+            pass
+        try:
+            options = AppiumOptions()
+            options.load_capabilities(constants.IOS_CAPABILITIES)
+            new_driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
+            new_driver.implicitly_wait(getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0))
+            if device_tech_info is not None:
+                new_driver.device_tech_info = device_tech_info
+            self.driver.__dict__.update(new_driver.__dict__)
+            self._logger.info(
+                f"[WDA Reconnect] Successfully re-established Appium/WDA session (session_id={self.driver.session_id})."
+            )
+            return True
+        except Exception as reconnect_err:
+            self._logger.error(f"[WDA Reconnect] Failed to rebuild Appium WebDriver session: {reconnect_err}")
+            return False
 
     def _get_device_grid_view(self):
         """Locates the main device grid collection view on the GHA home page."""
@@ -157,7 +205,7 @@ class GHASession:
 
     def _emergency_recover_and_remove_device(self, attempts: int = EMERGENCY_REMOVE_ATTEMPTS) -> bool:
         """Restart GHA and remove the (already commissioned) device so the next run starts clean.
-        Mirrors the normal teardown: remove device -> refresh -> power-cycle smart plug.
+        Note: Hardware reset (smart plug on/off + ADB factory reset) is only run during 'post-test cleanup'.
         Returns:
             True if handle_remove_device() completed without raising.
         """
@@ -172,18 +220,76 @@ class GHASession:
                 self.start_gha()
                 time.sleep(5.0)
                 self._logger.info("[Emergency Teardown] Navigating to Settings to remove device...")
+                GHATabPage.enter_home_settings_page(self)
+                GHASettingsPage.open_device_settings(self, device_name=self.device_name)
                 self.handle_remove_device()
                 removed = True
+                self._device_removed_in_emergency = True
                 self._logger.info("[Emergency Teardown] Device successfully removed during emergency cleanup.")
                 break
             except Exception as cleanup_err:
                 self._logger.error(f"[Emergency Teardown] Attempt {attempt}/{attempts} failed: {cleanup_err}")
         try:
             self.refresh_gha_devices()
-            GHACommissioningPageObject.power_cycle_smart_plug(self)
-        except Exception as plug_err:
-            self._logger.warning(f"[Emergency Teardown] Refresh / power-cycle failed: {plug_err}")
+        except Exception as refresh_err:
+            self._logger.warning(f"[Emergency Teardown] Refresh GHA devices failed: {refresh_err}")
         return removed
+
+    def _start_wda_keepalive(self, interval_seconds: float = 15.0) -> threading.Event:
+        """Send a lightweight query_app_state command every interval_seconds to prevent Appium's 60s newCommandTimeout."""
+        stop_event = threading.Event()
+        def _heartbeat() -> None:
+            while not stop_event.wait(interval_seconds):
+                try:
+                    self.driver.query_app_state(constants.GHA_BUNDLE_ID)
+                except Exception as hb_err:
+                    self._logger.debug(f"[WDA KeepAlive] Heartbeat ignored error: {hb_err}")
+        thread = threading.Thread(target=_heartbeat, name="wda-keepalive", daemon=True)
+        thread.start()
+        return stop_event
+
+    def reset_target_device(self, reason: str = "post-test cleanup") -> bool:
+        """Reset devices at post-test cleanup by executing BOTH Smart plug power-cycle AND ADB factory reset.
+        Does not branch by device_name: every test cleanup runs:
+        1. GHACommissioningPageObject.power_cycle_smart_plug(self) (plug on/off)
+        2. stop_gha() while WDA is active + 15s WDA keep-alive heartbeat during ADB reset
+        3. DeviceResetUtils.adb_factory_reset(...) (`ftsmisc -s reboot_mode factory_reset; reboot -f`)
+        Args:
+            reason: Short context for the log (e.g. 'post-test cleanup').
+        Returns:
+            True if both reset steps succeeded.
+        """
+        device = str(getattr(self, "device_name", "") or "ALL")
+        self._logger.info(
+            f"[Device Reset] '{device}' -> Smart plug power-cycle + ADB factory reset ({reason or 'n/a'})"
+        )
+        plug_ok = False
+        try:
+            self._logger.info("[Device Reset] Step 1/2: Running Smart plug power-cycle (plug on/off)...")
+            GHACommissioningPageObject.power_cycle_smart_plug(self)
+            plug_ok = True
+            self._logger.info("[Device Reset] Step 1/2: Smart plug power-cycle SUCCESS.")
+        except Exception as plug_err:
+            self._logger.error(f"[Device Reset] Step 1/2: Smart plug power-cycle FAILED: {plug_err}")
+        try:
+            if self.stop_gha():
+                self._gha_stopped_in_cleanup = True
+        except Exception:
+            pass
+        self._logger.info("[Device Reset] Step 2/2: Running ADB factory reset (with WDA keep-alive)...")
+        stop_keepalive = self._start_wda_keepalive(interval_seconds=15.0)
+        try:
+            adb_target = device if DeviceResetUtils.get_config(device) is not None else "Ref2 Battery Camera"
+            adb_ok = DeviceResetUtils.adb_factory_reset(adb_target, reason=reason)
+        finally:
+            stop_keepalive.set()
+        self._logger.info(f"[Device Reset] Step 2/2: ADB factory reset {'SUCCESS' if adb_ok else 'FAILED'}.")
+        ok = plug_ok and adb_ok
+        self._logger.info(
+            f"[Device Reset] Result for '{device}' ({reason or 'n/a'}): "
+            f"smart_plug={'SUCCESS' if plug_ok else 'FAILED'}, adb_reset={'SUCCESS' if adb_ok else 'FAILED'}."
+        )
+        return ok
 
     def refresh_gha_devices(self, timeout: float = 5.0) -> None:
         """Refresh all devices in the Google Home App (iOS).
@@ -220,7 +326,7 @@ class GHASession:
             return False
 
     def stop_gha(self) -> bool:
-        """Terminate the GHA application."""
+        """Terminate the GHA application, with automatic WDA fallback and self-healing."""
         try:
             app_state = self.driver.query_app_state(constants.GHA_BUNDLE_ID)
             if app_state != constants.APP_STATE_NOT_RUNNING:
@@ -228,13 +334,37 @@ class GHASession:
                 self._logger.info("GHA stopped successfully.")
             else:
                 self._logger.info("GHA is not running.")
+            self._gha_stopped_in_cleanup = False
             return True
         except WebDriverException as e:
+            if getattr(self, "_gha_stopped_in_cleanup", False):
+                self._gha_stopped_in_cleanup = False
+                self._logger.warning(
+                    f"[WDA] WDA connection dropped during post-test ADB reset ({e}), "
+                    "but GHA was already stopped prior to Step 2/2. Treating stop_gha() as SUCCESS "
+                    "so ScreenRecorder can finish saving the current video."
+                )
+                return True
+            if self._is_wda_connection_error(e):
+                self._logger.warning(f"Failed to stop GHA due to WDA disconnect ({e}). Attempting WDA reconnect...")
+                if self._reconnect_wda_driver():
+                    try:
+                        app_state = self.driver.query_app_state(constants.GHA_BUNDLE_ID)
+                        if app_state != constants.APP_STATE_NOT_RUNNING:
+                            self.driver.terminate_app(constants.GHA_BUNDLE_ID)
+                            self._logger.info("GHA stopped successfully after WDA reconnect.")
+                        else:
+                            self._logger.info("GHA is not running (verified after WDA reconnect).")
+                        return True
+                    except WebDriverException as retry_err:
+                        self._logger.error(f"Failed to stop GHA after WDA reconnect: {retry_err}")
+                        return False
             self._logger.error(f"Failed to stop GHA: {e}")
             return False
 
     def start_gha(self, timeout: float = 10.0) -> bool:
         """Start GHA and ensure it is running in the active foreground."""
+        self._gha_stopped_in_cleanup = False
         if self._is_gha_running():
             self._logger.info("GHA is already running in foreground.")
             return True
@@ -243,8 +373,16 @@ class GHASession:
             self.driver.activate_app(constants.GHA_BUNDLE_ID)
             self._dismiss_setup_new_devices_sheet()
         except WebDriverException as e:
-            self._logger.error(f"Failed to activate GHA: {e}")
-            return False
+            if self._is_wda_connection_error(e) and self._reconnect_wda_driver():
+                try:
+                    self.driver.activate_app(constants.GHA_BUNDLE_ID)
+                    self._dismiss_setup_new_devices_sheet()
+                except WebDriverException as retry_err:
+                    self._logger.error(f"Failed to activate GHA after WDA reconnect: {retry_err}")
+                    return False
+            else:
+                self._logger.error(f"Failed to activate GHA: {e}")
+                return False
         start_time = time.time()
         while time.time() - start_time < timeout:
             if self._is_gha_running():
@@ -294,21 +432,12 @@ class GHASession:
         return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=target_name)
 
     def _recover_device_discovery(self) -> None:
-        """Power-cycle the target device via smart plug so it re-advertises, then relaunch GHA.
-        Sequence mirrors teardown: GHA home -> refresh -> power-cycle -> wait for boot -> fresh GHA.
+        """Relaunch GHA to home and refresh the device grid so discovery starts fresh.
+        Note: Hardware reset (smart plug on/off + ADB factory reset) is only run during 'post-test cleanup'.
         """
-        reboot_wait = float(getattr(constants, "DEVICE_REBOOT_WAIT_SECONDS", 60.0))
-        self._logger.warning("[Device Selection] Recovering discovery: restarting GHA and power-cycling device...")
+        self._logger.warning("[Device Selection] Recovering discovery: restarting GHA and refreshing devices...")
         self._restart_gha_to_home()
         self.refresh_gha_devices()
-        try:
-            GHACommissioningPageObject.power_cycle_smart_plug(self)
-            self._logger.info("[Device Selection] Smart plug power-cycle done.")
-        except Exception as plug_err:
-            self._logger.error(f"[Device Selection] Smart plug power-cycle failed: {plug_err}")
-        if reboot_wait > 0:
-            self._logger.info(f"[Device Selection] Waiting {reboot_wait:.0f}s for device to boot and advertise...")
-            time.sleep(reboot_wait)
         self._restart_gha_to_home()
 
     def handle_device_selection_steps(self) -> bool:
@@ -316,8 +445,10 @@ class GHASession:
         Handles both:
         1. Single device branch: Directly shows 'Next' button -> Clicks Next.
         2. Multi-device branch: Shows nearby device list -> Selects device from list.
-        If the target is not discovered, power-cycles the device via smart plug, relaunches GHA,
-        and searches again (up to constants.DEVICE_SELECTION_MAX_ATTEMPTS total attempts).
+        If the target is not discovered, restarts GHA, refreshes, and searches again
+        (up to constants.DEVICE_SELECTION_MAX_ATTEMPTS total attempts).
+        Raises:
+            AssertionError: If the target is still not discovered after all attempts.
         """
         target_name = str(getattr(self, "device_name", "") or "")
         max_attempts = max(1, int(getattr(constants, "DEVICE_SELECTION_MAX_ATTEMPTS", 2)))
@@ -327,20 +458,20 @@ class GHASession:
             if self._try_select_target_device_once(target_name, swallow_errors=not is_last):
                 if attempt > 1:
                     self._logger.info(
-                        f"[Device Selection] '{target_name}' found after power-cycle recovery (attempt {attempt})."
+                        f"[Device Selection] '{target_name}' found after GHA restart recovery (attempt {attempt})."
                     )
                 return True
             if not is_last:
                 self._logger.warning(
                     f"[Device Selection] '{target_name}' not discovered on attempt {attempt}/{max_attempts}. "
-                    "Power-cycling device and retrying..."
+                    "Restarting GHA and retrying..."
                 )
                 self._recover_device_discovery()
-        self._logger.error(
-            f"[Device Selection] '{target_name}' not discovered after {max_attempts} attempt(s) "
-            "(including smart plug power-cycle)."
+        message = (
+            f"[Device Selection] '{target_name}' not discovered after {max_attempts} attempt(s)."
         )
-        return AssertionError
+        self._logger.error(message)
+        raise AssertionError(message)
 
     def pair_device_with_pairing_code(self) -> None:
         """Open the Enter pairing code page and submit the manual pairing code.
@@ -396,19 +527,26 @@ class GHASession:
             raise
 
     def handle_verify_camera_live_stream_and_remove(self):
+        session_obj = self if isinstance(self, GHASession) else getattr(self, "session", self)
+        session_obj._device_removed_in_emergency = False
         try:
             GHADevicePage.is_device_exist_device_page(self, device_name=self.device_name)
             GHADevicePage.enter_device_page(self, device_name=self.device_name)
             GHACameraLivePage.verify_camera_live_stream(self)
         finally:
-            self.handle_remove_device()
-            self.refresh_gha_devices()
-            GHACommissioningPageObject.power_cycle_smart_plug(self)
+            if getattr(session_obj, "_device_removed_in_emergency", False):
+                self._logger.info(
+                    "[Post-Test Cleanup] Device was already removed & refreshed by emergency teardown; "
+                    "proceeding directly to hardware reset."
+                )
+                session_obj._device_removed_in_emergency = False
+            else:
+                self.handle_remove_device()
+                self.refresh_gha_devices()
+            GHASession.reset_target_device(self, reason="post-test cleanup")
 
     def handle_remove_device(self) -> None:
         """Navigate to Settings and completely remove/unpair the camera device."""
         self._logger.info("Start test case: remove device")
-        GHATabPage.enter_home_settings_page(self)
-        GHASettingsPage.open_device_settings(self, device_name=self.device_name)
         GHADeviceSettingPage.get_device_information(self)
         GHADeviceSettingPage.click_remove_device_btn(self)

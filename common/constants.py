@@ -15,6 +15,15 @@ DRIVE_ID_RESOLVE_TIMEOUT_S = 2.0
 GHA_ADD_DEVICE_SHEET_LOAD_TIMEOUT_S = 45.0
 GHA_ADD_DEVICE_SHEET_APPEAR_TIMEOUT_S = 8.0
 GHA_ADD_DEVICE_SHEET_ATTEMPTS = 2
+DEVICE_RESET_CONFIG = {
+    "Ref2 Battery Camera": {
+        "method": "adb_factory_reset",
+        "adb_serial": "S1B1D22607000063",
+        "online_timeout_s": 300,
+        "post_reset_wait_s": 30,
+    },
+}
+ADB_PATH = "/opt/homebrew/bin/adb"
 
 # ==================== App Settings ====================
 GHA_BUNDLE_ID = "com.google.Chromecast.enterprise"
@@ -37,10 +46,10 @@ IOS_CAPABILITIES = {
     "appium:automationName": "XCUITest",
     "appium:deviceName": "Test’s iPhone",
     "appium:platformVersion": "26.5.2",
-    "appium:udid": "00008030-00064DC43EEA802E",
+    "appium:udid": "00008110-00191899267A201E",
     "appium:xcodeOrgId": "J8YMN73J2Y",
     "appium:xcodeSigningId": "jeff820915@yahoo.com.tw",
-    "appium:newCommandTimeout": 3600,
+    "appium:newCommandTimeout": 600,
 
 }
 

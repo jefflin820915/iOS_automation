@@ -9,7 +9,6 @@ from appium.webdriver.webelement import WebElement
 from selenium.common.exceptions import WebDriverException
 from common import constants
 from common.base_page import BasePage
-
 Locator = Tuple[str, str]
 
 
@@ -31,6 +30,7 @@ class _LiveFailure:
     NOT_LIVE_AT_END = "NOT_LIVE_AT_END"
     RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
 
+
 @dataclass
 class _LiveSample:
     t: float        # Seconds since verification start.
@@ -40,11 +40,13 @@ class _LiveSample:
     def describe(self) -> str:
         return f"{self.state}({self.detail})" if self.detail else self.state
 
+
 @dataclass
 class _LiveRetry:
     t: float
     wall: float
     index: int
+
 
 @dataclass
 class _LiveDrop:
@@ -73,7 +75,6 @@ class _LiveTimeline:
         self.start = time.time()
         self.samples: List[_LiveSample] = []
         self.retries: List[_LiveRetry] = []
-
     def elapsed(self) -> float:
         return time.time() - self.start
 
@@ -215,6 +216,7 @@ class _LiveTimeline:
         ]
         return self.LINE_SEPARATOR.join(lines)
 
+
 class GHACameraLivePage(BasePage):
     """Class for monitoring camera live video stream and handling connection retries.
     NOTE: Private helpers / constants use the `_live_` / `LIVE_` prefix to avoid MRO name collisions
@@ -243,6 +245,20 @@ class GHACameraLivePage(BasePage):
     LIVE_PLAYER_LOCATORS: List[Locator] = [
         (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "CamerazillaPlayerView"`]'),
         (AppiumBy.ACCESSIBILITY_ID, "CamerazillaPlayerView"),
+    ]
+    LIVE_OVERFLOW_MENU_LOCATORS: List[Locator] = [
+        (AppiumBy.ACCESSIBILITY_ID, "overflowMenuButton"),
+        (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "overflowMenuButton"`]'),
+        (AppiumBy.IOS_PREDICATE, 'name == "overflowMenuButton"'),
+        (AppiumBy.XPATH, '//XCUIElementTypeButton[@name="overflowMenuButton"]'),
+    ]
+    LIVE_SETTINGS_MENU_ITEM_LOCATORS: List[Locator] = [
+        (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeCell/**/XCUIElementTypeButton[`name == "Settings" OR label == "Settings"`]'),
+        (AppiumBy.XPATH, '//XCUIElementTypeCell//XCUIElementTypeButton[@name="Settings" or @label="Settings"]'),
+        (AppiumBy.ACCESSIBILITY_ID, "Settings"),
+        (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "Settings"`]'),
+        (AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeButton" AND name == "Settings"'),
+        (AppiumBy.XPATH, '//XCUIElementTypeButton[@name="Settings"]'),
     ]
     LIVE_PLAYER_KEYWORDS = ("live stream", "viewing live stream", "camera on")
     LIVE_BADGE_LOCATOR: Locator = (AppiumBy.IOS_PREDICATE, 'label CONTAINS "Live" OR name CONTAINS "Live"')
@@ -445,10 +461,111 @@ class GHACameraLivePage(BasePage):
             self._logger.error(f"Failed to click back: {e}")
             return False
 
+    def _live_find_settings_menu_item(self) -> Optional[WebElement]:
+        """Find the 'Settings' button inside the overflow popover menu if present."""
+        with self._live_no_implicit_wait():
+            for by, val in self.LIVE_SETTINGS_MENU_ITEM_LOCATORS:
+                for elem in self._live_find_all(by, val):
+                    try:
+                        if elem.is_displayed():
+                            return elem
+                    except WebDriverException:
+                        continue
+        return None
+
+    def _live_tap_element_or_coords(
+            self, elem: Optional[WebElement], fallback_x: int, fallback_y: int, desc: str
+    ) -> bool:
+        """Click an element, falling back to coordinate tap on its rect or Inspector coordinates."""
+        if elem is not None:
+            try:
+                elem.click()
+                self._logger.info(f"Clicked {desc} via element.click().")
+                return True
+            except Exception as click_err:
+                self._logger.warning(f"Standard click on {desc} failed ({click_err}); trying coordinate tap...")
+            try:
+                rect = elem.rect
+                cx = int(rect["x"] + rect["width"] / 2)
+                cy = int(rect["y"] + rect["height"] / 2)
+                self._logger.info(f"Tapping {desc} at calculated center ({cx}, {cy})...")
+                self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                return True
+            except Exception as rect_err:
+                self._logger.warning(f"Calculated coordinate tap on {desc} failed: {rect_err}")
+        self._logger.info(f"Fallback tapping {desc} at Inspector coordinates ({fallback_x}, {fallback_y})...")
+        try:
+            self.driver.execute_script("mobile: tap", {"x": fallback_x, "y": fallback_y})
+            return True
+        except Exception as tap_err:
+            self._logger.error(f"Failed to tap {desc}: {tap_err}")
+            return False
+
+    def click_setting_btn(self) -> bool:
+        """Open Device Settings from the Camera Live page via overflowMenuButton -> Settings."""
+        self._logger.info("Opening Settings from Camera Live screen: looking for 'overflowMenuButton'...")
+        with self._live_no_implicit_wait():
+            overflow_btn = self._live_first(self.LIVE_OVERFLOW_MENU_LOCATORS)
+        if overflow_btn is None:
+            self._logger.info("Top overlay may be auto-hidden. Tapping video player to reveal controls...")
+            try:
+                self.driver.execute_script("mobile: tap", {"x": 200, "y": 180})
+                time.sleep(0.8)
+            except Exception as e:
+                self._logger.warning(f"Error tapping screen to reveal controls: {e}")
+            with self._live_no_implicit_wait():
+                overflow_btn = self._live_first(self.LIVE_OVERFLOW_MENU_LOCATORS)
+        self._live_tap_element_or_coords(overflow_btn, fallback_x=362, fallback_y=79, desc="overflowMenuButton")
+        time.sleep(1.0)
+
+        settings_item = self._live_find_settings_menu_item()
+        if settings_item is None:
+            self._logger.info("Popover menu not yet visible; tapping overflowMenuButton coordinates directly...")
+            cx, cy = 362, 79
+            if overflow_btn is not None:
+                try:
+                    rect = overflow_btn.rect
+                    cx = int(rect["x"] + rect["width"] / 2)
+                    cy = int(rect["y"] + rect["height"] / 2)
+                except Exception:
+                    pass
+            try:
+                self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+            except Exception as e:
+                self._logger.warning(f"Direct coordinate tap on overflowMenuButton failed: {e}")
+            deadline = time.time() + 4.0
+            while time.time() < deadline:
+                settings_item = self._live_find_settings_menu_item()
+                if settings_item is not None:
+                    break
+                time.sleep(0.4)
+        if settings_item is not None:
+            self._logger.info("Found 'Settings' item in popover menu. Clicking 'Settings'...")
+            ok = self._live_tap_element_or_coords(
+                settings_item, fallback_x=257, fallback_y=123, desc="Settings menu item"
+            )
+            time.sleep(1.5)
+            return ok
+        self._logger.warning(
+            "Popover 'Settings' item not found via locators; tapping fallback coordinates (257, 123)..."
+        )
+        try:
+            self.driver.execute_script("mobile: tap", {"x": 257, "y": 123})
+            time.sleep(1.5)
+            return True
+        except Exception as e:
+            self._logger.error(f"Failed to click Settings button: {e}")
+            return False
+    click_settings_btn = click_setting_btn
+    
     def _trigger_emergency_device_removal(self) -> None:
         """Trigger GHA restart and device removal so the camera is factory reset for the next run."""
         self._logger.warning("[Live Verification FAILED] Initiating emergency teardown to remove paired camera...")
-        session = getattr(self, "session", None)
+        session = (
+            self
+            if hasattr(self, "_emergency_recover_and_remove_device") and not hasattr(self, "session")
+            else getattr(self, "session", None)
+        )
         if session and hasattr(session, "_emergency_recover_and_remove_device"):
             try:
                 session._emergency_recover_and_remove_device()
@@ -456,9 +573,9 @@ class GHACameraLivePage(BasePage):
             except Exception as clean_err:
                 self._logger.error(f"[Live Verification FAILED] Error during emergency device removal: {clean_err}")
         else:
-            self._logger.warning("[Live Verification FAILED] Session back-reference not found. Attempting back button and restart...")
+            self._logger.warning("[Live Verification FAILED] Session back-reference not found. Attempting Settings button and restart...")
             try:
-                GHACameraLivePage.click_back_btn(self)
+                GHACameraLivePage.click_setting_btn(self)
             except Exception:
                 pass
             try:
@@ -480,7 +597,7 @@ class GHACameraLivePage(BasePage):
             duration_seconds (float): Total seconds to continuously verify live stream (e.g. 30.0s).
             max_retries (int): Maximum allowable Retry clicks before failing. Defaults to 20.
             check_interval (float): Polling interval in seconds. Defaults to 1.0s.
-            exit_on_pass (bool): Whether to click back button upon successful verification. Defaults to True.
+            exit_on_pass (bool): Kept for backward compatibility; Settings is clicked upon pass.
         Returns:
             bool: True if camera streamed live successfully for duration_seconds.
         Raises:
@@ -500,7 +617,7 @@ class GHACameraLivePage(BasePage):
                 if retry_count >= max_retries:
                     message = timeline.build_failure_message(_LiveFailure.RETRY_EXHAUSTED)
                     self._logger.error(message)
-                    self._trigger_emergency_device_removal()
+                    GHACameraLivePage._trigger_emergency_device_removal(self)
                     raise AssertionError(message)
                 retry_count += 1
                 timeline.add_retry(retry_count)
@@ -534,12 +651,11 @@ class GHACameraLivePage(BasePage):
             category = _LiveFailure.NOT_LIVE_AT_END if had_live else _LiveFailure.NEVER_LIVE
             message = timeline.build_failure_message(category)
             self._logger.error(message)
-            self._trigger_emergency_device_removal()
+            GHACameraLivePage._trigger_emergency_device_removal(self)
             raise AssertionError(message)
         self._logger.info(
             f"SUCCESS: Camera live stream verified for {int(timeline.elapsed())}s! "
             f"(Total retries clicked: {retry_count}) | {timeline.summary()}"
         )
-        if exit_on_pass:
-            GHACameraLivePage.click_back_btn(self)
+        GHACameraLivePage.click_setting_btn(self)
         return True

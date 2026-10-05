@@ -2,16 +2,18 @@
 import inspect
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
 import time
 import traceback
 from datetime import datetime
-from typing import Any, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from appium import webdriver
 from appium.options.common import AppiumOptions
 from common import constants
+from core.device_log_collector import DeviceLogCollector
 from core.syslog_collector import SyslogCollector
 from page_object.iGHA.gha_session import GHASession
 from page_object.iGHP.ghp_session import GHPSession
@@ -22,7 +24,6 @@ from utils.environment_utils import log_all_version_information, get_wifi_inform
 from utils.screen_recorder import ScreenRecorder
 from utils.gemini_reporter import GeminiReporter
 from utils import csv_report
-
 
 logger = logging_utils.get_logger(__name__, "runner")
 
@@ -42,9 +43,18 @@ def extract_failure_stage(exc: Exception) -> str:
             return frame.name.upper()
     return "UNKNOWN"
 
-
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
+    DEFAULT_DEVICE_LOG_CAPTURE: Dict[str, Dict[str, Any]] = {
+        "Ref2 Battery Camera": {
+            "adb_serial": "S1B1D22607000063",                         # "" = default adb device (only one connected)
+            "shell_command": "catch_log",
+            "file_suffix": "camera",                  # -> Main log/LOG_<ts>_camera.log
+            "stop_shell_command": "pkill -f catch_log",
+            "reconnect_timeout_s": 300,
+        },
+    }
+
     def __init__(
             self,
             app: Optional[str] = "igha",
@@ -83,6 +93,8 @@ class MultiProjectTestRunner:
         self.driver: Optional[webdriver.Remote] = None
         self.syslog_collector: Optional[SyslogCollector] = None
         self.syslog_file_paths: List[str] = []
+        self.device_log_collector: Optional[DeviceLogCollector] = None  # [DEVICE LOG]
+        self.device_log_file_paths: List[str] = []                      # [DEVICE LOG]
         self.failure_screenshots: List[str] = []
         self.screen_recordings: List[str] = []
         self.last_error_message: Optional[str] = None
@@ -111,7 +123,6 @@ class MultiProjectTestRunner:
                 "Drive links will be logged but not written to CSV / Google Sheet."
             )
 
-
     @staticmethod
     def _csv_accepts_param(param: str) -> bool:
         """Check whether csv_report.append_test_result_to_csv accepts a given keyword."""
@@ -120,12 +131,10 @@ class MultiProjectTestRunner:
         except (TypeError, ValueError):
             return False
 
-
     @staticmethod
     def _safe_drive_name(text: str) -> str:
         """Sanitize a string for use as a Drive folder name."""
         return re.sub(r'[\\/:*?"<>|]+', "-", text).strip() or "unknown"
-
 
     def _drive_reserve_case_folder(
             self, iteration: int, test_status: str, device: Optional[str], class_name: str, test_name: str
@@ -143,14 +152,12 @@ class MultiProjectTestRunner:
         logger.info(f"[DRIVE] Case folder: {url}")
         return folder_id, url
 
-
     def _drive_upload_case_dir(self, folder_id: Optional[str], case_dir: str, label: str) -> None:
         """Queue background upload of the whole case directory."""
         if not self.drive_uploader or not folder_id:
             return
         if self.drive_uploader.upload_async(folder_id, local_dir=case_dir, label=label):
             self._drive_last_case_folder_id = folder_id
-
 
     def _drive_finalize(self) -> None:
         """Upload app container + session-level logs, then wait for all uploads to finish."""
@@ -183,6 +190,63 @@ class MultiProjectTestRunner:
         except Exception as e:
             logger.warning(f"[DRIVE] Finalize failed: {e}")
 
+    @staticmethod
+    def _normalize_device_key(name: Optional[str]) -> str:
+        """Normalize a device name for config lookup (case-insensitive, ignores stray commas)."""
+        return (name or "").strip().strip(",").strip().lower()
+
+    def _device_log_config_for(self, device: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Return the device-log capture config for this device, or None if not configured."""
+        mapping = getattr(constants, "DEVICE_LOG_CAPTURE", self.DEFAULT_DEVICE_LOG_CAPTURE) or {}
+        key = self._normalize_device_key(device)
+        for name, cfg in mapping.items():
+            if key and self._normalize_device_key(name) == key:
+                return cfg
+        return None
+
+    def _start_device_log(self, device: Optional[str], case_main_log_dir: str, current_ts: str) -> Optional[str]:
+        """Start extra device-side log capture (e.g. `adb shell catch_log`) for configured devices."""
+        cfg = self._device_log_config_for(device)
+        if not cfg:
+            return None
+        adb = shutil.which("adb")
+        if not adb:
+            logger.warning(f"[DEVICE LOG] 'adb' not found in PATH; skipping device log for '{device}'.")
+            return None
+        serial = str(cfg.get("adb_serial") or "").strip()
+        base = [adb] + (["-s", serial] if serial else [])
+        shell_cmd = str(cfg.get("shell_command") or "catch_log").strip()
+        stop_shell = str(cfg.get("stop_shell_command") or "").strip()
+        suffix = str(cfg.get("file_suffix") or "device").strip()
+        log_path = os.path.join(case_main_log_dir, f"LOG_{current_ts}_{suffix}.log")
+        collector = DeviceLogCollector(
+            output_path=log_path,
+            command=base + ["shell", shell_cmd],
+            state_command=base + ["get-state"],
+            stop_command=(base + ["shell", stop_shell]) if stop_shell else None,
+            reconnect_timeout_s=float(cfg.get("reconnect_timeout_s", 180)),
+            label=f"DeviceLog:{suffix}",
+        )
+        try:
+            collector.start()
+        except Exception as e:
+            logger.warning(f"[DEVICE LOG] Failed to start capture for '{device}': {e}")
+            return None
+        self.device_log_collector = collector
+        self.device_log_file_paths.append(log_path)
+        logger.info(f"[DEVICE LOG] '{device}': capturing `adb shell {shell_cmd}` -> {log_path}")
+        return log_path
+
+    def _stop_device_log(self) -> None:
+        """Stop the extra device-side log capture if running."""
+        if not self.device_log_collector:
+            return
+        try:
+            self.device_log_collector.stop()
+        except Exception as e:
+            logger.warning(f"[DEVICE LOG] Failed to stop capture: {e}")
+        finally:
+            self.device_log_collector = None
 
     def get_iteration_targets(self, iteration: int) -> Tuple[Optional[str], Optional[str]]:
         """Resolve target device and its corresponding pairing code for the given iteration.
@@ -201,7 +265,6 @@ class MultiProjectTestRunner:
         else:
             target_code = self.pairing_codes[device_idx % len(self.pairing_codes)]
         return target_device, target_code
-
 
     def setup(self) -> None:
         """Initialize Appium session and configure implicit wait."""
@@ -232,6 +295,10 @@ class MultiProjectTestRunner:
             logger.info(f"       Assigned Room Name : {self.room_name}")
         if self.drive_uploader:
             logger.info(f"       Drive Run Folder   : {self.drive_run_folder_name}")
+        targets = self.device_names or ([self.device_name] if isinstance(self.device_name, str) else [])
+        device_log_targets = [d for d in targets if self._device_log_config_for(d)]
+        if device_log_targets:
+            logger.info(f"       Device Log Capture : {', '.join(device_log_targets)}")
         logger.info("=" * 65)
         logger.info(f"Connecting to Appium Server at: {constants.APPIUM_SERVER_URL}")
         options = AppiumOptions()
@@ -241,9 +308,8 @@ class MultiProjectTestRunner:
         self.driver.implicitly_wait(implicit_wait)
         logger.info(f"Global driver implicit wait configured to: {implicit_wait}s")
 
-
     def teardown(self) -> None:
-        """Collect .xcappdata container, quit Appium WebDriver, and stop syslog collector.
+        """Collect .xcappdata container, quit Appium WebDriver, and stop syslog / device log collectors.
         Newly pulled container paths are remembered in self._container_paths for Drive upload.
         """
         logger.info("=" * 65)
@@ -267,6 +333,7 @@ class MultiProjectTestRunner:
             self.driver.quit()
         if self.syslog_collector:
             self.syslog_collector.stop()
+        self._stop_device_log()  # [DEVICE LOG]
         for extra in [os.path.join(constants.SESSION_LOG_DIR, "Main log"), os.path.join(constants.SESSION_LOG_DIR, "Additional log")]:
             if os.path.exists(extra) and not os.listdir(extra):
                 try:
@@ -349,11 +416,14 @@ class MultiProjectTestRunner:
                             case_syslog_path = os.path.join(case_main_log_dir, f"LOG_{current_ts}_syslog.log")
                             self.syslog_collector = SyslogCollector(self.udid, case_syslog_path)
                             self.syslog_collector.start()
+                        self._start_device_log(current_device, case_main_log_dir, current_ts)
                         screen_recorder = ScreenRecorder(output_dir=case_additional_log_dir)
                         if self.driver:
                             try:
-                                screen_recorder.start_recording(self.driver)
-                                logger.info(f"[REC] Screen recording started for: {class_name}.{test_name}")
+                                if screen_recorder.start_recording(self.driver):
+                                    logger.info(f"[REC] Screen recording started for: {class_name}.{test_name}")
+                                else:
+                                    logger.warning(f"[REC] Screen recording NOT started for: {class_name}.{test_name}")
                             except Exception as rec_err:
                                 logger.warning(f"Failed to start screen recording: {rec_err}")
                         self.device_id = "UNKNOWN"
@@ -411,6 +481,7 @@ class MultiProjectTestRunner:
                                 if case_syslog_path and os.path.exists(case_syslog_path):
                                     self.syslog_file_paths.append(case_syslog_path)
                                 self.syslog_collector = None
+                            self._stop_device_log()  # [DEVICE LOG]
                             if not self.env_info_collected and self.driver:
                                 try:
                                     logger.info("[ENV INFO] First testcase completed, collecting full environment info...")

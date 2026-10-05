@@ -1,13 +1,35 @@
 """Screen Recorder for iOS devices using Appium WebDriver and saves to Additional log."""
 import base64
-from datetime import datetime
 import os
-from typing import Optional
+import time
+from datetime import datetime
+from typing import Any, Dict, Optional
+from appium import webdriver
+from appium.options.common import AppiumOptions
 from appium.webdriver.webdriver import WebDriver
+from common import constants
+from utils import logging_utils
+
+logger = logging_utils.get_logger(__name__, "screen_recorder")
 
 
 class ScreenRecorder:
-    """Handles screen recording of iOS devices using Appium WebDriver and saves to Additional log."""
+    """Handles screen recording of iOS devices using Appium WebDriver and saves to Additional log.
+    Uses the standard Appium API (driver.start_recording_screen / stop_recording_screen), the same call
+    the previous version fell back to. `mobile: startScreenRecording` is NOT used: it only exists in
+    appium-xcuitest-driver >= 11.1.0 and older drivers reject it with NotImplementedError.
+    Option keys must be camelCase: the Python client forwards them unchanged and the driver silently
+    ignores unknown keys such as `time_limit`. On real devices the driver records with ffmpeg on the
+    Appium host (`brew install ffmpeg`).
+    """
+    WDA_ERROR_SIGNATURES = (
+        "ECONNREFUSED",
+        "Could not proxy command to the remote server",
+        "socket hang up",
+        "A session is either terminated or not started",
+        "invalid session id",
+        "NoSuchDriverError",
+    )
 
     def __init__(self, output_dir: str = "Additional log"):
         """Initializes the ScreenRecorder.
@@ -16,6 +38,41 @@ class ScreenRecorder:
         """
         self.output_dir = output_dir
         self._is_recording = False
+        self._started_at: Optional[float] = None
+        self._time_limit: Optional[int] = None
+
+    @classmethod
+    def _is_wda_connection_error(cls, exc: Exception) -> bool:
+        """Return True if the exception indicates WDA (127.0.0.1:8100) or the Appium session disconnected."""
+        msg = str(exc)
+        return any(sig in msg for sig in cls.WDA_ERROR_SIGNATURES)
+
+    @staticmethod
+    def _reconnect_driver_in_place(driver: WebDriver) -> bool:
+        """Rebuild the Appium WebDriver session in-place so all existing driver references heal automatically."""
+        logger.warning(
+            "[ScreenRecorder] Detected dead WDA connection (127.0.0.1:8100). Rebuilding Appium WebDriver session..."
+        )
+        device_tech_info = getattr(driver, "device_tech_info", None)
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        try:
+            options = AppiumOptions()
+            options.load_capabilities(constants.IOS_CAPABILITIES)
+            new_driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
+            new_driver.implicitly_wait(getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0))
+            if device_tech_info is not None:
+                new_driver.device_tech_info = device_tech_info
+            driver.__dict__.update(new_driver.__dict__)
+            logger.info(
+                f"[ScreenRecorder] Successfully re-established Appium/WDA session (session_id={driver.session_id})."
+            )
+            return True
+        except Exception as reconnect_err:
+            logger.error(f"[ScreenRecorder] Failed to rebuild Appium WebDriver session: {reconnect_err}")
+            return False
 
     def start_recording(
             self,
@@ -24,53 +81,63 @@ class ScreenRecorder:
             video_quality: str = "medium",
             video_fps: int = 10,
             video_scale: str = "720:-2",
+            video_type: Optional[str] = None,
+            pixel_format: Optional[str] = None,
     ) -> bool:
         """Starts screen recording on the connected iOS device.
-        Uses downscaled resolution (720p) and 10 FPS to prevent WDA memory overflow
-        during long-running tests (5~30 minutes).
         Args:
             driver: Active Appium WebDriver instance.
-            time_limit: Maximum recording time in seconds (default 1800s / 30 mins).
-            video_quality: Video quality ('low', 'medium', 'high'). Defaults to 'medium'.
-            video_fps: Frames per second (default 10 fps, optimal for mobile UI automation).
-            video_scale: Scaling parameter for ffmpeg (default '720:-2' preserves aspect ratio).
+            time_limit: Maximum recording time in seconds (default 1800s / 30 mins). The driver stops
+                recording by itself after this and rejects values above its maximum
+                (4200s on current appium-xcuitest-driver).
+            video_quality: 'low', 'medium', 'high' or 'photo'. Defaults to 'medium'.
+            video_fps: Frames per second (default 10, enough for UI automation).
+            video_scale: ffmpeg scale value (default '720:-2' = 720 px wide, aspect ratio kept).
+            video_type: ffmpeg video codec. None keeps the driver default ('mjpeg').
+                Use 'libx264' together with pixel_format='yuv420p' for H.264 output.
+            pixel_format: ffmpeg output pixel format (e.g. 'yuv420p'). None keeps the driver default.
         Returns:
             True if recording started successfully, False otherwise.
         """
         if not driver:
-            print("[ScreenRecorder] Driver is not initialized. Cannot start recording.")
+            logger.error("[ScreenRecorder] Driver is not initialized. Cannot start recording.")
             return False
-        recording_options = {
+        options: Dict[str, Any] = {
             "timeLimit": time_limit,
-            "time_limit": time_limit,
             "videoQuality": video_quality,
-            "video_quality": video_quality,
             "videoFps": video_fps,
-            "video_fps": video_fps,
             "videoScale": video_scale,
-            "video_scale": video_scale,
-            "forceRestart": True,
+            "forceRestart": True,  # restart cleanly if a previous recording is still running
         }
+        if video_type:
+            options["videoType"] = video_type
+        if pixel_format:
+            options["pixelFormat"] = pixel_format
         try:
-            try:
-                driver.execute_script("mobile: startScreenRecording", recording_options)
-                self._is_recording = True
-                print(
-                    f"[ScreenRecorder] Screen recording started successfully "
-                    f"(timeLimit={time_limit}s, scale={video_scale}, fps={video_fps})."
-                )
-                return True
-            except Exception as mobile_err:
-                print(f"[ScreenRecorder] 'mobile: startScreenRecording' fallback: {mobile_err}")
-            # 2. Fallback to standard driver API
-            driver.start_recording_screen(**recording_options)
-            self._is_recording = True
-            print("[ScreenRecorder] Screen recording started successfully via driver API.")
-            return True
+            driver.start_recording_screen(**options)
         except Exception as e:
-            print(f"[ScreenRecorder] Failed to start screen recording: {e}")
-            self._is_recording = False
-            return False
+            if self._is_wda_connection_error(e) and self._reconnect_driver_in_place(driver):
+                try:
+                    driver.start_recording_screen(**options)
+                except Exception as retry_err:
+                    logger.error(f"[ScreenRecorder] Failed to start screen recording after WDA reconnect: {retry_err}")
+                    self._is_recording = False
+                    return False
+            else:
+                logger.error(f"[ScreenRecorder] Failed to start screen recording: {e}")
+                self._is_recording = False
+                return False
+        self._is_recording = True
+        self._started_at = time.time()
+        self._time_limit = time_limit
+        extra = "".join(
+            f", {key}={value}" for key, value in (("type", video_type), ("pix_fmt", pixel_format)) if value
+        )
+        logger.info(
+            f"[ScreenRecorder] Screen recording started successfully "
+            f"(timeLimit={time_limit}s, quality={video_quality}, fps={video_fps}, scale={video_scale}{extra})."
+        )
+        return True
 
     def stop_recording(
             self, driver: WebDriver, test_name: Optional[str] = None
@@ -83,21 +150,27 @@ class ScreenRecorder:
             Absolute path to the saved .mp4 video file, or None if failed.
         """
         if not driver or not self._is_recording:
-            print("[ScreenRecorder] Recording is not active or driver is None.")
+            logger.warning("[ScreenRecorder] Recording is not active or driver is None.")
             return None
+        elapsed = time.time() - self._started_at if self._started_at else 0.0
         try:
-            print("[ScreenRecorder] Stopping screen recording...")
-            raw_base64_video = None
-            try:
-                raw_base64_video = driver.execute_script("mobile: stopScreenRecording")
-            except Exception as mobile_stop_err:
-                print(f"[ScreenRecorder] 'mobile: stopScreenRecording' fallback: {mobile_stop_err}")
-            if not raw_base64_video:
-                raw_base64_video = driver.stop_recording_screen()
+            logger.info(f"[ScreenRecorder] Stopping screen recording (recorded for {elapsed:.0f}s)...")
+            raw_base64_video = driver.stop_recording_screen()
+        except Exception as e:
+            logger.error(f"[ScreenRecorder] Failed to stop screen recording: {e}")
+            return None
+        finally:
             self._is_recording = False
-            if not raw_base64_video:
-                print("[ScreenRecorder] No video data received from Appium.")
-                return None
+            self._started_at = None
+        if not raw_base64_video:
+            logger.warning("[ScreenRecorder] No video data received from Appium.")
+            return None
+        if self._time_limit and elapsed > self._time_limit:
+            logger.warning(
+                f"[ScreenRecorder] Case ran {elapsed:.0f}s but timeLimit is {self._time_limit}s: "
+                f"the last {elapsed - self._time_limit:.0f}s are not in the video."
+            )
+        try:
             abs_output_dir = os.path.abspath(self.output_dir)
             os.makedirs(abs_output_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -107,10 +180,9 @@ class ScreenRecorder:
             video_bytes = base64.b64decode(raw_base64_video)
             with open(video_path, "wb") as f:
                 f.write(video_bytes)
-            file_size_mb = len(video_bytes) / (1024 * 1024)
-            print(f"[ScreenRecorder] Screen recording saved to: {video_path} (Size: {file_size_mb:.2f} MB)")
-            return video_path
         except Exception as e:
-            print(f"[ScreenRecorder] Failed to stop/save screen recording: {e}")
-            self._is_recording = False
+            logger.error(f"[ScreenRecorder] Failed to save screen recording: {e}")
             return None
+        file_size_mb = len(video_bytes) / (1024 * 1024)
+        logger.info(f"[ScreenRecorder] Screen recording saved to: {video_path} (Size: {file_size_mb:.2f} MB)")
+        return video_path

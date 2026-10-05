@@ -250,7 +250,6 @@ class GHASingleDeviceFoundPage(BasePage):
             False -> Not a single page (multi-device list), or detected device mismatched
                      and the flow was reset back to the device list.
         """
-        # Local imports to avoid circular import with gha_session
         from page_object.iGHA.gha_add_page import GHAAddPage
         from page_object.iGHA.gha_home_page import GHAHomePage
         driver = getattr(session_or_page, "driver", session_or_page)
