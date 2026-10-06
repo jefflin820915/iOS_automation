@@ -15,19 +15,37 @@ from common import constants
 from common.base_page import BasePage
 from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 
+
 class GHAAdjustYourMicSettingsPage(BasePage):
     """Class for managing microphone and audio recording toggles on the mic settings page."""
-    MIC_MICROPHONE_SWITCH_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Microphone"`]/**/XCUIElementTypeSwitch'
-    MIC_AUDIO_RECORDING_SWITCH_CLASS_CHAIN = '**/XCUIElementTypeCell[`label == "Audio recording"`]/**/XCUIElementTypeSwitch'
-    MIC_PAGE_INDICATOR_PREDICATE = (
-        '(type == "XCUIElementTypeStaticText" AND label == "Adjust your mic settings") OR '
-        '(type == "XCUIElementTypeCell" AND (label == "Microphone" OR label == "Audio recording"))'
+    MIC_MICROPHONE_SWITCH_CLASS_CHAIN = (
+        '**/XCUIElementTypeCell[`label CONTAINS "Microphone" OR name CONTAINS "Microphone"`]'
+        '/**/XCUIElementTypeSwitch'
     )
-    MIC_NEXT_BTN_PREDICATE = 'label == "Next" OR name == "actionBarPrimaryButton"'
+    MIC_AUDIO_RECORDING_SWITCH_CLASS_CHAIN = (
+        '**/XCUIElementTypeCell[`label CONTAINS "Audio recording" OR name CONTAINS "Audio recording"`]'
+        '/**/XCUIElementTypeSwitch'
+    )
+    MIC_PAGE_INDICATOR_PREDICATE = (
+        '(type == "XCUIElementTypeStaticText" AND ('
+        'label CONTAINS "Adjust your mic settings" OR name CONTAINS "Adjust your mic settings")) OR '
+        '(type == "XCUIElementTypeCell" AND ('
+        'label CONTAINS "Microphone" OR label CONTAINS "Audio recording" OR '
+        'name CONTAINS "Microphone" OR name CONTAINS "Audio recording"))'
+    )
+    MIC_VIDEO_HISTORY_PREDICATE = (
+        'type == "XCUIElementTypeStaticText" AND ('
+        'label CONTAINS "turn on video history" OR name CONTAINS "turn on video history" OR '
+        'name == "{0}")'.format(
+            getattr(constants, "GHA_VIDEO_HISTORY_ACCESSIBILITY_ID", "Choose whether you want to turn on video history")
+        )
+    )
+    MIC_NEXT_BTN_PREDICATE = 'label == "Next" OR name == "Next" OR name == "actionBarPrimaryButton"'
     MIC_LOADING_PREDICATE = 'type == "XCUIElementTypeActivityIndicator" AND visible == 1'
     MIC_INTERNAL_ERROR_PREDICATE = 'label == "Internal error encountered." OR name == "Internal error encountered."'
     MIC_ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
     MIC_SWITCH_ON_VALUES = ("1", "true")
+    MIC_PAGE_WAIT_TIMEOUT = 30.0     # Max wait for Adjust your mic settings page to appear
     MIC_IDLE_TIMEOUT = 20.0          # Max wait for page to become idle
     MIC_IDLE_STABLE_SECONDS = 1.5    # Idle state must hold this long before tapping Next
     MIC_LEAVE_PAGE_TIMEOUT = 8.0     # Max wait for page transition after tapping Next
@@ -42,7 +60,7 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         try:
             previous = self.driver.timeouts.implicit_wait
         except Exception:
-            previous = getattr(constants, "DEFAULT_IMPLICIT_WAIT", 10.0)
+            previous = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
         self.driver.implicitly_wait(0)
         try:
             yield
@@ -80,7 +98,7 @@ class GHAAdjustYourMicSettingsPage(BasePage):
                 return None
 
     def _mic_tap_element_center(self, element: WebElement) -> None:
-        """Coordinate tap at the element's center (avoids stale elementId references)."""
+        """Coordinate tap at the element's center (avoids stale elementId references and visible=false blocks)."""
         rect = element.rect
         self.driver.execute_script("mobile: tap", {
             "x": int(rect["x"] + rect["width"] / 2),
@@ -96,6 +114,58 @@ class GHAAdjustYourMicSettingsPage(BasePage):
 
     def _mic_is_on_page(self) -> bool:
         return self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_PAGE_INDICATOR_PREDICATE) is not None
+
+    def _mic_is_still_on_video_history_page(self) -> bool:
+        vh_id = getattr(constants, "GHA_VIDEO_HISTORY_ACCESSIBILITY_ID", "")
+        if vh_id and self._mic_quick_find(AppiumBy.ACCESSIBILITY_ID, vh_id) is not None:
+            return True
+        return self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_VIDEO_HISTORY_PREDICATE) is not None
+
+    def _mic_advance_past_late_video_history_page(self) -> None:
+        """If the previous VideoHistory step timed out before the page loaded, complete it now so we reach Mic settings."""
+        self._logger.warning(
+            "[MicSettings] Screen is still on 'Video history' page (loaded late). "
+            "Enabling Video history toggle and clicking 'Next' to advance to Mic settings..."
+        )
+        toggle_id = getattr(constants, "GHA_TOGGLE_ACCESSIBILITY_ID", "preferenceToggleView")
+        toggle = (
+                self._mic_quick_find(AppiumBy.ACCESSIBILITY_ID, toggle_id)
+                or self._mic_quick_find(AppiumBy.CLASS_NAME, "XCUIElementTypeSwitch")
+        )
+        if toggle is not None:
+            try:
+                val = str(toggle.get_attribute("value") or "0")
+                if val not in self.MIC_SWITCH_ON_VALUES:
+                    with self._mic_no_idle_wait():
+                        toggle.click()
+                    time.sleep(1.5)
+            except WebDriverException:
+                pass
+        btn = self._mic_get_next_btn()
+        if btn is not None:
+            try:
+                self._mic_tap_next(btn, force_coordinates=False)
+                time.sleep(2.0)
+            except WebDriverException:
+                pass
+
+    def _mic_wait_for_page(self, timeout: float = MIC_PAGE_WAIT_TIMEOUT) -> bool:
+        """Wait for the 'Adjust your mic settings' page to appear before touching any switches or Next button."""
+        self._logger.info("[MicSettings] Waiting for 'Adjust your mic settings' page...")
+        deadline = time.time() + timeout
+        handled_late_vh = False
+        while time.time() < deadline:
+            self._mic_check_for_internal_error()
+            if self._mic_is_on_page():
+                self._logger.info("[MicSettings] 'Adjust your mic settings' page detected.")
+                return True
+            if not handled_late_vh and self._mic_is_still_on_video_history_page():
+                handled_late_vh = True
+                self._mic_advance_past_late_video_history_page()
+                continue
+            time.sleep(self.MIC_POLL_INTERVAL)
+        self._logger.error(f"[MicSettings] 'Adjust your mic settings' page did not appear within {timeout:.0f}s.")
+        return False
 
     def _mic_is_idle_now(self) -> bool:
         """Next button is enabled and no loading spinner is visible."""
@@ -124,11 +194,17 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         return False
 
     def _mic_wait_until_left_page(self, timeout: float = MIC_LEAVE_PAGE_TIMEOUT) -> bool:
+        """Wait until the Mic settings indicators are gone for 2 consecutive polls."""
         deadline = time.time() + timeout
+        consecutive_gone = 0
         while time.time() < deadline:
             self._mic_check_for_internal_error()
             if not self._mic_is_on_page():
-                return True
+                consecutive_gone += 1
+                if consecutive_gone >= 2:
+                    return True
+            else:
+                consecutive_gone = 0
             time.sleep(self.MIC_POLL_INTERVAL)
         return False
 
@@ -154,6 +230,8 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         switch = self._mic_quick_find(AppiumBy.IOS_CLASS_CHAIN, class_chain)
         if switch:
             return switch
+        if not self._mic_is_on_page():
+            return None
         with self._mic_no_implicit_wait():
             try:
                 switches = self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeSwitch")
@@ -229,35 +307,46 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         ]
         return all(results)
 
-    def _mic_tap_next(self, btn: WebElement) -> None:
+    def _mic_tap_next(self, btn: WebElement, force_coordinates: bool = False) -> None:
         with self._mic_no_idle_wait():
+            displayed = True
             try:
-                btn.click()
-            except WebDriverException as e:
-                self._logger.warning(f"Direct click failed: {e}. Trying coordinate tap fallback...")
-                fresh_btn = self._mic_get_next_btn()
-                if fresh_btn is not None:
-                    self._mic_tap_element_center(fresh_btn)
+                displayed = btn.is_displayed()
+            except Exception:
+                pass
+            if not force_coordinates and displayed:
+                try:
+                    btn.click()
+                    return
+                except WebDriverException as e:
+                    self._logger.warning(f"Direct click failed: {e}. Trying coordinate tap fallback...")
+            fresh_btn = self._mic_get_next_btn() or btn
+            if fresh_btn is not None:
+                self._mic_tap_element_center(fresh_btn)
 
     def _mic_click_next_and_verify(self) -> bool:
         """Click 'Next' and verify the page actually transitioned, retrying if the tap was swallowed.
         Raises:
             OOBEInternalErrorException: If internal error dialog appears.
         """
+        has_tapped_next = False
         for attempt in range(1, self.MIC_MAX_NEXT_ATTEMPTS + 1):
             self._mic_wait_until_idle()
             btn = self._mic_get_next_btn()
             if btn is None:
-                if not self._mic_is_on_page():
+                if has_tapped_next and not self._mic_is_on_page():
                     self._logger.info("[MicSettings] Already left mic settings page.")
                     return True
                 self._logger.error("[MicSettings] Cannot click 'Next': Button element not found.")
                 return False
+            use_coordinates = attempt > 1
             self._logger.info(
-                f"[MicSettings] Clicking 'Next' button (attempt {attempt}/{self.MIC_MAX_NEXT_ATTEMPTS})..."
+                f"[MicSettings] Clicking 'Next' button ({'coordinate tap' if use_coordinates else 'click'}, "
+                f"attempt {attempt}/{self.MIC_MAX_NEXT_ATTEMPTS})..."
             )
             try:
-                self._mic_tap_next(btn)
+                self._mic_tap_next(btn, force_coordinates=use_coordinates)
+                has_tapped_next = True
             except WebDriverException as tap_err:
                 self._logger.warning(f"[MicSettings] Failed to tap 'Next': {tap_err}")
             if self._mic_wait_until_left_page():
@@ -271,9 +360,12 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         return False
 
     def enable_all_mic_settings_and_proceed(self) -> bool:
-        """Turn ON all mic settings toggles and click Next.
+        """Wait for the Mic settings page, turn ON all mic settings toggles, and click Next.
         Returns:
             True if the page transitioned successfully, False otherwise.
         """
+        if not self._mic_wait_for_page():
+            self._logger.error("[MicSettings] Not on Mic settings page. Skip clicking 'Next'.")
+            return False
         self._mic_turn_on_all_toggles()
         return self._mic_click_next_and_verify()
