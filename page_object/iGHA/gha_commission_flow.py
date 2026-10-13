@@ -10,6 +10,8 @@ from common.base_page import BasePage
 from page_object.iGHA.gha_camera_activated_page import GHACameraActivatedPage
 from page_object.iGHA.gha_connect_device_to_google_account_page import GHAConnectDeviceToGoogleAccountPage
 from page_object.iGHA.gha_device_connected_page import GHADeviceConnectedPage
+from page_object.iGHA.gha_device_setting_page import GHADeviceSettingPage
+from page_object.iGHA.gha_setting_page import GHASettingsPage
 from page_object.iGHA.gha_tab_page import GHATabPage
 from page_object.iGHA.gha_watch_setup_video_page import GHAWatchSetupVideoPage
 from page_object.iGHA.gha_where_is_this_device_page import GHAWhereIsThisDevicePage
@@ -17,6 +19,7 @@ from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShould
 from utils.camera_reset_utils import DeviceResetUtils
 
 Locator = Tuple[str, str]
+
 HeadlineHandler = Callable[[str], bool]
 
 def _contains_any(text: str, keywords: Sequence[str]) -> bool:
@@ -68,6 +71,9 @@ class GHACommissioningPageObject(BasePage):
         "Something went wrong", "Check your connection", "Device not found", "Setup failed", "Service failure",
         "Reset this device", "Device not reachable", "There may be a problem"
     )
+    PAIRED_OFFLINE_FAILURE_KEYWORDS = (
+        "There may be a problem",
+    )
     PROGRESS_KEYWORDS = (
         "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
         "Setting up", "Activating camera", "Downloading update", "Update finished",
@@ -77,6 +83,7 @@ class GHACommissioningPageObject(BasePage):
     PLUG_OFF_VALUES = ("off", "0", "false")
     CM_POLL_INTERVAL = 1.5
     CM_PROGRESS_INTERVAL = 2.5
+    CM_REMOVE_ATTEMPTS = 2
 
     @contextmanager
     def _cm_no_implicit_wait(self) -> Iterator[None]:
@@ -302,8 +309,38 @@ class GHACommissioningPageObject(BasePage):
             self._logger.info("[Recovery] Tapped Devices tab.")
             time.sleep(2.0)
 
-    def _cm_recover(self, reason: str) -> str:
-        """Dismiss commissioning screens and reset the device. Never raises.
+    def _cm_remove_paired_device(self, device_name: str, attempts: int = CM_REMOVE_ATTEMPTS) -> bool:
+        """Restart GHA and remove the paired (offline) device from Home Settings before hardware reset."""
+        if not device_name:
+            self._logger.warning("[Recovery] No device_name specified for paired device removal.")
+            return False
+        for attempt in range(1, attempts + 1):
+            self._logger.warning(
+                f"[Recovery] Removing paired offline device '{device_name}' "
+                f"(attempt {attempt}/{attempts})..."
+            )
+            try:
+                self.stop_gha()
+                time.sleep(2.0)
+                self.start_gha()
+                time.sleep(5.0)
+                self._logger.info("[Recovery] Navigating to Home Settings to remove device...")
+                GHATabPage(self.driver).enter_home_settings_page()
+                if not GHASettingsPage(self.driver).open_device_settings(device_name=device_name):
+                    raise RuntimeError(f"Device '{device_name}' not found in Settings")
+                GHADeviceSettingPage(self.driver).get_device_information()
+                if GHADeviceSettingPage(self.driver).click_remove_device_btn() is False:
+                    raise RuntimeError(f"Failed to remove '{device_name}' in Device Settings")
+                self._logger.info(f"[Recovery] Successfully removed paired offline device '{device_name}'.")
+                return True
+            except Exception as err:
+                self._logger.error(
+                    f"[Recovery] Remove paired device attempt {attempt}/{attempts} failed: {err}"
+                )
+        return False
+
+    def _cm_recover(self, reason: str, remove_paired_device: bool = False) -> str:
+        """Dismiss commissioning screens, optionally remove paired offline device, and reset the device. Never raises.
         Reset method comes from DeviceResetUtils: adb factory reset for configured devices
         (e.g. 'Ref2 Battery Camera'), smart plug power-cycle for every other device.  [DEVICE RESET]
         Returns:
@@ -315,6 +352,10 @@ class GHACommissioningPageObject(BasePage):
         except Exception as e:
             self._logger.warning(f"[Recovery] Dismiss step error: {e}")
         device = getattr(self, "_cm_reset_device_name", "") or ""  # [DEVICE RESET]
+        remove_msg = ""
+        if remove_paired_device:
+            removed = self._cm_remove_paired_device(device)
+            remove_msg = f" Remove paired device: {'SUCCESS' if removed else 'FAILED'}."
         method = DeviceResetUtils.describe(device)
         try:
             reset_ok = DeviceResetUtils.reset_device(
@@ -323,7 +364,7 @@ class GHACommissioningPageObject(BasePage):
         except Exception as e:
             self._logger.warning(f"[Recovery] {method} step error: {e}")
             reset_ok = False
-        return f"FATAL: {reason}. {method}: {'SUCCESS' if reset_ok else 'FAILED'}."
+        return f"FATAL: {reason}.{remove_msg} {method}: {'SUCCESS' if reset_ok else 'FAILED'}."
 
     def _cm_tile_identity(self, tile: WebElement) -> str:
         """Human-readable device name of a tile (title text > first part of label > name)."""
@@ -509,8 +550,9 @@ class GHACommissioningPageObject(BasePage):
             True when the live video page is reached.
         Raises:
             AssertionError: On failure headline, Apple sheet failure, timeout, or unexpected error
-                (after dismissing screens and power-cycling smart plugs). All final raises happen in
-                THIS method so the reported Failure Stage is COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
+                (after dismissing screens, removing paired offline device if applicable, and
+                resetting the device). All final raises happen in THIS method so the reported
+                Failure Stage is COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
         """
         self._logger.info(f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
         self._cm_reset_device_name = device_name
@@ -533,7 +575,18 @@ class GHACommissioningPageObject(BasePage):
                 self._logger.info(f"[{int(time.time() - start_time)}s] GHA Headline: '{headline}'")
                 if _contains_any(headline, self.FAILURE_KEYWORDS):
                     self._logger.error(f"[Commissioning] Failure headline detected: '{headline}'")
-                    raise AssertionError(self._cm_recover(f"Commissioning failed with headline '{headline}'"))
+                    is_paired_offline = _contains_any(headline, self.PAIRED_OFFLINE_FAILURE_KEYWORDS)
+                    if is_paired_offline:
+                        self._logger.warning(
+                            f"[Commissioning] '{headline}' indicates device '{device_name}' was already added "
+                            "to Home (offline). Removing device from Home before running recovery..."
+                        )
+                    raise AssertionError(
+                        self._cm_recover(
+                            f"Commissioning failed with headline '{headline}'",
+                            remove_paired_device=is_paired_offline,
+                        )
+                    )
                 if _contains_any(headline, self.PROGRESS_KEYWORDS):
                     self._logger.info(f"Waiting for GHA background progress: '{headline}'...")
                     time.sleep(self.CM_PROGRESS_INTERVAL)
