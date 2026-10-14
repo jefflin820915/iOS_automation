@@ -20,15 +20,59 @@ class GHADeviceSettingPage(BasePage):
     """Class for managing device-specific settings, resolving mDNS, and removing device on iOS."""
     REMOVE_DEVICE_LOCATORS: List[Tuple[AppiumBy, str]] = [
         (AppiumBy.ACCESSIBILITY_ID, "Remove device"),
-        (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "Remove device" OR label == "Remove device"`]'),
-        (AppiumBy.IOS_PREDICATE, 'name == "Remove device" OR label == "Remove device"'),
-        (AppiumBy.XPATH, '//XCUIElementTypeButton[@name="Remove device" or @label="Remove device"]'),
+        (AppiumBy.ACCESSIBILITY_ID, "Unlink all"),
+        (
+            AppiumBy.IOS_CLASS_CHAIN,
+            '**/XCUIElementTypeButton[`name == "Remove device" OR label == "Remove device" '
+            'OR name == "Unlink all" OR label == "Unlink all"`]',
+        ),
+        (
+            AppiumBy.IOS_PREDICATE,
+            'name == "Remove device" OR label == "Remove device" '
+            'OR name == "Unlink all" OR label == "Unlink all"',
+        ),
+        (
+            AppiumBy.XPATH,
+            '//XCUIElementTypeButton[@name="Remove device" or @label="Remove device" '
+            'or @name="Unlink all" or @label="Unlink all"] | '
+            '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="Remove device" or @label="Remove device" '
+            'or @name="Unlink all" or @label="Unlink all"]]',
+        ),
     ]
     CONFIRM_REMOVE_LOCATORS: List[Tuple[AppiumBy, str]] = [
-        (AppiumBy.XPATH, '//XCUIElementTypeButton[@name="Remove" or @label="Remove"]'),
+        (
+            AppiumBy.XPATH,
+            '//XCUIElementTypeButton[@name="Remove" or @label="Remove" '
+            'or @name="Unlink all" or @label="Unlink all" '
+            'or @name="Unlink" or @label="Unlink"]',
+        ),
         (AppiumBy.ACCESSIBILITY_ID, "Remove"),
-        (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`label == "Remove" OR name == "Remove"`]'),
+        (AppiumBy.ACCESSIBILITY_ID, "Unlink all"),
+        (AppiumBy.ACCESSIBILITY_ID, "Unlink"),
+        (
+            AppiumBy.IOS_CLASS_CHAIN,
+            '**/XCUIElementTypeButton[`label == "Remove" OR name == "Remove" '
+            'OR label == "Unlink all" OR name == "Unlink all" '
+            'OR label == "Unlink" OR name == "Unlink"`]',
+        ),
+        (
+            AppiumBy.IOS_PREDICATE,
+            '(type == "XCUIElementTypeButton" OR type == "XCUIElementTypeStaticText") AND ('
+            'name IN {"Remove", "Unlink all", "Unlink", "Delete"} OR '
+            'label IN {"Remove", "Unlink all", "Unlink", "Delete"})',
+        ),
         (AppiumBy.ACCESSIBILITY_ID, "Delete"),
+    ]
+    UNLINK_ALL_CONFIRM_LOCATORS: List[Tuple[AppiumBy, str]] = [
+        (AppiumBy.ACCESSIBILITY_ID, "Unlink all"),
+        (
+            AppiumBy.IOS_CLASS_CHAIN,
+            '**/XCUIElementTypeButton[`label == "Unlink all" OR name == "Unlink all"`]',
+        ),
+        (
+            AppiumBy.XPATH,
+            '//XCUIElementTypeButton[@name="Unlink all" or @label="Unlink all"]',
+        ),
     ]
     DEVICE_INFO_ENTRY_LOCATORS: List[Tuple[AppiumBy, str]] = [
         (
@@ -64,7 +108,6 @@ class GHADeviceSettingPage(BasePage):
             '//XCUIElementTypeNavigationBar//XCUIElementTypeButton[1]',
         ),
     ]
-
     DEVICE_INFO_PAGE_MARKERS: List[Tuple[AppiumBy, str]] = [
         (
             AppiumBy.IOS_PREDICATE,
@@ -132,6 +175,18 @@ class GHADeviceSettingPage(BasePage):
         except Exception as tap_err:
             self._logger.error(f"All tap methods failed for {desc}: {tap_err}")
             return False
+    @staticmethod
+
+    def _devset_elem_label(elem: WebElement, default: str = "Remove") -> str:
+        """Read human-readable label/name of an element for logging."""
+        for attr in ("label", "name", "value"):
+            try:
+                val = (elem.get_attribute(attr) or "").strip()
+                if val:
+                    return val
+            except Exception:
+                pass
+        return default
 
     def _devset_find_first(
             self, locators: List[Tuple[AppiumBy, str]], require_displayed: bool = True
@@ -233,7 +288,7 @@ class GHADeviceSettingPage(BasePage):
             return False
 
     def _get_visible_remove_btn(self) -> Optional[WebElement]:
-        """Find visible and hittable 'Remove device' button with multi-strategy locators."""
+        """Find visible and hittable 'Remove device' or 'Unlink all' button with multi-strategy locators."""
         try:
             window_size = self.driver.get_window_size()
             screen_height = window_size["height"]
@@ -269,52 +324,92 @@ class GHADeviceSettingPage(BasePage):
             except Exception:
                 pass
 
-    def _confirm_secondary_remove_dialog(self, timeout: float = 6.0) -> bool:
-        """Wait for and click the secondary confirmation 'Remove' button."""
+    def _confirm_secondary_remove_dialog(
+            self,
+            timeout: float = 6.0,
+            locators: Optional[List[Tuple[AppiumBy, str]]] = None,
+            exclude_rect: Optional[Dict[str, int]] = None,
+    ) -> Optional[str]:
+        """Wait for and click the secondary confirmation 'Remove' / 'Unlink all' button.
+        Returns:
+            Optional[str]: The clicked button label if confirmed, or None if timed out.
+        """
+        active_locators = locators or self.CONFIRM_REMOVE_LOCATORS
         start_time = time.time()
         while time.time() - start_time < timeout:
             with self._devset_no_implicit_wait():
-                for by, val in self.CONFIRM_REMOVE_LOCATORS:
+                for by, val in active_locators:
                     try:
                         elems = self.driver.find_elements(by, val)
-                        for elem in elems:
-                            if elem.is_displayed():
-                                if self._devset_tap_element(elem, "confirmation 'Remove' button"):
-                                    self._logger.info("Clicked confirmation 'Remove' button.")
-                                    return True
+                        # Iterate in reverse so topmost modal/alert buttons take precedence over background page buttons.
+                        for elem in reversed(elems):
+                            if not elem.is_displayed():
+                                continue
+                            if exclude_rect is not None:
+                                try:
+                                    if elem.rect == exclude_rect:
+                                        continue
+                                except Exception:
+                                    pass
+                            btn_label = self._devset_elem_label(elem, "Remove")
+                            if self._devset_tap_element(elem, f"confirmation '{btn_label}' button"):
+                                self._logger.info(f"Clicked confirmation '{btn_label}' button.")
+                                return btn_label
                     except Exception:
                         pass
             time.sleep(0.5)
-        return False
+        return None
 
     def click_remove_device_btn(self, max_scrolls: int = 8) -> bool:
-        """Quickly swipe down the Device Settings page to locate and click 'Remove device' button.
+        """Quickly swipe down the Device Settings page to locate and click 'Remove device' or 'Unlink all' button.
         Args:
             max_scrolls (int): Maximum swipes to reach bottom. Defaults to 8.
         Returns:
             bool: True if clicked and confirmed successfully.
         """
-        self._logger.info("Locating 'Remove device' button on Device Settings page...")
+        self._logger.info("Locating 'Remove device' / 'Unlink all' button on Device Settings page...")
         time.sleep(1.0)
         for scroll_idx in range(max_scrolls):
             remove_btn = self._get_visible_remove_btn()
             if remove_btn:
-                self._logger.info(f"'Remove device' button found (after {scroll_idx} swipes)! Clicking...")
-                self._devset_tap_element(remove_btn, "'Remove device' button")
-                self._logger.info("Waiting for secondary 'Remove' confirmation dialog...")
-                if self._confirm_secondary_remove_dialog(timeout=6.0):
-                    self._logger.info("Successfully confirmed device removal.")
-                    time.sleep(5)
+                btn_label = self._devset_elem_label(remove_btn, "Remove device")
+                btn_rect = None
+                if btn_label.lower() == "unlink all":
+                    try:
+                        btn_rect = remove_btn.rect
+                    except Exception:
+                        btn_rect = None
+                self._logger.info(f"'{btn_label}' button found (after {scroll_idx} swipes)! Clicking...")
+                self._devset_tap_element(remove_btn, f"'{btn_label}' button")
+                self._logger.info("Waiting for secondary 'Remove' / 'Unlink all' confirmation dialog...")
+                confirmed_label = self._confirm_secondary_remove_dialog(
+                    timeout=6.0, exclude_rect=btn_rect
+                )
+                if confirmed_label:
+                    self._logger.info(f"Successfully confirmed device removal via '{confirmed_label}'.")
+                    if confirmed_label.lower() != "unlink all":
+                        # If the first confirmation was 'Remove', check briefly in case a follow-up 'Unlink all' dialog appears.
+                        time.sleep(1.5)
+                        followup = self._confirm_secondary_remove_dialog(
+                            timeout=2.0, locators=self.UNLINK_ALL_CONFIRM_LOCATORS
+                        )
+                        if followup:
+                            self._logger.info(f"Confirmed follow-up '{followup}' dialog.")
+                            time.sleep(5.0)
+                        else:
+                            time.sleep(1.5)
+                    else:
+                        time.sleep(5)
                     return True
                 else:
-                    self._logger.warning("Confirmation 'Remove' dialog button did not appear within 6s, proceeding...")
+                    self._logger.warning("Confirmation 'Remove' / 'Unlink all' dialog button did not appear within 6s, proceeding...")
                     return True
-            self._logger.info(f"'Remove device' not visible yet. Swiping ({scroll_idx + 1}/{max_scrolls})...")
+            self._logger.info(f"'Remove device' / 'Unlink all' not visible yet. Swiping ({scroll_idx + 1}/{max_scrolls})...")
             self._swipe_down_page()
         raise PageNotPresentException(
             locator=self.REMOVE_DEVICE_LOCATORS[0],
             page_name=self.__class__.__name__,
-            message=f"Failed to find 'Remove device' button after {max_scrolls} swipes on Device Settings page."
+            message=f"Failed to find 'Remove device' or 'Unlink all' button after {max_scrolls} swipes on Device Settings page."
         )
 
     def get_device_information(self) -> Dict[str, str]:
