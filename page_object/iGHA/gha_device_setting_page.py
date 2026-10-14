@@ -304,7 +304,7 @@ class GHADeviceSettingPage(BasePage):
                 self._logger.info("Waiting for secondary 'Remove' confirmation dialog...")
                 if self._confirm_secondary_remove_dialog(timeout=6.0):
                     self._logger.info("Successfully confirmed device removal.")
-                    time.sleep(2.5)
+                    time.sleep(5)
                     return True
                 else:
                     self._logger.warning("Confirmation 'Remove' dialog button did not appear within 6s, proceeding...")
