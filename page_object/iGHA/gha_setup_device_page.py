@@ -25,9 +25,18 @@ class GHASetUpDevicePage(BasePage):
                 return identifier.strip().lower()
         return None
 
+    def _get_window_size_safe(self) -> Tuple[int, int]:
+        """Return (width, height) of the screen with safe defaults."""
+        try:
+            win_size = self.driver.get_window_size()
+            return int(win_size.get("width", 390)), int(win_size.get("height", 844))
+        except Exception:
+            return 390, 844
+
     def _get_all_visible_device_items(self) -> List[Dict[str, Any]]:
         """Retrieve all currently VISIBLE device cards on screen with title, subtitle, and element."""
         visible_items: List[Dict[str, Any]] = []
+        _, win_h = self._get_window_size_safe()
         button_predicate = (
             'type == "XCUIElementTypeButton" AND '
             'name == "image-title-subtitle" AND '
@@ -40,9 +49,9 @@ class GHASetUpDevicePage(BasePage):
                     if not btn.is_displayed():
                         continue
                     rect = btn.rect
-                    if rect["y"] < 0 or rect["height"] <= 0:
+                    if rect["y"] < 0 or rect["y"] >= win_h or rect["height"] <= 0:
                         continue
-                    raw_label = btn.get_attribute("label") or btn.get_attribute("value") or ""
+                    raw_label = btn.get_attribute("label") or btn.get_attribute("value") or btn.text or ""
                     raw_label = raw_label.strip()
                     if not raw_label:
                         continue
@@ -60,6 +69,7 @@ class GHASetUpDevicePage(BasePage):
                         "subtitle": subtitle,
                         "display_name": display_name,
                         "element": btn,
+                        "rect": dict(rect),
                     })
                 except (StaleElementReferenceException, WebDriverException):
                     continue
@@ -77,10 +87,13 @@ class GHASetUpDevicePage(BasePage):
                     try:
                         if not t_elem.is_displayed():
                             continue
+                        t_rect = t_elem.rect
+                        if t_rect["y"] < 0 or t_rect["y"] >= win_h:
+                            continue
                         t_text = (t_elem.get_attribute("value") or t_elem.get_attribute("label") or t_elem.text or "").strip()
                         if not t_text:
                             continue
-                        t_y = t_elem.rect["y"]
+                        t_y = t_rect["y"]
                         matching_sub = ""
                         for s_elem in subtitle_elements:
                             s_y = s_elem.rect["y"]
@@ -93,6 +106,7 @@ class GHASetUpDevicePage(BasePage):
                             "subtitle": matching_sub,
                             "display_name": display_name,
                             "element": t_elem,
+                            "rect": dict(t_rect),
                         })
                     except (StaleElementReferenceException, WebDriverException):
                         continue
@@ -132,14 +146,75 @@ class GHASetUpDevicePage(BasePage):
         except Exception:
             return False
 
-    def _safe_click_target_device(self, target_name: str) -> bool:
+    def _nudge_scroll_vertical(self, start_y: int, end_y: int) -> None:
+        """Perform a small vertical drag to bring an edge-clipped card into view without flinging it off-screen."""
+        win_w, _ = self._get_window_size_safe()
+        cx = win_w // 2
+        try:
+            self.driver.swipe(cx, start_y, cx, end_y, duration=500)
+        except Exception:
+            direction = "up" if start_y > end_y else "down"
+            try:
+                self.driver.execute_script("mobile: swipe", {"direction": direction})
+            except Exception:
+                pass
+        time.sleep(1.0)
+
+    def _tap_card_with_fallbacks(self, elem: WebElement, rect: Dict[str, int], display_name: str) -> bool:
+        """Click the device card element with fallbacks to mobile: tap by elementId and center coordinates."""
+        cx = int(rect["x"] + rect["width"] / 2)
+        cy = int(rect["y"] + rect["height"] / 2)
+        tapped = False
+        try:
+            elem.click()
+            self._logger.info(f"Clicked device card '{display_name}' via elem.click().")
+            tapped = True
+        except (StaleElementReferenceException, WebDriverException) as click_err:
+            self._logger.warning(f"elem.click() on '{display_name}' failed ({click_err}); trying mobile: tap...")
+            try:
+                self.driver.execute_script("mobile: tap", {"elementId": elem.id})
+                self._logger.info(f"Tapped device card '{display_name}' via elementId.")
+                tapped = True
+            except Exception:
+                try:
+                    self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                    self._logger.info(f"Coordinate-tapped device card '{display_name}' at ({cx}, {cy}).")
+                    tapped = True
+                except Exception as tap_err:
+                    self._logger.error(f"All tap methods failed for '{display_name}': {tap_err}")
+                    return False
+        # If the list was still decelerating from a scroll, the first tap may have only stopped inertia.
+        # Check after 1.0s if the same card is still visible on this page; if so, tap its center coordinates.
+        time.sleep(1.0)
+        still_present = None
+        for item in self._get_all_visible_device_items():
+            if item["display_name"].strip().lower() == display_name.strip().lower():
+                still_present = item
+                break
+        if still_present is not None:
+            try:
+                r2 = still_present.get("rect") or still_present["element"].rect
+                cx2 = int(r2["x"] + r2["width"] / 2)
+                cy2 = int(r2["y"] + r2["height"] / 2)
+                self._logger.info(
+                    f"Device card '{display_name}' still visible after initial click; "
+                    f"sending follow-up coordinate tap at ({cx2}, {cy2})..."
+                )
+                self.driver.execute_script("mobile: tap", {"x": cx2, "y": cy2})
+                time.sleep(0.8)
+            except Exception:
+                pass
+        return tapped
+
+    def _safe_click_target_device(
+            self, target_name: str, initial_item: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """Safely locate, bounds-check, and click the target device card.
-        Handles list shifting, devices pushed to the bottom edge, and race conditions.
+        Handles list shifting, devices clipped at the extreme top/bottom edge, and scroll deceleration.
         Returns:
             bool: True if clicked successfully, False if not visible or shifted out.
         """
-        win_size = self.driver.get_window_size()
-        win_h = win_size.get("height", 800)
+        _, win_h = self._get_window_size_safe()
         for attempt in range(3):
             items = self._get_all_visible_device_items()
             target_item = None
@@ -147,29 +222,37 @@ class GHASetUpDevicePage(BasePage):
                 if self._is_target_device_match(target_name, item):
                     target_item = item
                     break
+            if target_item is None and attempt == 0 and initial_item is not None:
+                target_item = initial_item
             if not target_item:
-                return False
+                self._logger.warning(
+                    f"Target '{target_name}' not visible on click attempt {attempt + 1}/3. Retrying..."
+                )
+                time.sleep(0.6)
+                continue
             elem = target_item["element"]
             try:
-                rect = elem.rect
-                if (rect["y"] + rect["height"]) > (win_h - 100):
+                rect = target_item.get("rect") or elem.rect
+                cy = int(rect["y"] + rect["height"] / 2)
+                if cy > (win_h - 25):
                     self._logger.info(
-                        f"Target '{target_item['display_name']}' pushed to bottom edge (y={rect['y']}). "
-                        f"Swiping up slightly to pull it into safe view..."
+                        f"Target '{target_item['display_name']}' clipped at bottom edge (y={rect['y']}, cy={cy}). "
+                        f"Nudging up slightly..."
                     )
-                    self.driver.execute_script("mobile: swipe", {"direction": "up"})
-                    time.sleep(1.0)
+                    self._nudge_scroll_vertical(int(win_h * 0.70), int(win_h * 0.45))
                     continue
-                if rect["y"] < 80:
+                if cy < 35:
                     self._logger.info(
-                        f"Target '{target_item['display_name']}' clipped at top. Swiping down..."
+                        f"Target '{target_item['display_name']}' clipped at top edge (y={rect['y']}, cy={cy}). "
+                        f"Nudging down slightly..."
                     )
-                    self.driver.execute_script("mobile: swipe", {"direction": "down"})
-                    time.sleep(1.0)
+                    self._nudge_scroll_vertical(int(win_h * 0.35), int(win_h * 0.60))
                     continue
-                current_label = (elem.get_attribute("label") or elem.get_attribute("value") or "").lower()
+                current_label = (
+                        elem.get_attribute("label") or elem.get_attribute("value") or elem.text or ""
+                ).lower()
                 expected_sub = target_item["subtitle"].lower()
-                if (
+                if current_label and (
                         target_item["title"].lower() not in current_label
                         or (expected_sub and "," in current_label and expected_sub not in current_label)
                 ):
@@ -178,17 +261,15 @@ class GHASetUpDevicePage(BasePage):
                     )
                     time.sleep(0.5)
                     continue
-                self._logger.info(f"Target device '{target_item['display_name']}' is safe in viewport! Clicking now...")
-                try:
-                    elem.click()
-                    self._logger.info("Successfully clicked device card.")
-                    return True
-                except WebDriverException:
-                    self.driver.execute_script("mobile: tap", {"elementId": elem.id})
-                    self._logger.info("mobile: tap succeeded.")
+                self._logger.info(
+                    f"Target device '{target_item['display_name']}' is in viewport (y={rect['y']}, cy={cy})! Clicking now..."
+                )
+                if self._tap_card_with_fallbacks(elem, rect, target_item["display_name"]):
                     return True
             except (StaleElementReferenceException, WebDriverException) as e:
-                self._logger.warning(f"List re-rendered during click ({e.__class__.__name__}). Retrying ({attempt + 1}/3)...")
+                self._logger.warning(
+                    f"List re-rendered during click ({e.__class__.__name__}). Retrying ({attempt + 1}/3)..."
+                )
                 time.sleep(0.8)
         return False
 
@@ -209,17 +290,17 @@ class GHASetUpDevicePage(BasePage):
         poll_start = time.time()
         while time.time() - poll_start < initial_wait_seconds:
             items = self._get_all_visible_device_items()
-            target_found = False
+            matched_item = None
             for item in items:
                 name = item["display_name"]
                 if name not in discovered_device_names:
                     discovered_device_names.append(name)
-                if self._is_target_device_match(device_name, item):
-                    target_found = True
+                if matched_item is None and self._is_target_device_match(device_name, item):
+                    matched_item = item
             self._logger.info(f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
-            if target_found:
+            if matched_item is not None:
                 self._logger.info(f"Target device '{target_desc}' detected! Attempting safe click...")
-                if self._safe_click_target_device(device_name):
+                if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
                 else:
                     self._logger.info("Target was pushed off-screen by newly discovered devices. Proceeding to Phase 2 scroll...")
@@ -232,18 +313,18 @@ class GHASetUpDevicePage(BasePage):
             time.sleep(1.5)
             items = self._get_all_visible_device_items()
             new_devices_found = False
-            target_found = False
+            matched_item = None
             for item in items:
                 name = item["display_name"]
                 if name not in discovered_device_names:
                     discovered_device_names.append(name)
                     new_devices_found = True
-                if self._is_target_device_match(device_name, item):
-                    target_found = True
+                if matched_item is None and self._is_target_device_match(device_name, item):
+                    matched_item = item
             self._logger.info(f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
-            if target_found:
-                self._logger.info(f"Target device '{target_desc}' found during scroll! Attempting safe click...")
-                if self._safe_click_target_device(device_name):
+            if matched_item is not None:
+                self._logger.info(f"Target device '{target_desc}' found during downward scroll! Attempting safe click...")
+                if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
             if new_devices_found:
                 consecutive_no_new_devices = 0
@@ -267,16 +348,17 @@ class GHASetUpDevicePage(BasePage):
         for scroll_idx in range(scroll_down_count + 3):
             time.sleep(1.5)
             items = self._get_all_visible_device_items()
-            target_found = False
+            matched_item = None
             for item in items:
                 name = item["display_name"]
                 if name not in discovered_device_names:
                     discovered_device_names.append(name)
-                if self._is_target_device_match(device_name, item):
-                    target_found = True
-            if target_found:
+                if matched_item is None and self._is_target_device_match(device_name, item):
+                    matched_item = item
+            if matched_item is not None:
                 self._logger.info(f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
-                if self._safe_click_target_device(device_name):
+                self._logger.info(f"Target device '{target_desc}' found during upward scroll! Attempting safe click...")
+                if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
             if self._is_at_top_of_page():
                 self._logger.info("Successfully returned to the top of the device list.")
@@ -294,7 +376,8 @@ class GHASetUpDevicePage(BasePage):
             if name not in discovered_device_names:
                 discovered_device_names.append(name)
             if self._is_target_device_match(device_name, item):
-                if self._safe_click_target_device(device_name):
+                self._logger.info(f"Target device '{target_desc}' found at top after Phase 3! Attempting safe click...")
+                if self._safe_click_target_device(device_name, initial_item=item):
                     return True
         self._logger.info(f"Final Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
         self._logger.error(f"Could not find visible device '{target_desc}' after full bidirectional scan.")
