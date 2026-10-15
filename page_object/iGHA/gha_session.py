@@ -143,10 +143,23 @@ class GHASession:
             return False
 
     def _get_device_grid_view(self):
-        """Locates the main device grid collection view on the GHA home page."""
-        return self.driver.find_element(
-            AppiumBy.ACCESSIBILITY_ID, "deviceTileGridCollectionView"
-        )
+        """Locate the device grid collection view or fallback scrollable container (0s implicit wait)."""
+        default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+        try:
+            self.driver.implicitly_wait(0)
+            for by, loc in self.GRID_VIEW_LOCATORS:
+                try:
+                    for elem in self.driver.find_elements(by, loc):
+                        if elem.is_displayed():
+                            return elem
+                except Exception:
+                    continue
+        finally:
+            try:
+                self.driver.implicitly_wait(default_wait)
+            except Exception:
+                pass
+        return None
 
     def _pull_down_to_refresh(self, element) -> None:
         """Performs a downward drag gesture on the element to trigger iOS pull-to-refresh."""
@@ -293,24 +306,59 @@ class GHASession:
 
     def refresh_gha_devices(self, timeout: float = 5.0) -> None:
         """Refresh all devices in the Google Home App (iOS).
-        Performs a pull-to-refresh on deviceTileGridCollectionView and waits
-        for the iOS activity spinner to disappear.
+        Ensures the Devices tab is active, performs a pull-to-refresh on the device grid
+        (or screen viewport fallback), and waits for the iOS activity spinner to disappear.
         Args:
             timeout: The maximum time in seconds to wait for refresh to complete.
                      Defaults to 5 seconds.
         """
+        default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
         try:
             time.sleep(3)
             grid_view = self._get_device_grid_view()
+            if grid_view is None:
+                self._logger.info("Device grid not immediately visible; navigating to Devices tab before refresh...")
+                try:
+                    devices_tab = getattr(getattr(constants, "TAB", None), "DEVICES", "Devices")
+                    GHATabPage(self.driver).go_to_tab(devices_tab)
+                    time.sleep(1.5)
+                except Exception as tab_err:
+                    self._logger.debug(f"GHATabPage.go_to_tab fallback ({tab_err}); trying direct Devices tab tap...")
+                    try:
+                        self.driver.implicitly_wait(0)
+                        btns = self.driver.find_elements(
+                            AppiumBy.IOS_CLASS_CHAIN,
+                            '**/XCUIElementTypeTabBar/**/XCUIElementTypeButton[`name == "Devices" OR label == "Devices"`]',
+                        )
+                        for btn in btns:
+                            if btn.is_displayed():
+                                btn.click()
+                                time.sleep(1.5)
+                                break
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            self.driver.implicitly_wait(default_wait)
+                        except Exception:
+                            pass
+                grid_view = self._get_device_grid_view()
             self._pull_down_to_refresh(grid_view)
             time.sleep(0.5)
             spinner_locator = (
                 AppiumBy.IOS_CLASS_CHAIN,
                 "**/XCUIElementTypeActivityIndicator",
             )
-            WebDriverWait(self.driver, timeout).until(
-                EC.invisibility_of_element_located(spinner_locator)
-            )
+            try:
+                self.driver.implicitly_wait(0)
+                WebDriverWait(self.driver, timeout).until(
+                    EC.invisibility_of_element_located(spinner_locator)
+                )
+            finally:
+                try:
+                    self.driver.implicitly_wait(default_wait)
+                except Exception:
+                    pass
             self._logger.info("GHA has been refreshed.")
         except TimeoutException:
             self._logger.critical(f"Refresh too long..., timeout: {timeout}")
