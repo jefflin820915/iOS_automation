@@ -291,7 +291,7 @@ class GHACommissioningPageObject(BasePage):
                 self._cm_on_apple_failure(card_title)
             elif "Bridge Name" in card_title:
                 self._cm_on_apple_bridge_name(device_name)
-            elif not self._cm_click_apple_add_button() or self._cm_click_apple_setup_button():
+            elif not self._cm_click_apple_add_button() and not self._cm_click_apple_setup_button():
                 self._logger.info(f"[AppleSheet] In progress: '{card_title}'... Waiting.")
                 time.sleep(2.0)
             return True
