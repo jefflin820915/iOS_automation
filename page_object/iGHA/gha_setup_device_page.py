@@ -14,7 +14,8 @@ class GHASetUpDevicePage(BasePage):
     EXPECTED_DEVICE_IDENTIFIERS: Dict[str, str] = {
         "Onn Wired Indoor Camera": "5502:4233:1658",
         "Ref2 Battery Camera": "4738:21505:2329",
-        "HD Wired Indoor Camera": "4738:20482:2443",
+        "2K Battery Doorbell Camera": "4738:21009:1573",
+        "HD Wired Indoor Camera": "4738:20482:2443"
     }
 
     def _get_expected_identifier(self, target_name: str) -> Optional[str]:
