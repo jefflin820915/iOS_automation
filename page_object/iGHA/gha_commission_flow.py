@@ -97,11 +97,11 @@ class GHACommissioningPageObject(BasePage):
     )
     FAILURE_KEYWORDS = (
         "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect", "Unable to connect",
-        "Something went wrong", "Check your connection", "Device not found", "Setup failed", "Service failure",
-        "Reset this device", "Device not reachable", "There may be a problem"
+        "Something went wrong", "Check your connection", "Device not found", "Setup failed","Reset this device",
+        "There may be a problem"
     )
     PAIRED_OFFLINE_FAILURE_KEYWORDS = (
-        "There may be a problem",
+        "There may be a problem", "Device not reachable", "Service failure"
     )
     PROGRESS_KEYWORDS = (
         "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
