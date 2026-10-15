@@ -78,7 +78,7 @@ class GHACommissioningPageObject(BasePage):
         "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
         "Setting up", "Activating camera", "Downloading update", "Update finished",
     )
-    DEFAULT_PLUG_KEYWORDS = ("plug", "outlet", "Plug", "Outlet")
+    DEFAULT_PLUG_KEYWORDS = ("Eve", "Eve Energy Plug", "outlet", "Plug", "Outlet", "plug")
     PLUG_ON_VALUES = ("on", "1", "true")
     PLUG_OFF_VALUES = ("off", "0", "false")
     CM_POLL_INTERVAL = 1.5
