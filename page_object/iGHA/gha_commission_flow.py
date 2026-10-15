@@ -52,6 +52,10 @@ class GHACommissioningPageObject(BasePage):
         f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/'
         'XCUIElementTypeButton[`name CONTAINS "Add to" OR label CONTAINS "Add to"`]'
     )
+    APPLE_SET_UP_BTN_CHAIN = (
+        f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/'
+        'XCUIElementTypeButton[`name CONTAINS "Set Up" OR label CONTAINS "Set Up"`]'
+    )
     RECOVERY_EXIT_BTN: Locator = (
         AppiumBy.IOS_PREDICATE,
         'type == "XCUIElementTypeButton" AND '
@@ -256,6 +260,13 @@ class GHACommissioningPageObject(BasePage):
             return True
         return False
 
+    def _cm_click_apple_setup_button(self) -> bool:
+        if self._cm_click_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_SET_UP_BTN_CHAIN):
+            self._logger.info("[AppleSheet] Clicked 'Set Up'.")
+            time.sleep(1.0)
+            return True
+        return False
+
     def handle_apple_commissioning_sheet(self, device_name: str) -> bool:
         """Observe and act on the foreground Apple Matter sheet.
         Returns:
@@ -274,13 +285,13 @@ class GHACommissioningPageObject(BasePage):
             if not card_title:
                 return True
             self._logger.info(f"[AppleSheet] Active card: '{card_title}'")
-            if _contains_any(card_title, ("added to", "Set Up")):
+            if _contains_any(card_title, ("added to",)):
                 self._cm_on_apple_added()
             elif _contains_any(card_title, ("unable to add accessory",)):
                 self._cm_on_apple_failure(card_title)
             elif "Bridge Name" in card_title:
                 self._cm_on_apple_bridge_name(device_name)
-            elif not self._cm_click_apple_add_button():
+            elif not self._cm_click_apple_add_button() or self._cm_click_apple_setup_button():
                 self._logger.info(f"[AppleSheet] In progress: '{card_title}'... Waiting.")
                 time.sleep(2.0)
             return True
