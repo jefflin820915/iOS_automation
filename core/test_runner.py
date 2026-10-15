@@ -47,7 +47,21 @@ class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
     DEFAULT_DEVICE_LOG_CAPTURE: Dict[str, Dict[str, Any]] = {
         "Ref2 Battery Camera": {
-            "adb_serial": "S1B1D22607000063",                         # "" = default adb device (only one connected)
+            "adb_serial": "S1B1D22607000063",
+            "shell_command": "catch_log",
+            "file_suffix": "camera",                  # -> Main log/LOG_<ts>_camera.log
+            "stop_shell_command": "pkill -f catch_log",
+            "reconnect_timeout_s": 300,
+        },
+        "HD Wired Indoor Camera": {
+            "adb_serial": "S1W1D22605000105",
+            "shell_command": "catch_log",
+            "file_suffix": "camera",                  # -> Main log/LOG_<ts>_camera.log
+            "stop_shell_command": "pkill -f catch_log",
+            "reconnect_timeout_s": 300,
+        },
+        "2K Battery Doorbell Camera": {
+            "adb_serial": "S1D1D32607000176",
             "shell_command": "catch_log",
             "file_suffix": "camera",                  # -> Main log/LOG_<ts>_camera.log
             "stop_shell_command": "pkill -f catch_log",

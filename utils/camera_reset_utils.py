@@ -1,38 +1,50 @@
 """Unified device reset utility: Smart plug power-cycle + ADB factory reset for post-test cleanup."""
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from common import constants
 from utils import logging_utils
+
 logger = logging_utils.get_logger(__name__, "device_reset")
+
 RESET_METHOD_ADB = "adb_factory_reset"
+
 DEFAULT_ADB_RESET_COMMAND = "ftsmisc -s reboot_mode factory_reset; reboot -f"
+
+DEFAULT_ADB_RESET_ALL_PIPELINE = (
+    "{adb} devices | grep -v List | awk '{{print $1}}' | grep -v '^$' | "
+    "xargs -I {{}} sh -c 'echo \"reset devices: {{}}\"; {adb} -s {{}} shell \"{shell_cmd}\"'"
+)
+
 # Default ADB factory-reset configuration applied to all test runs regardless of device_name.
 DEFAULT_ADB_RESET_CONFIG: Dict[str, Any] = {
     "method": RESET_METHOD_ADB,
-    "adb_serial": "S1B1D22607000063",    # "" = default adb device (only one connected)
+    "adb_serial": "",            # "" = reset ALL connected adb devices
     "shell_command": DEFAULT_ADB_RESET_COMMAND,
-    "ready_timeout_s": 60,       # wait for the device on adb before sending the command
+    "ready_timeout_s": 60,       # wait for adb device(s) before sending the command
     "command_timeout_s": 15,     # `reboot -f` cuts the adb connection, so the call may hang
-    "offline_timeout_s": 30,     # the device must drop off adb, otherwise the reboot is not confirmed
-    "wait_for_adb": True,        # block until the device is back on adb
-    "online_timeout_s": 300,     # max wait for the device to come back after the reboot
+    "offline_timeout_s": 30,     # devices must drop off adb, otherwise the reboot is not confirmed
+    "wait_for_adb": True,        # block until devices are back on adb
+    "online_timeout_s": 300,     # max wait for devices to come back after the reboot
     "post_reset_wait_s": 30,     # extra wait after adb is back so Matter/BLE advertising can start
 }
+
 # Kept for backward compatibility with any external references.
 DEFAULT_DEVICE_RESET_CONFIG: Dict[str, Dict[str, Any]] = {
     "Ref2 Battery Camera": dict(DEFAULT_ADB_RESET_CONFIG),
 }
+
 _FTSMISC_ERROR_MARKERS = ("not found", "no such file", "denied", "usage", "invalid", "fail", "error")
 # /proc/sys/kernel/random/boot_id, e.g. '5f9d3c2a-8b1e-4f7a-9c3d-2e1f0a9b8c7d'. Anything else = unreadable.
 _BOOT_ID_RE = re.compile(r"^[0-9a-fA-F-]{16,}$")
 
 
 class DeviceResetUtils:
-    """Run Smart plug power-cycle + ADB factory reset without filtering by device name."""
+    """Run Smart plug power-cycle + ADB factory reset across all connected ADB devices."""
 
     @staticmethod
     def _normalize(name: Optional[str]) -> str:
@@ -132,6 +144,22 @@ class DeviceResetUtils:
             return -1, str(e)
 
     @classmethod
+    def _list_adb_devices(cls, adb: str) -> Dict[str, str]:
+        """Return {serial: state} for all entries in `adb devices`."""
+        rc, out = cls._run([adb, "devices"], timeout=10)
+        devices: Dict[str, str] = {}
+        if rc != 0 and not out:
+            return devices
+        for raw_line in out.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("List of devices") or line.startswith("*"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                devices[parts[0]] = parts[1]
+        return devices
+
+    @classmethod
     def _adb_state(cls, base: List[str]) -> str:
         """'device' when online, otherwise 'offline' / 'unauthorized' / 'missing' / other adb state."""
         rc, out = cls._run(base + ["get-state"], timeout=10)
@@ -143,6 +171,28 @@ class DeviceResetUtils:
             if state in lowered:
                 return state
         return "missing"
+
+    @classmethod
+    def _wait_for_any_online_devices(
+            cls, adb: str, timeout_s: float, poll_s: float, tag: str
+    ) -> Tuple[List[str], float, Dict[str, str]]:
+        """Poll `adb devices` until at least one device has state == 'device'."""
+        start = time.time()
+        next_report = 30.0
+        while True:
+            dev_map = cls._list_adb_devices(adb)
+            online_serials = [s for s, st in dev_map.items() if st == "device"]
+            elapsed = time.time() - start
+            if online_serials:
+                return online_serials, elapsed, dev_map
+            if elapsed >= timeout_s:
+                return [], elapsed, dev_map
+            if elapsed >= next_report:
+                logger.info(
+                    f"{tag} Waiting for adb devices to be online... {elapsed:.0f}s/{timeout_s:.0f}s (devices={dev_map})"
+                )
+                next_report += 30.0
+            time.sleep(poll_s)
 
     @classmethod
     def _wait_for_state(
@@ -194,13 +244,13 @@ class DeviceResetUtils:
 
     @classmethod
     def adb_factory_reset(cls, device_name: str = "ALL", reason: str = "") -> bool:
-        """Send the configured adb factory-reset command and wait for the device to come back.
-        Flow: device online on adb -> read boot_id -> send command -> device drops off adb
-              -> device back on adb -> boot_id changed (reboot confirmed) -> post_reset_wait_s.
+        """Send the configured adb factory-reset command to all connected adb devices and wait for them to come back.
+        Flow: devices online on adb -> read boot_id -> send reset command to all adb devices
+              -> devices drop off adb -> devices back on adb -> boot_id changed (reboot confirmed) -> post_reset_wait_s.
         Never raises (KeyboardInterrupt still propagates).
         Returns:
             True if the reboot was confirmed, ftsmisc printed no error and (when wait_for_adb)
-            the device came back on adb in time.
+            all target devices came back on adb in time.
         """
         label = str(device_name or "ALL").strip() or "ALL"
         tag = f"[DeviceReset:{label}]"
@@ -218,8 +268,6 @@ class DeviceResetUtils:
         if not adb:
             logger.error(f"{tag} 'adb' not found (PATH / constants.ADB_PATH). Factory reset NOT sent.")
             return False
-        serial = str(cfg.get("adb_serial") or "").strip()
-        base = [adb] + (["-s", serial] if serial else [])
         shell_cmd = str(cfg.get("shell_command") or DEFAULT_ADB_RESET_COMMAND).strip()
         ready_timeout = float(cfg.get("ready_timeout_s", 60))
         command_timeout = float(cfg.get("command_timeout_s", 15))
@@ -227,7 +275,8 @@ class DeviceResetUtils:
         wait_for_adb = bool(cfg.get("wait_for_adb", True))
         online_timeout = float(cfg.get("online_timeout_s", 300))
         post_wait = float(cfg.get("post_reset_wait_s", 15))
-        printable = f"adb{' -s ' + serial if serial else ''} shell \"{shell_cmd}\""
+        printable = DEFAULT_ADB_RESET_ALL_PIPELINE.format(adb="adb", shell_cmd=shell_cmd)
+        exec_pipeline = DEFAULT_ADB_RESET_ALL_PIPELINE.format(adb=shlex.quote(adb), shell_cmd=shell_cmd)
         logger.info(f"{tag} Factory reset requested ({reason or 'n/a'}): {printable}")
         try:
             subprocess.run(
@@ -236,78 +285,96 @@ class DeviceResetUtils:
             )
         except (subprocess.TimeoutExpired, OSError) as e:
             logger.warning(f"{tag} 'adb start-server' failed: {e}")
-        online, waited, state = cls._wait_for_state(base, True, ready_timeout, 2.0, tag)
-        if not online:
+        serials, waited, dev_map = cls._wait_for_any_online_devices(adb, ready_timeout, 2.0, tag)
+        if not serials:
             _, devices = cls._run([adb, "devices", "-l"], timeout=10)
             logger.error(
-                f"{tag} Device not online on adb after {waited:.0f}s (state='{state}'). Factory reset NOT sent.\n"
+                f"{tag} No online adb devices after {waited:.0f}s (devices={dev_map}). Factory reset NOT sent.\n"
                 f"`adb devices -l`:\n{devices}"
             )
             return False
-        boot_id_before = cls._read_boot_id(base)
-        logger.info(f"{tag} boot_id before reset: {boot_id_before or '<unavailable>'}")
-        rc, output = cls._run(base + ["shell", shell_cmd], timeout=command_timeout)
+        logger.info(f"{tag} Online adb device(s) to reset ({len(serials)}): {serials}")
+        boot_ids_before: Dict[str, str] = {}
+        for s in serials:
+            bid = cls._read_boot_id([adb, "-s", s])
+            boot_ids_before[s] = bid
+            logger.info(f"{tag} [{s}] boot_id before reset: {bid or '<unavailable>'}")
+        total_cmd_timeout = command_timeout * max(1, len(serials))
+        rc, output = cls._run(["sh", "-c", exec_pipeline], timeout=total_cmd_timeout)
         rc_text = "timeout" if rc is None else str(rc)
-        logger.info(f"{tag} adb shell finished (rc={rc_text}). Output: {output[-500:] or '<empty>'}")
+        logger.info(f"{tag} adb reset pipeline finished (rc={rc_text}). Output:\n{output[-1000:] or '<empty>'}")
+        # If `reboot -f` on an earlier device hung xargs before a later device was reached, send directly to remaining serials.
+        for s in serials:
+            if f"reset devices: {s}" not in (output or ""):
+                logger.warning(f"{tag} [{s}] Not reached in pipeline before timeout; sending direct adb reset...")
+                s_rc, s_out = cls._run([adb, "-s", s, "shell", shell_cmd], timeout=command_timeout)
+                output = f"{output}\nreset devices: {s}\n{s_out}".strip()
+                logger.info(f"{tag} [{s}] direct adb shell finished (rc={s_rc}). Output: {s_out[-300:] or '<empty>'}")
         ftsmisc_error = cls._find_ftsmisc_error(output)
         if ftsmisc_error:
             logger.error(
-                f"{tag} ftsmisc reported an error; the device may reboot WITHOUT factory reset: {ftsmisc_error}"
+                f"{tag} ftsmisc reported an error; device(s) may reboot WITHOUT factory reset: {ftsmisc_error}"
             )
-        already_back = False
-        went_offline, t_offline, state = cls._wait_for_state(base, False, offline_timeout, 0.5, tag)
-        if went_offline:
-            logger.info(f"{tag} Device dropped off adb (state='{state}'). Factory reset in progress...")
-        else:
-            boot_id_now = cls._read_boot_id(base) if boot_id_before else ""
-            if boot_id_now and boot_id_now != boot_id_before:
-                logger.warning(f"{tag} Offline window missed, but boot_id changed: reboot confirmed.")
-                already_back = True
+        all_ok = not ftsmisc_error
+        for s in serials:
+            s_base = [adb, "-s", s]
+            s_tag = f"{tag}[{s}]"
+            boot_id_before = boot_ids_before.get(s, "")
+            already_back = False
+            went_offline, t_offline, state = cls._wait_for_state(s_base, False, offline_timeout, 0.5, s_tag)
+            if went_offline:
+                logger.info(f"{s_tag} Device dropped off adb (state='{state}'). Factory reset in progress...")
             else:
-                logger.error(
-                    f"{tag} Device still online {t_offline:.0f}s after the command"
-                    f"{' and boot_id unchanged' if boot_id_now else ''}. Reboot NOT confirmed."
+                boot_id_now = cls._read_boot_id(s_base) if boot_id_before else ""
+                if boot_id_now and boot_id_now != boot_id_before:
+                    logger.warning(f"{s_tag} Offline window missed, but boot_id changed: reboot confirmed.")
+                    already_back = True
+                else:
+                    logger.error(
+                        f"{s_tag} Device still online {t_offline:.0f}s after the command"
+                        f"{' and boot_id unchanged' if boot_id_now else ''}. Reboot NOT confirmed."
+                    )
+                    all_ok = False
+                    continue
+            back = True
+            adb_authorized = True
+            if wait_for_adb and not already_back:
+                back, t_back, state = cls._wait_for_state(
+                    s_base, True, online_timeout, 2.0, s_tag, also_online=("unauthorized",)
                 )
-                return False
-        # 4. Wait for the device to come back.
-        back = True
-        adb_authorized = True
-        if wait_for_adb and not already_back:
-            back, t_back, state = cls._wait_for_state(
-                base, True, online_timeout, 2.0, tag, also_online=("unauthorized",)
-            )
-            if back and state == "unauthorized":
-                adb_authorized = False
-                logger.warning(
-                    f"{tag} Device back on adb {t_back:.0f}s after the reboot, but adb is UNAUTHORIZED "
-                    "(adb keys wiped by the factory reset?). boot_id cannot be verified; device log capture "
-                    "and the next adb reset will fail until adb is authorized again."
-                )
-            elif back:
-                logger.info(f"{tag} Device back on adb {t_back:.0f}s after the reboot.")
-            else:
-                _, devices = cls._run([adb, "devices", "-l"], timeout=10)
-                logger.error(
-                    f"{tag} Device NOT back on adb within {online_timeout:.0f}s (state='{state}'). "
-                    "If adb is disabled after factory reset, set wait_for_adb=False and raise post_reset_wait_s.\n"
-                    f"`adb devices -l`:\n{devices}"
-                )
-        rebooted = True
-        if back and adb_authorized and boot_id_before and (already_back or wait_for_adb):
-            boot_id_after = cls._read_boot_id(base)
-            if boot_id_after and boot_id_after == boot_id_before:
-                logger.error(f"{tag} boot_id unchanged after reconnect; the device did NOT reboot.")
-                rebooted = False
-            elif boot_id_after:
-                logger.info(f"{tag} boot_id after reset: {boot_id_after} (changed).")
-            else:
-                logger.warning(f"{tag} boot_id unreadable after reconnect; relying on the offline/online transition.")
-        if back and rebooted and post_wait > 0:
-            logger.info(f"{tag} Waiting {post_wait:.0f}s for the device to start advertising...")
+                if back and state == "unauthorized":
+                    adb_authorized = False
+                    logger.warning(
+                        f"{s_tag} Device back on adb {t_back:.0f}s after the reboot, but adb is UNAUTHORIZED "
+                        "(adb keys wiped by the factory reset?). boot_id cannot be verified; device log capture "
+                        "and the next adb reset will fail until adb is authorized again."
+                    )
+                elif back:
+                    logger.info(f"{s_tag} Device back on adb {t_back:.0f}s after the reboot.")
+                else:
+                    _, devices = cls._run([adb, "devices", "-l"], timeout=10)
+                    logger.error(
+                        f"{s_tag} Device NOT back on adb within {online_timeout:.0f}s (state='{state}'). "
+                        "If adb is disabled after factory reset, set wait_for_adb=False and raise post_reset_wait_s.\n"
+                        f"`adb devices -l`:\n{devices}"
+                    )
+            rebooted = True
+            if back and adb_authorized and boot_id_before and (already_back or wait_for_adb):
+                boot_id_after = cls._read_boot_id(s_base)
+                if boot_id_after and boot_id_after == boot_id_before:
+                    logger.error(f"{s_tag} boot_id unchanged after reconnect; the device did NOT reboot.")
+                    rebooted = False
+                elif boot_id_after:
+                    logger.info(f"{s_tag} boot_id after reset: {boot_id_after} (changed).")
+                else:
+                    logger.warning(f"{s_tag} boot_id unreadable after reconnect; relying on the offline/online transition.")
+            if not (back and rebooted):
+                all_ok = False
+        if all_ok and post_wait > 0:
+            logger.info(f"{tag} Waiting {post_wait:.0f}s for device(s) to start advertising...")
             time.sleep(post_wait)
-        ok = back and rebooted and not ftsmisc_error
         logger.info(
-            f"{tag} Factory reset {'COMPLETED' if ok else 'FINISHED WITH ERRORS'} "
+            f"{tag} Factory reset {'COMPLETED' if all_ok else 'FINISHED WITH ERRORS'} "
             f"(total {time.time() - started:.0f}s)."
         )
-        return ok
+        return all_ok
