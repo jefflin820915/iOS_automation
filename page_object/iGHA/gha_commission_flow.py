@@ -19,7 +19,6 @@ from page_object.iGHA.gha_you_should_now_see_live_video_page import GHAYouShould
 from utils.camera_reset_utils import DeviceResetUtils
 
 Locator = Tuple[str, str]
-
 HeadlineHandler = Callable[[str], bool]
 
 def _contains_any(text: str, keywords: Sequence[str]) -> bool:
@@ -33,9 +32,10 @@ class _CMAppleSheetFailure(AssertionError):
     AssertionError, so the reported Failure Stage stays COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
     Subclasses AssertionError so a standalone call of handle_apple_commissioning_sheet still fails.
     """
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, card_title: str = ""):
         super().__init__(reason)
         self.reason = reason
+        self.card_title = card_title or reason
 
 
 class GHACommissioningPageObject(BasePage):
@@ -47,6 +47,7 @@ class GHACommissioningPageObject(BasePage):
     HEADLINE_LOCATOR: Locator = (AppiumBy.ACCESSIBILITY_ID, constants.GHA_CONNECTING_TITLE_ACCESSIBILITY_ID)
     APPLE_OVERLAY_WINDOW_CHAIN = '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]'
     APPLE_CARD_TITLE_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeTextView[`visible == 1`]'
+    APPLE_CARD_STATIC_TEXT_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeStaticText[`visible == 1`]'
     APPLE_TEXT_FIELD_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeTextField[`visible == 1`]'
     APPLE_ADD_BTN_CHAIN = (
         f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/'
@@ -79,6 +80,21 @@ class GHACommissioningPageObject(BasePage):
         'type == "XCUIElementTypeStaticText" AND visible == 1',
     )
     SYSTEM_ALERT_BUTTONS = ("Add Anyway", "Set up anyway", "OK", "Allow")
+    APPLE_SHEET_IGNORED_BUTTON_LABELS = {"ok", "done", "cancel", "continue", "set up", "add anyway"}
+    APPLE_FAILURE_KEYWORDS = (
+        "unable to add accessory",
+        "unable to add",
+        "couldn't add",
+        "could not add",
+        "pairing failed",
+        "setup failed",
+        "failed to",
+        "accessory not found",
+        "accessory is not reachable",
+        "not reachable",
+        "cannot be used",
+        "can't be used",
+    )
     FAILURE_KEYWORDS = (
         "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect", "Unable to connect",
         "Something went wrong", "Check your connection", "Device not found", "Setup failed", "Service failure",
@@ -195,24 +211,75 @@ class GHACommissioningPageObject(BasePage):
         """Check if Apple's native Matter sheet (SBTransientOverlayWindow) is visible."""
         return self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_OVERLAY_WINDOW_CHAIN) is not None
 
+    def _cm_read_alert_title(self, alert_elem: WebElement) -> str:
+        """Extract the title/message from an iOS system alert before dismissing it."""
+        texts: List[str] = []
+        for cls_name in ("XCUIElementTypeStaticText", "XCUIElementTypeTextView"):
+            for child in self._cm_find_all(AppiumBy.CLASS_NAME, cls_name, root=alert_elem):
+                t = self._cm_read_text(child, ("label", "name", "value"))
+                if t and t.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS and t not in texts:
+                    texts.append(t)
+        if texts:
+            return texts[0]
+        return self._cm_read_text(alert_elem, ("label", "name", "value"))
+
     def handle_system_alert(self) -> bool:
-        """Dismiss iOS system alerts like 'Uncertified Accessory'."""
-        if self._cm_find_displayed(AppiumBy.CLASS_NAME, constants.GHA_COMMISSION_WINDOW_ALERT) is None:
+        """Dismiss iOS system alerts like 'Uncertified Accessory'.
+        Note: Does NOT click 'OK' on an Apple Matter failure card so _cm_on_apple_failure can handle it.
+        """
+        alert_elem = self._cm_find_displayed(AppiumBy.CLASS_NAME, constants.GHA_COMMISSION_WINDOW_ALERT)
+        if alert_elem is None:
             return False
-        self._logger.warning("Detected iOS System Alert dialog!")
+        alert_title = self._cm_read_alert_title(alert_elem)
+        if alert_title:
+            self._cm_last_apple_card_title = alert_title
+            if _contains_any(alert_title, self.APPLE_FAILURE_KEYWORDS):
+                self._cm_apple_failure_title = alert_title
+                return False
+        # If the Apple sheet is active and showing a failure card, let handle_apple_commissioning_sheet handle it.
+        if self.is_apple_sheet_present():
+            card_title = self._cm_get_apple_card_title()
+            if card_title:
+                self._cm_last_apple_card_title = card_title
+                if _contains_any(card_title, self.APPLE_FAILURE_KEYWORDS):
+                    self._cm_apple_failure_title = card_title
+                    return False
+        self._logger.warning(f"Detected iOS System Alert dialog{f' ({alert_title!r})' if alert_title else ''}!")
         for btn_text in self.SYSTEM_ALERT_BUTTONS:
             if self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, btn_text):
+                if btn_text == "OK" and alert_title and not getattr(self, "_cm_apple_failure_title", ""):
+                    self._cm_apple_failure_title = alert_title
                 self._logger.info(f"Dismissed system alert via '{btn_text}'.")
                 return True
         return False
 
     def _cm_get_apple_card_title(self) -> str:
         for _ in range(3):
-            elem = self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_CARD_TITLE_CHAIN)
-            if elem is not None:
+            candidates: List[str] = []
+            for elem in self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_CARD_TITLE_CHAIN):
+                try:
+                    if not elem.is_displayed():
+                        continue
+                except WebDriverException:
+                    continue
                 title = self._cm_read_text(elem, ("name", "label", "value"))
-                if title:
-                    return title
+                if title and title.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS:
+                    candidates.append(title)
+            if not candidates:
+                for elem in self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_CARD_STATIC_TEXT_CHAIN):
+                    try:
+                        if not elem.is_displayed():
+                            continue
+                    except WebDriverException:
+                        continue
+                    title = self._cm_read_text(elem, ("name", "label", "value"))
+                    if title and title.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS:
+                        candidates.append(title)
+            if candidates:
+                for c in candidates:
+                    if _contains_any(c, self.APPLE_FAILURE_KEYWORDS):
+                        return c
+                return candidates[0]
             time.sleep(0.4)
         return ""
 
@@ -236,9 +303,11 @@ class GHACommissioningPageObject(BasePage):
     def _cm_on_apple_failure(self, card_title: str) -> NoReturn:
         """Dismiss the failed Apple sheet and signal the main flow (which recovers and raises)."""
         self._logger.error(f"[AppleSheet] Reported failure: '{card_title}'")
+        self._cm_apple_failure_title = card_title
+        self._cm_last_apple_card_title = card_title
         self._cm_click_apple_sheet_button("OK", "Done")
-        time.sleep(1.5)
-        raise _CMAppleSheetFailure(f"Apple sheet failed with '{card_title}'")
+        time.sleep(2.0)
+        raise _CMAppleSheetFailure(f"Apple sheet failed with '{card_title}'", card_title=card_title)
 
     def _cm_on_apple_bridge_name(self, device_name: str) -> None:
         self._logger.info(f"[AppleSheet] Naming step detected. Setting device name to '{device_name}'...")
@@ -282,35 +351,41 @@ class GHACommissioningPageObject(BasePage):
             True if a system alert / Apple sheet was present (and handled), False otherwise.
         Raises:
             _CMAppleSheetFailure (an AssertionError): If the Apple sheet reports
-                'Unable to Add Accessory'. Recovery is performed by the caller.
+                'Unable to Add Accessory' (or other APPLE_FAILURE_KEYWORDS). Recovery is performed by the caller.
         """
         try:
+            if self.is_apple_sheet_present():
+                card_title = self._cm_get_apple_card_title()
+                if card_title:
+                    self._cm_last_apple_card_title = card_title
+                    self._logger.info(f"[AppleSheet] Active card: '{card_title}'")
+                    if _contains_any(card_title, self.APPLE_FAILURE_KEYWORDS):
+                        self._cm_on_apple_failure(card_title)
+                    if _contains_any(card_title, ("added to",)):
+                        self._cm_on_apple_added()
+                        return True
+                    if "Bridge Name" in card_title:
+                        self._cm_on_apple_bridge_name(device_name)
+                        return True
+                    if self._cm_click_apple_add_button() or self._cm_click_apple_setup_button():
+                        return True
+                if self.handle_system_alert():
+                    time.sleep(1.0)
+                    return True
+                if card_title:
+                    self._logger.info(f"[AppleSheet] In progress: '{card_title}'... Waiting.")
+                    time.sleep(2.0)
+                return True
             if self.handle_system_alert():
                 time.sleep(1.0)
                 return True
-            if not self.is_apple_sheet_present():
-                return False
-            card_title = self._cm_get_apple_card_title()
-            if not card_title:
-                return True
-            self._logger.info(f"[AppleSheet] Active card: '{card_title}'")
-            if _contains_any(card_title, ("added to",)):
-                self._cm_on_apple_added()
-            elif _contains_any(card_title, ("unable to add accessory",)):
-                self._cm_on_apple_failure(card_title)
-            elif "Bridge Name" in card_title:
-                self._cm_on_apple_bridge_name(device_name)
-            elif not self._cm_click_apple_add_button() and not self._cm_click_apple_setup_button():
-                self._logger.info(f"[AppleSheet] In progress: '{card_title}'... Waiting.")
-                time.sleep(2.0)
-            return True
+            return False
         except AssertionError:
             raise
         except WebDriverException as e:
             self._logger.debug(f"[AppleSheet] Transition in progress ({e.__class__.__name__}). Retrying...")
             time.sleep(1.0)
             return True
-
     def _cm_dismiss_commissioning_and_go_to_devices(self) -> None:
         """Dismiss error dialogs / setup screens and return GHA to the Devices tab."""
         self._logger.info("[Recovery] Dismissing commissioning screens and returning to Devices tab...")
@@ -358,6 +433,16 @@ class GHACommissioningPageObject(BasePage):
                     f"[Recovery] Remove paired device attempt {attempt}/{attempts} failed: {err}"
                 )
         return False
+
+    def _cm_format_apple_sheet_context(self) -> str:
+        """Return a suffix with the Apple sheet's failure or last title if present."""
+        apple_fail = getattr(self, "_cm_apple_failure_title", "") or ""
+        apple_last = getattr(self, "_cm_last_apple_card_title", "") or ""
+        if apple_fail:
+            return f" | Apple sheet failed with '{apple_fail}'"
+        if apple_last:
+            return f" | Apple sheet last title: '{apple_last}'"
+        return ""
 
     def _cm_recover(self, reason: str, remove_paired_device: bool = False) -> str:
         """Dismiss commissioning screens, optionally remove paired offline device, and reset the device. Never raises.
@@ -554,8 +639,8 @@ class GHACommissioningPageObject(BasePage):
     def power_cycle_smart_plug(
             self,
             keywords: Optional[Sequence[str]] = None,
-            off_wait: float = 5.0,
-            on_wait: float = 8.0,
+            off_wait: float = 3.0,
+            on_wait: float = 5.0,
     ) -> bool:
         """Restart GHA, then power-cycle every plug/outlet device on the Devices tab.
         Returns:
@@ -609,7 +694,6 @@ class GHACommissioningPageObject(BasePage):
             self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, constants.GHA_NEXT_BTN_ACCESSIBILITY_ID)
         time.sleep(1.0)
         return False
-
     def _cm_on_device_connected(self, _headline: str) -> bool:
         self._logger.info("Device connected! Clicking Done...")
         try:
@@ -665,6 +749,8 @@ class GHACommissioningPageObject(BasePage):
         """
         self._logger.info(f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
         self._cm_reset_device_name = device_name
+        self._cm_last_apple_card_title: str = ""
+        self._cm_apple_failure_title: str = ""
         handlers = self._cm_build_headline_handlers(room_name)
         start_time = time.time()
         apple_sheet_active = False
@@ -690,9 +776,10 @@ class GHACommissioningPageObject(BasePage):
                             f"[Commissioning] '{headline}' indicates device '{device_name}' was already added "
                             "to Home (offline). Removing device from Home before running recovery..."
                         )
+                    apple_ctx = self._cm_format_apple_sheet_context()
                     raise AssertionError(
                         self._cm_recover(
-                            f"Commissioning failed with headline '{headline}'",
+                            f"Commissioning failed with headline '{headline}'{apple_ctx}",
                             remove_paired_device=is_paired_offline,
                         )
                     )
@@ -708,9 +795,18 @@ class GHACommissioningPageObject(BasePage):
                     self._logger.info("[Commissioning] Flow completed successfully..")
                     return True
             self._logger.error(f"[Commissioning] Flow timed out after {int(timeout)}s!")
-            raise AssertionError(self._cm_recover(f"Commissioning timed out after {int(timeout)}s"))
+            apple_ctx = self._cm_format_apple_sheet_context()
+            raise AssertionError(self._cm_recover(f"Commissioning timed out after {int(timeout)}s{apple_ctx}"))
         except _CMAppleSheetFailure as e:
-            raise AssertionError(self._cm_recover(e.reason)) from None
+            gha_headline = self._cm_get_headline()
+            if gha_headline and _contains_any(gha_headline, self.FAILURE_KEYWORDS):
+                reason_msg = (
+                    f"Commissioning failed with headline '{gha_headline}' | "
+                    f"Apple sheet failed with '{e.card_title}'"
+                )
+            else:
+                reason_msg = e.reason
+            raise AssertionError(self._cm_recover(reason_msg)) from None
         except AssertionError:
             raise
         except Exception as e:
