@@ -274,7 +274,7 @@ class GHACommissioningPageObject(BasePage):
             if not card_title:
                 return True
             self._logger.info(f"[AppleSheet] Active card: '{card_title}'")
-            if _contains_any(card_title, ("added to",)):
+            if _contains_any(card_title, ("added to", "Set Up")):
                 self._cm_on_apple_added()
             elif _contains_any(card_title, ("unable to add accessory",)):
                 self._cm_on_apple_failure(card_title)
