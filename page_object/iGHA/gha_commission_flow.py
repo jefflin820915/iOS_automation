@@ -69,6 +69,15 @@ class GHACommissioningPageObject(BasePage):
     DEVICE_TILE: Locator = (AppiumBy.NAME, "deviceTile")
     DEVICE_TILE_TITLE: Locator = (AppiumBy.NAME, "deviceTileTitleTextView")
     DEVICE_TILE_CELL: Locator = (AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeCell" AND name CONTAINS "deviceTileCell"')
+    # New GHA 'All devices' grid represents each tile as an XCUIElementTypeOther (e.g. name="Eve Energy Plug, On").
+    DEVICE_TILE_OTHER: Locator = (
+        AppiumBy.IOS_PREDICATE,
+        'type == "XCUIElementTypeOther" AND visible == 1 AND (name != NULL OR label != NULL)',
+    )
+    DEVICE_TILE_STATIC_TEXT: Locator = (
+        AppiumBy.IOS_PREDICATE,
+        'type == "XCUIElementTypeStaticText" AND visible == 1',
+    )
     SYSTEM_ALERT_BUTTONS = ("Add Anyway", "Set up anyway", "OK", "Allow")
     FAILURE_KEYWORDS = (
         "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect", "Unable to connect",
@@ -82,7 +91,7 @@ class GHACommissioningPageObject(BasePage):
         "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
         "Setting up", "Activating camera", "Downloading update", "Update finished",
     )
-    DEFAULT_PLUG_KEYWORDS = ("Eve", "Eve Energy Plug", "outlet", "Plug", "Outlet", "plug")
+    DEFAULT_PLUG_KEYWORDS = ("Eve", "Eve Energy Plug", "Eve Energy", "Eve Energy plug")
     PLUG_ON_VALUES = ("on", "1", "true")
     PLUG_OFF_VALUES = ("off", "0", "false")
     CM_POLL_INTERVAL = 1.5
@@ -384,18 +393,42 @@ class GHACommissioningPageObject(BasePage):
             title = self._cm_read_text(titles[0], ("value",))
             if title:
                 return title
-        label = self._cm_read_text(tile, ("label",))
-        return label.split(",")[0].strip() if label else self._cm_read_text(tile, ("name",))
+        label = self._cm_read_text(tile, ("label", "name", "value"))
+        return label.split(",")[0].strip() if label else ""
+
+    def _cm_is_valid_other_tile(self, elem: WebElement) -> bool:
+        """Filter XCUIElementTypeOther elements to actual device tile cards (excludes full-screen containers)."""
+        text = self._cm_read_text(elem, ("label", "name"))
+        if not text or "vertical scroll bar" in text.lower() or "horizontal scroll bar" in text.lower():
+            return False
+        try:
+            rect = elem.rect
+            return 20 <= rect.get("height", 0) <= 220 and rect.get("width", 0) >= 60
+        except WebDriverException:
+            return False
+
+    def _cm_all_tile_candidates(self) -> List[WebElement]:
+        """Return all device tile elements across both legacy GHA (deviceTile) and new GHA (XCUIElementTypeOther)."""
+        legacy = self._cm_find_all(*self.DEVICE_TILE) + self._cm_find_all(*self.DEVICE_TILE_CELL)
+        if legacy:
+            return legacy
+        others = [
+            elem for elem in self._cm_find_all(*self.DEVICE_TILE_OTHER)
+            if self._cm_is_valid_other_tile(elem)
+        ]
+        if others:
+            return others
+        return self._cm_find_all(*self.DEVICE_TILE_STATIC_TEXT)
 
     def _cm_is_plug(self, elem: WebElement, keywords: Sequence[str]) -> bool:
         text = " ".join(self._cm_read_text(elem, (attr,)) for attr in ("label", "value", "name"))
         return _contains_any(text, keywords)
 
     def _cm_discover_plugs(self, keywords: Sequence[str]) -> List[str]:
-        """Collect unique names of plug/outlet tiles on the Devices tab (scrolls once if needed)."""
+        """Collect unique names of plug/outlet tiles on the Devices / All devices view (scrolls once if needed)."""
         found: List[str] = []
         for attempt in range(2):
-            candidates = self._cm_find_all(*self.DEVICE_TILE) + self._cm_find_all(*self.DEVICE_TILE_CELL)
+            candidates = self._cm_all_tile_candidates()
             for elem in candidates:
                 try:
                     if not self._cm_is_plug(elem, keywords):
@@ -416,20 +449,83 @@ class GHACommissioningPageObject(BasePage):
         return found
 
     def _cm_locate_plug_tile(self, target_name: str) -> Optional[WebElement]:
-        """Freshly locate a plug tile by name (avoids stale references)."""
+        """Freshly locate a plug tile by name across legacy and new GHA UI (avoids stale references)."""
         target = target_name.lower()
         for tile in self._cm_find_all(*self.DEVICE_TILE):
             try:
                 if target in self._cm_tile_identity(tile).lower() or \
-                        target in self._cm_read_text(tile, ("label",)).lower():
+                        target in self._cm_read_text(tile, ("label", "name")).lower():
                     return tile
             except WebDriverException:
                 continue
         for cell in self._cm_find_all(*self.DEVICE_TILE_CELL):
-            if target in self._cm_read_text(cell, ("label",)).lower():
+            if target in self._cm_read_text(cell, ("label", "name")).lower():
                 inner = self._cm_find_all(*self.DEVICE_TILE, root=cell)
                 return inner[0] if inner else cell
+        for other in self._cm_find_all(*self.DEVICE_TILE_OTHER):
+            try:
+                if not self._cm_is_valid_other_tile(other):
+                    continue
+                if target in self._cm_tile_identity(other).lower() or \
+                        target in self._cm_read_text(other, ("label", "name")).lower():
+                    return other
+            except WebDriverException:
+                continue
+        for st in self._cm_find_all(*self.DEVICE_TILE_STATIC_TEXT):
+            try:
+                if target in self._cm_read_text(st, ("label", "name", "value")).lower():
+                    return st
+            except WebDriverException:
+                continue
         return None
+
+    def _cm_read_plug_state(self, tile: WebElement) -> str:
+        """Read 'on' / 'off' state from legacy value attribute, 'Name, On/Off' label suffix, or child StaticText."""
+        val = self._cm_read_text(tile, ("value",)).lower()
+        if val in self.PLUG_ON_VALUES or val in self.PLUG_OFF_VALUES:
+            return val
+        label_or_name = self._cm_read_text(tile, ("label", "name"))
+        if "," in label_or_name:
+            suffix = label_or_name.rsplit(",", 1)[-1].strip().lower()
+            if suffix:
+                return suffix
+        for child in self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText", root=tile):
+            child_txt = self._cm_read_text(child, ("value", "label", "name")).lower()
+            if child_txt in self.PLUG_ON_VALUES or child_txt in self.PLUG_OFF_VALUES or child_txt == "offline":
+                return child_txt
+        return val
+
+    def _cm_tap_plug_tile(self, tile: WebElement, plug_name: str, target_off: bool) -> bool:
+        """Click the plug tile; if XCUIElementTypeOther has accessible=false and click is a no-op, tap center coords."""
+        clicked = False
+        try:
+            tile.click()
+            clicked = True
+        except WebDriverException:
+            pass
+        if clicked:
+            time.sleep(1.2)
+            refreshed = self._cm_locate_plug_tile(plug_name)
+            if refreshed is not None:
+                new_state = self._cm_read_plug_state(refreshed)
+                if target_off and new_state in self.PLUG_OFF_VALUES:
+                    return True
+                if not target_off and new_state in self.PLUG_ON_VALUES:
+                    return True
+            else:
+                return True
+        # Fallback: coordinate tap at the center of the tile rect (needed when accessible == false).
+        target_elem = self._cm_locate_plug_tile(plug_name) or tile
+        try:
+            rect = target_elem.rect
+            cx = int(rect["x"] + rect["width"] / 2)
+            cy = int(rect["y"] + rect["height"] / 2)
+            self._logger.info(f"[PowerCycle] Coordinate-tapping '{plug_name}' at ({cx}, {cy})...")
+            self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+            return True
+        except WebDriverException as e:
+            self._logger.error(f"[PowerCycle] Coordinate tap failed for '{plug_name}': {e}")
+            return clicked
 
     def _cm_power_cycle_one(self, plug_name: str, off_wait: float, on_wait: float) -> bool:
         """Turn a plug OFF (if not already), wait, then turn it back ON."""
@@ -437,16 +533,18 @@ class GHACommissioningPageObject(BasePage):
         if tile is None:
             self._logger.warning(f"[PowerCycle] Could not locate '{plug_name}'. Skipping.")
             return False
-        state = self._cm_read_text(tile, ("value",)).lower()
+        state = self._cm_read_plug_state(tile)
         self._logger.info(f"[PowerCycle] '{plug_name}' initial state: '{state or 'unknown'}'")
         try:
             if state not in self.PLUG_OFF_VALUES:
                 self._logger.info(f"[PowerCycle] Turning OFF '{plug_name}', waiting {off_wait}s...")
-                tile.click()
+                if not self._cm_tap_plug_tile(tile, plug_name, target_off=True):
+                    return False
                 time.sleep(off_wait)
                 tile = self._cm_locate_plug_tile(plug_name) or tile
             self._logger.info(f"[PowerCycle] Turning ON '{plug_name}', waiting {on_wait}s for boot...")
-            tile.click()
+            if not self._cm_tap_plug_tile(tile, plug_name, target_off=False):
+                return False
             time.sleep(on_wait)
             return True
         except WebDriverException as e:
