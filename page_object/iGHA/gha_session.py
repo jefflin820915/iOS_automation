@@ -51,6 +51,7 @@ from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 class GHASession:
     """Central entry point managing iGHA application lifecycle and sub-page objects."""
     EMERGENCY_REMOVE_ATTEMPTS = 2
+
     WDA_ERROR_SIGNATURES = (
         "ECONNREFUSED",
         "Could not proxy command to the remote server",
@@ -58,6 +59,12 @@ class GHASession:
         "A session is either terminated or not started",
         "invalid session id",
         "NoSuchDriverError",
+    )
+
+    GRID_VIEW_LOCATORS = (
+        (AppiumBy.ACCESSIBILITY_ID, "deviceTileGridCollectionView"),
+        (AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeCollectionView" AND visible == 1'),
+        (AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeScrollView" AND visible == 1'),
     )
 
     def __init__(self, driver: WebDriver) -> None:
