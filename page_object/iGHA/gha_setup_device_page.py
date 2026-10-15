@@ -11,6 +11,19 @@ from utils import logging_utils
 
 class GHASetUpDevicePage(BasePage):
     """Class for handling Google Home device setup page on iOS."""
+    EXPECTED_DEVICE_IDENTIFIERS: Dict[str, str] = {
+        "Onn Wired Indoor Camera": "5502:4233:1658",
+        "Ref2 Battery Camera": "4738:21505:2329",
+        "HD Wired Indoor Camera": "4738:20482:2443",
+    }
+
+    def _get_expected_identifier(self, target_name: str) -> Optional[str]:
+        """Return the hardcoded device identifier (subtitle) for known devices, or None."""
+        target_lower = target_name.strip().lower()
+        for dev_name, identifier in self.EXPECTED_DEVICE_IDENTIFIERS.items():
+            if target_lower == dev_name.strip().lower():
+                return identifier.strip().lower()
+        return None
 
     def _get_all_visible_device_items(self) -> List[Dict[str, Any]]:
         """Retrieve all currently VISIBLE device cards on screen with title, subtitle, and element."""
@@ -88,11 +101,16 @@ class GHASetUpDevicePage(BasePage):
         return visible_items
 
     def _is_target_device_match(self, target_name: str, item: Dict[str, Any]) -> bool:
-        """Check if a device item matches the target device name/pairing code."""
+        """Check if a device item matches the target device name and its expected identifier."""
         target = target_name.strip().lower()
         title = item["title"].strip().lower()
         subtitle = item["subtitle"].strip().lower()
         display = item["display_name"].strip().lower()
+        expected_id = self._get_expected_identifier(target_name)
+        if expected_id:
+            name_matched = (target == title) or (target in title) or (title in target)
+            id_matched = (expected_id == subtitle) or (expected_id in subtitle) or (expected_id in display)
+            return name_matched and id_matched
         if target == title or target == subtitle or target == display:
             return True
         if target in title or title in target:
@@ -149,10 +167,14 @@ class GHASetUpDevicePage(BasePage):
                     self.driver.execute_script("mobile: swipe", {"direction": "down"})
                     time.sleep(1.0)
                     continue
-                current_label = elem.get_attribute("label") or elem.get_attribute("value") or ""
-                if target_item["title"].lower() not in current_label.lower():
+                current_label = (elem.get_attribute("label") or elem.get_attribute("value") or "").lower()
+                expected_sub = target_item["subtitle"].lower()
+                if (
+                        target_item["title"].lower() not in current_label
+                        or (expected_sub and "," in current_label and expected_sub not in current_label)
+                ):
                     self._logger.warning(
-                        f"List shifted! Element is now '{current_label}' instead of target. Re-locating..."
+                        f"List shifted! Element is now '{current_label}' instead of '{target_item['display_name']}'. Re-locating..."
                     )
                     time.sleep(0.5)
                     continue
@@ -176,7 +198,9 @@ class GHASetUpDevicePage(BasePage):
         """Scan nearby devices, log discovered device list (title + subtitle), and click the target device.
         Handles devices that take longer to be discovered or show up at the top after scrolling down.
         """
-        self._logger.info(f"Start scanning nearby devices for target: '{device_name}'...")
+        expected_id = self._get_expected_identifier(device_name)
+        target_desc = f"{device_name} ({expected_id})" if expected_id else device_name
+        self._logger.info(f"Start scanning nearby devices for target: '{target_desc}'...")
         time.sleep(5)
         discovered_device_names: List[str] = []
         self._logger.info(
@@ -194,7 +218,7 @@ class GHASetUpDevicePage(BasePage):
                     target_found = True
             self._logger.info(f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
             if target_found:
-                self._logger.info(f"Target device '{device_name}' detected! Attempting safe click...")
+                self._logger.info(f"Target device '{target_desc}' detected! Attempting safe click...")
                 if self._safe_click_target_device(device_name):
                     return True
                 else:
@@ -218,7 +242,7 @@ class GHASetUpDevicePage(BasePage):
                     target_found = True
             self._logger.info(f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
             if target_found:
-                self._logger.info(f"Target device '{device_name}' found during scroll! Attempting safe click...")
+                self._logger.info(f"Target device '{target_desc}' found during scroll! Attempting safe click...")
                 if self._safe_click_target_device(device_name):
                     return True
             if new_devices_found:
@@ -230,14 +254,13 @@ class GHASetUpDevicePage(BasePage):
                 break
             scroll_down_count += 1
             self._logger.info(
-                f"Device '{device_name}' not yet in safe view. Scrolling down ({scroll_idx + 1}/{max_scrolls})..."
+                f"Device '{target_desc}' not yet in safe view. Scrolling down ({scroll_idx + 1}/{max_scrolls})..."
             )
             try:
                 self.driver.execute_script("mobile: swipe", {"direction": "up"})
             except WebDriverException as e:
                 self._logger.warning(f"mobile: swipe down failed: {e}")
                 break
-
         self._logger.info(
             "Phase 3: Target not found downwards. Scrolling BACK UP to the top in case it appeared late..."
         )
@@ -274,5 +297,5 @@ class GHASetUpDevicePage(BasePage):
                 if self._safe_click_target_device(device_name):
                     return True
         self._logger.info(f"Final Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
-        self._logger.error(f"Could not find visible device '{device_name}' after full bidirectional scan.")
+        self._logger.error(f"Could not find visible device '{target_desc}' after full bidirectional scan.")
         return False
