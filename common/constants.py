@@ -26,7 +26,7 @@ DEVICE_RESET_CONFIG = {
 ADB_PATH = "/opt/homebrew/bin/adb"
 
 # ==================== App Settings ====================
-GHA_BUNDLE_ID = "com.google.Chromecast.enterprise"
+GHA_BUNDLE_ID = "com.google.Chromecast"
 iGHP_SAMPLE_APP_BUNDLE_ID = "com.google.homeplatform.sampleapp.gomezandres"
 SAFARI_BUNDLE_ID = "com.apple.mobilesafari"
 GHP_DEV_SITE = "https://developers.home.google.com/apis/ios/get-started"
