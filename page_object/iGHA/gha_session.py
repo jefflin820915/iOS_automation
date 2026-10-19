@@ -977,24 +977,46 @@ class GHASession:
             raise
 
     def handle_verify_camera_live_stream_and_remove(self):
+        """Verify camera live stream on the device page, then remove the device and run hardware reset.
+        Guarantees that `reset_target_device` (Smart plug power-cycle + ADB factory reset) ALWAYS
+        executes even if UI removal (`handle_remove_device`) raises an exception.
+        """
         session_obj = self if isinstance(self, GHASession) else getattr(self, "session", self)
         session_obj._device_removed_in_emergency = False
+        main_error: Optional[Exception] = None
         try:
             GHADevicePage.is_device_exist_device_page(self, device_name=self.device_name)
             GHADevicePage.enter_device_page(self, device_name=self.device_name)
             GHACameraLivePage.verify_camera_live_stream(self)
+        except Exception as exc:
+            main_error = exc
+            raise
         finally:
-            if getattr(session_obj, "_device_removed_in_emergency", False):
-                self._logger.info(
-                    "[Post-Test Cleanup] Device was already removed & refreshed by emergency teardown; "
-                    "proceeding directly to hardware reset."
-                )
-                session_obj._device_removed_in_emergency = False
-            else:
-                self.handle_remove_device()
-                self.refresh_gha_devices()
-            GHASession.reset_target_device(self, reason="post-test cleanup")
-
+            remove_error: Optional[Exception] = None
+            try:
+                if getattr(session_obj, "_device_removed_in_emergency", False):
+                    self._logger.info(
+                        "[Post-Test Cleanup] Device was already removed & refreshed by emergency teardown; "
+                        "proceeding directly to hardware reset."
+                    )
+                    session_obj._device_removed_in_emergency = False
+                else:
+                    try:
+                        self.handle_remove_device()
+                    except Exception as rem_exc:
+                        remove_error = rem_exc
+                        self._logger.error(
+                            f"[Post-Test Cleanup] Failed to remove device via GHA UI ({rem_exc}). "
+                            "Proceeding to mandatory Smart plug + ADB factory reset..."
+                        )
+                    try:
+                        self.refresh_gha_devices()
+                    except Exception as refresh_exc:
+                        self._logger.warning(f"[Post-Test Cleanup] Refresh GHA devices failed: {refresh_exc}")
+            finally:
+                GHASession.reset_target_device(self, reason="post-test cleanup")
+            if remove_error is not None and main_error is None:
+                raise remove_error
     def handle_remove_device(self) -> None:
         """Navigate to Settings and completely remove/unpair the camera device."""
         self._logger.info("Start test case: remove device")
