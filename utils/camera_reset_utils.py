@@ -30,7 +30,7 @@ DEFAULT_ADB_RESET_CONFIG: Dict[str, Any] = {
     "offline_timeout_s": 30,     # devices must drop off adb, otherwise the reboot is not confirmed
     "wait_for_adb": True,        # block until devices are back on adb
     "online_timeout_s": 300,     # max wait for devices to come back after the reboot
-    "post_reset_wait_s": 30,     # extra wait after adb is back so Matter/BLE advertising can start
+    "post_reset_wait_s": 10,     # extra wait after adb is back so Matter/BLE advertising can start
 }
 
 # Kept for backward compatibility with any external references.
@@ -303,7 +303,7 @@ class DeviceResetUtils:
         offline_timeout = float(cfg.get("offline_timeout_s", 30))
         wait_for_adb = bool(cfg.get("wait_for_adb", True))
         online_timeout = float(cfg.get("online_timeout_s", 300))
-        post_wait = float(cfg.get("post_reset_wait_s", 15))
+        post_wait = float(cfg.get("post_reset_wait_s", 10))
         printable = DEFAULT_ADB_RESET_ALL_PIPELINE.format(adb="adb", shell_cmd=shell_cmd)
         exec_pipeline = DEFAULT_ADB_RESET_ALL_PIPELINE.format(adb=shlex.quote(adb), shell_cmd=shell_cmd)
         logger.info(f"{tag} Factory reset requested ({reason or 'n/a'}): {printable}")
