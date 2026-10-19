@@ -23,7 +23,12 @@ DEVICE_RESET_CONFIG = {
         "post_reset_wait_s": 30,
     },
 }
-ADB_PATH = "/opt/homebrew/bin/adb"
+
+ADB_PATH = (
+    "/opt/homebrew/bin/adb"
+    if os.path.exists("/opt/homebrew/bin/adb")
+    else "/usr/local/bin/adb"
+)
 
 # ==================== App Settings ====================
 GHA_BUNDLE_ID = "com.google.Chromecast"
