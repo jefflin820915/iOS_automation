@@ -50,40 +50,9 @@ class GHADeviceSettingPage(BasePage):
             'or contains(@name, "Remove device") or contains(@label, "Remove device") '
             'or contains(@name, "Remove this device") or contains(@label, "Remove this device")] | '
             '//XCUIElementTypeCell[.//XCUIElementTypeStaticText[@name="Remove device" or @label="Remove device" '
-            'or @name="Unlink all" or @label="Unlink all" '
-            'or contains(@name, "Remove device") or contains(@label, "Remove device")]] | '
+            'or @name="Unlink all" or @label="Unlink all"]] | '
             '//XCUIElementTypeStaticText[@name="Remove device" or @label="Remove device" '
             'or @name="Unlink all" or @label="Unlink all"]',
-        ),
-    ]
-    DELETE_VIDEO_HISTORY_LOCATORS: List[Tuple[AppiumBy, str]] = [
-        (AppiumBy.ACCESSIBILITY_ID, "Delete video history"),
-        (
-            AppiumBy.IOS_PREDICATE,
-            '(type == "XCUIElementTypeButton" OR type == "XCUIElementTypeCell" '
-            'OR type == "XCUIElementTypeStaticText") AND ('
-            'name CONTAINS[c] "Delete video history" OR label CONTAINS[c] "Delete video history" '
-            'OR value CONTAINS[c] "Delete video history")',
-        ),
-        (
-            AppiumBy.XPATH,
-            '//*[contains(@name, "Delete video history") or contains(@label, "Delete video history")]',
-        ),
-    ]
-    DEVICE_SETTINGS_CLOSE_LOCATORS: List[Tuple[AppiumBy, str]] = [
-        (AppiumBy.ACCESSIBILITY_ID, "closeButton"),
-        (AppiumBy.ACCESSIBILITY_ID, "Close"),
-        (AppiumBy.ACCESSIBILITY_ID, "BackButton"),
-        (AppiumBy.ACCESSIBILITY_ID, "Back"),
-        (
-            AppiumBy.IOS_PREDICATE,
-            'type == "XCUIElementTypeButton" AND ('
-            'name IN {"closeButton", "Close", "close", "BackButton", "Back", "back", "xmark", "chevron.backward"} '
-            'OR label IN {"Close", "close", "Back", "back", "Dismiss"})',
-        ),
-        (
-            AppiumBy.XPATH,
-            '//XCUIElementTypeNavigationBar//XCUIElementTypeButton[1]',
         ),
     ]
     CONFIRM_REMOVE_LOCATORS: List[Tuple[AppiumBy, str]] = [
@@ -159,7 +128,6 @@ class GHADeviceSettingPage(BasePage):
         (
             AppiumBy.IOS_PREDICATE,
             '(type == "XCUIElementTypeStaticText" OR type == "XCUIElementTypeTextView") AND ('
-            'name == "Device information" OR label == "Device information" OR '
             'label BEGINSWITH "Technical information" OR '
             'value CONTAINS "Device ID:" OR label CONTAINS "Device ID:")',
         ),
@@ -250,8 +218,11 @@ class GHADeviceSettingPage(BasePage):
         return None
     def _devset_is_on_device_info_page(self) -> bool:
         """Return True if the '< Back' button or Device information page content is present."""
-        if self._devset_find_first(self.DEVICE_INFO_BACK_LOCATORS, require_displayed=True):
-            return True
+        back_elem = self._devset_find_first(self.DEVICE_INFO_BACK_LOCATORS, require_displayed=True)
+        if back_elem:
+            btn_label = self._devset_elem_label(back_elem, "").lower()
+            if btn_label not in ("close", "closebutton", "dismiss", "xmark"):
+                return True
         if self._devset_find_first(self.DEVICE_INFO_PAGE_MARKERS, require_displayed=False):
             return True
         return False
@@ -325,71 +296,46 @@ class GHADeviceSettingPage(BasePage):
         except Exception as back_err:
             self._logger.warning(f"driver.back() failed: {back_err}")
             return False
-    def _get_delete_video_history_y(self) -> Optional[int]:
-        """Return the current vertical y-coordinate of 'Delete video history' if visible on screen, else None."""
-        try:
-            window_size = self.driver.get_window_size()
-            screen_height = window_size["height"]
-        except Exception:
-            screen_height = 9999
-        with self._devset_no_implicit_wait():
-            for by, val in self.DELETE_VIDEO_HISTORY_LOCATORS:
-                try:
-                    for elem in self.driver.find_elements(by, val):
-                        try:
-                            rect = elem.rect
-                            if 40 < rect["y"] < screen_height - 2 and rect["height"] > 10:
-                                if elem.is_displayed() or rect.get("width", 0) > 20:
-                                    return int(rect["y"])
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-        return None
-    def _is_delete_video_history_visible(self) -> bool:
-        """Return True if the 'Delete video history' button/cell at the bottom of Device Settings is visible."""
-        return self._get_delete_video_history_y() is not None
     def _get_visible_remove_btn(self) -> Optional[WebElement]:
-        """Find visible and hittable 'Remove device' or 'Unlink all' button with multi-strategy locators."""
+        """Find visible and hittable 'Remove device' or 'Unlink all' button within the safe viewport."""
         try:
             window_size = self.driver.get_window_size()
             screen_height = window_size["height"]
         except Exception:
             screen_height = 9999
-        fallback_candidate: Optional[WebElement] = None
         with self._devset_no_implicit_wait():
             for by, val in self.REMOVE_DEVICE_LOCATORS:
                 try:
                     elems = self.driver.find_elements(by, val)
                     for elem in elems:
                         label_lower = self._devset_elem_label(elem, "").lower()
-                        if "video history" in label_lower or "delete history" in label_lower:
+                        if (
+                                "video history" in label_lower
+                                or "delete history" in label_lower
+                                or "favorites" in label_lower
+                        ):
                             continue
                         try:
+                            if not elem.is_displayed():
+                                continue
                             rect = elem.rect
                         except Exception:
                             continue
-                        in_viewport = 40 < rect["y"] < screen_height - 2 and rect["height"] > 10
-                        if not in_viewport:
-                            continue
-                        try:
-                            if elem.is_displayed():
-                                return elem
-                        except Exception:
-                            pass
-                        if fallback_candidate is None and rect.get("width", 0) > 20:
-                            fallback_candidate = elem
+                        # Require the row to be comfortably inside the vertical viewport (not clipped
+                        # at the bottom home-indicator bar) and sized like a single button/cell row.
+                        if 50 < rect["y"] < screen_height - 25 and 10 < rect["height"] <= 140:
+                            return elem
                 except Exception:
                     continue
-        return fallback_candidate
-    def _swipe_down_page(self, force_scroll_to_bottom: bool = False) -> None:
-        """Perform a controlled physical swipe down (content moves up) with settling sleep."""
+        return None
+    def _swipe_down_page(self) -> None:
+        """Perform a controlled physical swipe down (finger moves up, content moves up) with settling sleep."""
         try:
             size = self.driver.get_window_size()
             start_x = size["width"] // 2
-            start_y = int(size["height"] * 0.78)
-            end_y = int(size["height"] * 0.22)
-            self.driver.swipe(start_x, start_y, start_x, end_y, duration=350)
+            start_y = int(size["height"] * 0.75)
+            end_y = int(size["height"] * 0.25)
+            self.driver.swipe(start_x, start_y, start_x, end_y, duration=400)
             time.sleep(1.0)
         except Exception as e:
             self._logger.warning(f"Coordinate swipe failed ({e}), trying mobile: swipe fallback...")
@@ -398,47 +344,6 @@ class GHADeviceSettingPage(BasePage):
                 time.sleep(1.0)
             except Exception:
                 pass
-        if force_scroll_to_bottom and hasattr(self.driver, "execute_script"):
-            try:
-                self.driver.execute_script("mobile: scroll", {"direction": "down"})
-                time.sleep(0.8)
-            except Exception:
-                pass
-    def _swipe_up_page(self) -> None:
-        """Perform a controlled physical swipe up (content moves down, back toward top of page)."""
-        try:
-            size = self.driver.get_window_size()
-            start_x = size["width"] // 2
-            start_y = int(size["height"] * 0.30)
-            end_y = int(size["height"] * 0.75)
-            self.driver.swipe(start_x, start_y, start_x, end_y, duration=450)
-            time.sleep(1.0)
-        except Exception as e:
-            self._logger.warning(f"Coordinate swipe up failed ({e}), trying mobile: swipe fallback...")
-            try:
-                self.driver.execute_script("mobile: swipe", {"direction": "down"})
-                time.sleep(1.0)
-            except Exception:
-                pass
-    def close_device_settings_page(self) -> bool:
-        """Close the 'Device settings' screen (top-left 'X' / 'Close' / 'Back') to return to Camera Live View."""
-        self._logger.info("Closing 'Device settings' page to reload fresh settings...")
-        close_btn = (
-                self._devset_find_first(self.DEVICE_SETTINGS_CLOSE_LOCATORS, require_displayed=True)
-                or self._devset_find_first(self.DEVICE_SETTINGS_CLOSE_LOCATORS, require_displayed=False)
-        )
-        if close_btn and self._devset_tap_element(close_btn, "'Close / Back' button on Device Settings"):
-            time.sleep(1.5)
-            return True
-        if hasattr(self.driver, "execute_script"):
-            try:
-                self._logger.info("Close button locator not matched; coordinate-tapping top-left (28, 56)...")
-                self.driver.execute_script("mobile: tap", {"x": 28, "y": 56})
-                time.sleep(1.5)
-                return True
-            except Exception as tap_err:
-                self._logger.warning(f"Top-left coordinate tap failed: {tap_err}")
-        return False
     def _confirm_secondary_remove_dialog(
             self,
             timeout: float = 6.0,
@@ -474,7 +379,9 @@ class GHADeviceSettingPage(BasePage):
                         pass
             time.sleep(0.5)
         return None
-    def _tap_and_confirm_remove_btn(self, remove_btn: WebElement, swipe_desc: str) -> bool:
+    def _tap_and_confirm_remove_btn(
+            self, remove_btn: WebElement, swipe_desc: str, require_confirmation: bool = False
+    ) -> bool:
         """Click the located 'Remove device' / 'Unlink all' element and confirm the modal alert."""
         btn_label = self._devset_elem_label(remove_btn, "Remove device")
         btn_rect = None
@@ -505,40 +412,43 @@ class GHADeviceSettingPage(BasePage):
             else:
                 time.sleep(5)
             return True
+        if require_confirmation:
+            self._logger.warning(
+                "Confirmation dialog did not appear after tapping '%s' (%s); scrolling down further to retry...",
+                btn_label,
+                swipe_desc,
+            )
+            return False
         self._logger.warning("Confirmation 'Remove' / 'Unlink all' dialog button did not appear within 6s, proceeding...")
         return True
     def click_remove_device_btn(self, max_scrolls: int = 8) -> bool:
-        """Quickly swipe down the Device Settings page to locate and click 'Remove device' or 'Unlink all' button.
+        """Swipe down the Device Settings page to locate and click 'Remove device' or 'Unlink all' button.
         Args:
-            max_scrolls (int): Maximum swipes to reach bottom. Defaults to 8.
+            max_scrolls (int): Maximum downward swipes to reach the bottom of Device Settings. Defaults to 8.
         Returns:
             bool: True if clicked and confirmed successfully.
         """
         self._logger.info("Locating 'Remove device' / 'Unlink all' button on Device Settings page...")
         time.sleep(1.0)
-        prev_delete_history_y: Optional[int] = None
         for scroll_idx in range(max_scrolls):
             remove_btn = self._get_visible_remove_btn()
             if remove_btn:
-                return self._tap_and_confirm_remove_btn(remove_btn, f"after {scroll_idx} swipes")
-            cur_delete_history_y = self._get_delete_video_history_y()
-            # If 'Delete video history' is already on screen (e.g. near the bottom edge when 'Rotate image 180°'
-            # pushes 'Remove device' below the fold) and a standard swipe did not move it up, also trigger
-            # native 'mobile: scroll' down so the collection view is guaranteed to reach the very bottom.
-            force_bottom = (
-                    cur_delete_history_y is not None
-                    and prev_delete_history_y is not None
-                    and abs(cur_delete_history_y - prev_delete_history_y) < 10
-            )
-            prev_delete_history_y = cur_delete_history_y
+                if self._tap_and_confirm_remove_btn(
+                        remove_btn,
+                        f"after {scroll_idx} swipes",
+                        require_confirmation=(scroll_idx < max_scrolls - 1),
+                ):
+                    return True
             self._logger.info(
-                f"'Remove device' / 'Unlink all' not visible yet. Swiping ({scroll_idx + 1}/{max_scrolls})..."
+                f"'Remove device' / 'Unlink all' not visible yet. Swiping down ({scroll_idx + 1}/{max_scrolls})..."
             )
-            self._swipe_down_page(force_scroll_to_bottom=force_bottom)
-        # Final check at bottom after all downward swipes
+            self._swipe_down_page()
+        # Final check at the bottom of the page after all downward swipes
         remove_btn = self._get_visible_remove_btn()
         if remove_btn:
-            return self._tap_and_confirm_remove_btn(remove_btn, "at bottom of page")
+            return self._tap_and_confirm_remove_btn(
+                remove_btn, "at bottom of page", require_confirmation=False
+            )
         raise PageNotPresentException(
             locator=self.REMOVE_DEVICE_LOCATORS[0],
             page_name=self.__class__.__name__,
@@ -566,8 +476,12 @@ class GHADeviceSettingPage(BasePage):
         self.device_tech_info = device_details
         if hasattr(self, "driver") and self.driver:
             self.driver.device_tech_info = device_details
+        try:
+            screen_height = self.driver.get_window_size()["height"]
+        except Exception:
+            screen_height = 844
         dev_info_btn = None
-        for _ in range(4):
+        for _ in range(5):
             # In GHA on some iOS versions, the inner StaticText has visible=false while the parent Cell
             # is visible; accept either a displayed match or any present match on the current screen.
             dev_info_btn = (
@@ -575,6 +489,21 @@ class GHADeviceSettingPage(BasePage):
                     or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=False)
             )
             if dev_info_btn:
+                try:
+                    rect = dev_info_btn.rect
+                    if rect["y"] > screen_height - 80:
+                        self._logger.info(
+                            "'Device information' is near the bottom edge (y=%s); swiping down once more...",
+                            rect["y"],
+                        )
+                        self._swipe_down_page()
+                        dev_info_btn = (
+                                self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=True)
+                                or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=False)
+                                or dev_info_btn
+                        )
+                except Exception:
+                    pass
                 break
             self._swipe_down_page()
         if not dev_info_btn:

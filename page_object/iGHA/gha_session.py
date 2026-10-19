@@ -1009,10 +1009,11 @@ class GHASession:
                             f"[Post-Test Cleanup] Failed to remove device via GHA UI ({rem_exc}). "
                             "Proceeding to mandatory Smart plug + ADB factory reset..."
                         )
-                    try:
-                        self.refresh_gha_devices()
-                    except Exception as refresh_exc:
-                        self._logger.warning(f"[Post-Test Cleanup] Refresh GHA devices failed: {refresh_exc}")
+                    if remove_error is None:
+                        try:
+                            self.refresh_gha_devices()
+                        except Exception as refresh_exc:
+                            self._logger.warning(f"[Post-Test Cleanup] Refresh GHA devices failed: {refresh_exc}")
             finally:
                 GHASession.reset_target_device(self, reason="post-test cleanup")
             if remove_error is not None and main_error is None:
