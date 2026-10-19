@@ -51,12 +51,21 @@ IOS_CAPABILITIES = {
     "appium:automationName": "XCUITest",
     "appium:deviceName": "Test’s iPhone",
     "appium:platformVersion": "26.5.2",
-    "appium:udid": "00008110-00191899267A201E",
+    "appium:udid": "00008030-00064DC43EEA802E",
     "appium:xcodeOrgId": "J8YMN73J2Y",
-    "appium:xcodeSigningId": "jeff820915@yahoo.com.tw",
-    "appium:newCommandTimeout": 600,
-
+    "appium:newCommandTimeout": 3600,
 }
+# IOS_CAPABILITIES = {
+#     "platformName": "iOS",
+#     "appium:automationName": "XCUITest",
+#     "appium:deviceName": "Test’s iPhone",
+#     "appium:platformVersion": "26.5.2",
+#     "appium:udid": "00008110-00191899267A201E",
+#     "appium:xcodeOrgId": "J8YMN73J2Y",
+#     "appium:xcodeSigningId": "jeff820915@yahoo.com.tw",
+#     "appium:newCommandTimeout": 600,
+#
+# }
 
 # ==================== Partner Device (iOS query_app_state) ====================
 REF2_BATTERY_CAMERA = "Ref2 Battery Camera"
