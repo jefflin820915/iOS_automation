@@ -30,7 +30,7 @@ DEFAULT_ADB_RESET_CONFIG: Dict[str, Any] = {
     "offline_timeout_s": 30,     # devices must drop off adb, otherwise the reboot is not confirmed
     "wait_for_adb": True,        # block until devices are back on adb
     "online_timeout_s": 300,     # max wait for devices to come back after the reboot
-    "post_reset_wait_s": 10,     # extra wait after adb is back so Matter/BLE advertising can start
+    "post_reset_wait_s": 30,     # extra wait after adb is back so Matter/BLE advertising can start
 }
 
 # Kept for backward compatibility with any external references.
@@ -39,6 +39,7 @@ DEFAULT_DEVICE_RESET_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 _FTSMISC_ERROR_MARKERS = ("not found", "no such file", "denied", "usage", "invalid", "fail", "error")
+
 # /proc/sys/kernel/random/boot_id, e.g. '5f9d3c2a-8b1e-4f7a-9c3d-2e1f0a9b8c7d'. Anything else = unreadable.
 _BOOT_ID_RE = re.compile(r"^[0-9a-fA-F-]{16,}$")
 
@@ -112,14 +113,42 @@ class DeviceResetUtils:
         adb_ok = cls.adb_factory_reset(label, reason=reason)
         logger.info(f"{tag} Step 2/2: ADB factory reset {'SUCCESS' if adb_ok else 'FAILED'}.")
         return plug_ok and adb_ok
+    COMMON_ADB_PATHS: Tuple[str, ...] = (
+        "/opt/homebrew/bin/adb",
+        "/usr/local/bin/adb",
+        "~/Library/Android/sdk/platform-tools/adb",
+        "/Library/Android/sdk/platform-tools/adb",
+        "~/Android/Sdk/platform-tools/adb",
+    )
 
-    @staticmethod
-    def _adb_binary() -> Optional[str]:
-        """constants.ADB_PATH if set (must exist), otherwise `adb` from PATH."""
-        configured = str(getattr(constants, "ADB_PATH", "") or "").strip()
-        if configured:
-            return configured if os.path.isfile(configured) else None
-        return shutil.which("adb")
+    @classmethod
+    def _adb_binary(cls) -> Optional[str]:
+        """Resolve `adb` binary across constants.ADB_PATH, system PATH, and common macOS/SDK locations."""
+        candidates: List[str] = []
+        configured = getattr(constants, "ADB_PATH", None)
+        if isinstance(configured, (list, tuple)):
+            candidates.extend(str(p).strip() for p in configured if str(p).strip())
+        elif configured:
+            for part in str(configured).split(os.pathsep):
+                if part.strip():
+                    candidates.append(part.strip())
+        which_adb = shutil.which("adb")
+        if which_adb:
+            candidates.append(which_adb)
+        candidates.extend(cls.COMMON_ADB_PATHS)
+        seen = set()
+        for raw_path in candidates:
+            expanded = os.path.expanduser(raw_path)
+            if expanded in seen:
+                continue
+            seen.add(expanded)
+            if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+                return expanded
+        for raw_path in candidates:
+            expanded = os.path.expanduser(raw_path)
+            if os.path.isfile(expanded):
+                return expanded
+        return None
 
     @staticmethod
     def _run(cmd: List[str], timeout: float) -> Tuple[Optional[int], str]:
@@ -274,7 +303,7 @@ class DeviceResetUtils:
         offline_timeout = float(cfg.get("offline_timeout_s", 30))
         wait_for_adb = bool(cfg.get("wait_for_adb", True))
         online_timeout = float(cfg.get("online_timeout_s", 300))
-        post_wait = float(cfg.get("post_reset_wait_s", 10))
+        post_wait = float(cfg.get("post_reset_wait_s", 15))
         printable = DEFAULT_ADB_RESET_ALL_PIPELINE.format(adb="adb", shell_cmd=shell_cmd)
         exec_pipeline = DEFAULT_ADB_RESET_ALL_PIPELINE.format(adb=shlex.quote(adb), shell_cmd=shell_cmd)
         logger.info(f"{tag} Factory reset requested ({reason or 'n/a'}): {printable}")
