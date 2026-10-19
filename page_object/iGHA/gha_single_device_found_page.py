@@ -71,25 +71,20 @@ class GHASingleDeviceFoundPage(BasePage):
         '(label BEGINSWITH[c] "Set up " OR value BEGINSWITH[c] "Set up " '
         'OR label BEGINSWITH[c] "Add " OR value BEGINSWITH[c] "Add ")',
     )
-
     NAV_BAR: Locator = (
         AppiumBy.IOS_CLASS_CHAIN,
         '**/XCUIElementTypeNavigationBar[`name CONTAINS "SingleDeviceFoundView"`]',
     )
-
     # Device ID label on each nearby device card, e.g. "4738:21505:2329"
     DEVICE_ID_TEXT: Locator = (
         AppiumBy.IOS_PREDICATE,
         'type == "XCUIElementTypeStaticText" AND label MATCHES "^[0-9]+:[0-9]+:[0-9]+$"',
     )
-
     MULTI_DEVICE_CARD_BTN: Locator = (
         AppiumBy.IOS_PREDICATE,
         'type == "XCUIElementTypeButton" AND name == "image-title-subtitle" AND visible == 1',
     )
-
     TITLE_PREFIX_PATTERN = re.compile(r"^(set up|add)\s+", re.IGNORECASE)
-
     IGNORED_TITLES = {
         "set up a different device",
         "set up nearby devices",
@@ -223,8 +218,17 @@ class GHASingleDeviceFoundPage(BasePage):
         """Check if 'This device was detected nearby' is present in Header_subtitle or Header_rootView."""
         for locator in (self.HEADER_SUBTITLE, self.HEADER_ROOT):
             sub_elem = self._sdf_find_any(*locator)
-            sub_text = self._sdf_read_text(sub_elem)
-            if "detected nearby" in sub_text.lower():
+            sub_text = self._sdf_read_text(sub_elem).lower()
+            if "this device was detected nearby" in sub_text:
+                return True
+        return False
+
+    def _sdf_is_nearby_list_header(self) -> bool:
+        """Return True if the multi-device 'Set up nearby devices' header is present."""
+        for locator in (self.HEADER_TITLE, self.HEADER_SUBTITLE, self.HEADER_ROOT):
+            elem = self._sdf_find_any(*locator)
+            text = self._sdf_read_text(elem).lower()
+            if "set up nearby devices" in text or "devices were detected nearby" in text:
                 return True
         return False
 
@@ -234,7 +238,7 @@ class GHASingleDeviceFoundPage(BasePage):
         return False prematurely before SingleDeviceFoundView finishes loading.
         Rules:
         - 2+ device cards on screen -> multi-device list -> immediately False.
-        - SingleDeviceFoundView nav bar or 'detected nearby' subtitle -> True.
+        - SingleDeviceFoundView nav bar or 'detected nearby' subtitle -> True (waits briefly for Next button).
         - Visible 'Next' button + 'Set up a different device' button with <= 1 card -> True.
         """
         effective_timeout = max(float(timeout or 0.0), self.SDF_DISCOVERY_TIMEOUT)
@@ -242,8 +246,10 @@ class GHASingleDeviceFoundPage(BasePage):
         while time.time() < deadline:
             try:
                 card_count = self._sdf_count_device_cards()
-                if card_count >= 2:
-                    self._logger.info(f"[SingleDevice] Detected {card_count} device cards -> multi-device list.")
+                if card_count >= 2 or self._sdf_is_nearby_list_header():
+                    self._logger.info(
+                        f"[SingleDevice] Detected multi-device 'Set up nearby devices' list (cards={card_count})."
+                    )
                     return False
                 has_navbar = self._sdf_find_any(*self.NAV_BAR) is not None
                 has_subtitle = self._sdf_has_nearby_subtitle()
@@ -272,7 +278,6 @@ class GHASingleDeviceFoundPage(BasePage):
                 pass
             time.sleep(self.SDF_POLL_INTERVAL)
         return False
-
     def _sdf_extract_title_once(self) -> str:
         """Single non-blocking attempt to read the detected device title from Header_title / Header_rootView."""
         # 1. Direct Header_title (may have visible==false inside accessible Header_rootView)
@@ -312,7 +317,6 @@ class GHASingleDeviceFoundPage(BasePage):
                 return title
             time.sleep(self.SDF_POLL_INTERVAL)
         return self._sdf_extract_title_once()
-
     def is_title_match_device(self, target_device_name: str) -> bool:
         """Check whether the header title refers to the target device (case-insensitive)."""
         detected_title = self.get_detected_device_title(timeout=self.SDF_TITLE_WAIT_TIMEOUT)
@@ -353,7 +357,6 @@ class GHASingleDeviceFoundPage(BasePage):
                 return True
         self._logger.error("[SingleDevice] Failed to leave Single Device Found page.")
         return False
-
     def click_different_device_button(self) -> bool:
         """Click 'Set up a different device' and verify leaving SingleDeviceFoundView."""
         for use_coordinates in (False, True):
@@ -392,7 +395,6 @@ class GHASingleDeviceFoundPage(BasePage):
         if self._sdf_find_any(*self.NAV_BAR) is not None:
             return False
         return self._sdf_find_first(self.HOME_READY_LOCATORS) is not None
-
     def click_back_btn(self) -> bool:
         """Close or back out of the setup flow until returning to GHA Home screen."""
         self._logger.info("[SingleDevice] Looking for close/back button to return to Home screen...")
