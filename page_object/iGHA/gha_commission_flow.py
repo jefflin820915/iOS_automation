@@ -120,7 +120,7 @@ class GHACommissioningPageObject(BasePage):
         "Connecting",
         "Setting up", "Activating camera", "Downloading update", "Update finished",
     )
-    DEFAULT_PLUG_KEYWORDS = ("Eve", "Eve Energy Plug", "Eve Energy", "Eve Energy plug")
+    DEFAULT_PLUG_KEYWORDS = ("Eve", "Meross", "Meross Mini Plug", "Eve Energy Plug", "Meross Mini", "Eve Energy", "Meross Mini plug", "Eve Energy plug")
     PLUG_ON_VALUES = ("on", "1", "true")
     PLUG_OFF_VALUES = ("off", "0", "false")
     CM_POLL_INTERVAL = 1.5
