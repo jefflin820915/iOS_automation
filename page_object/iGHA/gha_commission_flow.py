@@ -8,7 +8,8 @@ from selenium.common.exceptions import WebDriverException
 from common import constants
 from common.base_page import BasePage
 from page_object.iGHA.gha_camera_activated_page import GHACameraActivatedPage
-from page_object.iGHA.gha_connect_device_to_google_account_page import GHAConnectDeviceToGoogleAccountPage
+from page_object.iGHA.gha_connect_device_to_google_account_page import \
+    GHAConnectDeviceToGoogleAccountPage
 from page_object.iGHA.gha_device_connected_page import GHADeviceConnectedPage
 from page_object.iGHA.gha_device_setting_page import GHADeviceSettingPage
 from page_object.iGHA.gha_setting_page import GHASettingsPage
@@ -21,6 +22,7 @@ from utils.camera_reset_utils import DeviceResetUtils
 Locator = Tuple[str, str]
 HeadlineHandler = Callable[[str], bool]
 
+
 def _contains_any(text: str, keywords: Sequence[str]) -> bool:
     lowered = text.lower()
     return any(kw.lower() in lowered for kw in keywords)
@@ -32,6 +34,7 @@ class _CMAppleSheetFailure(AssertionError):
     AssertionError, so the reported Failure Stage stays COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
     Subclasses AssertionError so a standalone call of handle_apple_commissioning_sheet still fails.
     """
+
     def __init__(self, reason: str, card_title: str = ""):
         super().__init__(reason)
         self.reason = reason
@@ -44,11 +47,17 @@ class GHACommissioningPageObject(BasePage):
     NOTE: Failure Stage is derived from the innermost page_object frame of the traceback, so
           private helpers must NOT raise the final AssertionError; the public flow method does.
     """
-    HEADLINE_LOCATOR: Locator = (AppiumBy.ACCESSIBILITY_ID, constants.GHA_CONNECTING_TITLE_ACCESSIBILITY_ID)
+    HEADLINE_LOCATOR: Locator = (AppiumBy.ACCESSIBILITY_ID,
+                                 constants.GHA_CONNECTING_TITLE_ACCESSIBILITY_ID)
     APPLE_OVERLAY_WINDOW_CHAIN = '**/XCUIElementTypeWindow[`name == "SBTransientOverlayWindow" AND visible == 1`]'
     APPLE_CARD_TITLE_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeTextView[`visible == 1`]'
     APPLE_CARD_STATIC_TEXT_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeStaticText[`visible == 1`]'
     APPLE_TEXT_FIELD_CHAIN = f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeTextField[`visible == 1`]'
+    APPLE_KEYBOARD_DONE_CHAIN = (
+        '**/XCUIElementTypeKeyboard/**/'
+        'XCUIElementTypeButton[`name IN {"Done", "Return", "done", "return"} OR '
+        'label IN {"Done", "Return", "done", "return"}`]'
+    )
     APPLE_ADD_BTN_CHAIN = (
         f'{APPLE_OVERLAY_WINDOW_CHAIN}/**/'
         'XCUIElementTypeButton[`name CONTAINS "Add to" OR label CONTAINS "Add to"`]'
@@ -69,7 +78,8 @@ class GHACommissioningPageObject(BasePage):
     )
     DEVICE_TILE: Locator = (AppiumBy.NAME, "deviceTile")
     DEVICE_TILE_TITLE: Locator = (AppiumBy.NAME, "deviceTileTitleTextView")
-    DEVICE_TILE_CELL: Locator = (AppiumBy.IOS_PREDICATE, 'type == "XCUIElementTypeCell" AND name CONTAINS "deviceTileCell"')
+    DEVICE_TILE_CELL: Locator = (AppiumBy.IOS_PREDICATE,
+                                 'type == "XCUIElementTypeCell" AND name CONTAINS "deviceTileCell"')
     # New GHA 'All devices' grid represents each tile as an XCUIElementTypeOther (e.g. name="Eve Energy Plug, On").
     DEVICE_TILE_OTHER: Locator = (
         AppiumBy.IOS_PREDICATE,
@@ -96,18 +106,21 @@ class GHACommissioningPageObject(BasePage):
         "can't be used",
     )
     FAILURE_KEYWORDS = (
-        "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect", "Unable to connect",
-        "Something went wrong", "Check your connection", "Device not found", "Setup failed","Reset this device",
-        "There may be a problem"
+        "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect",
+        "Unable to connect",
+        "Something went wrong", "Check your connection", "Device not found", "Setup failed",
+        "Service failure",
+        "Reset this device", "Device not reachable", "There may be a problem"
     )
     PAIRED_OFFLINE_FAILURE_KEYWORDS = (
-        "There may be a problem", "Device not reachable", "Service failure"
+        "There may be a problem",
     )
     PROGRESS_KEYWORDS = (
-        "Adding device", "Getting your device ready", "Next, your device will be added", "Connecting",
+        "Adding device", "Getting your device ready", "Next, your device will be added",
+        "Connecting",
         "Setting up", "Activating camera", "Downloading update", "Update finished",
     )
-    DEFAULT_PLUG_KEYWORDS = ("Eve", "Meross", "Meross Plug Mini", "Meross Plug", "Eve Energy Plug", "Eve Energy", "Eve Energy plug", "Meross plug mini")
+    DEFAULT_PLUG_KEYWORDS = ("Eve", "Eve Energy Plug", "Eve Energy", "Eve Energy plug")
     PLUG_ON_VALUES = ("on", "1", "true")
     PLUG_OFF_VALUES = ("off", "0", "false")
     CM_POLL_INTERVAL = 1.5
@@ -130,7 +143,8 @@ class GHACommissioningPageObject(BasePage):
             except WebDriverException:
                 pass
 
-    def _cm_find_all(self, by: str, value: str, root: Optional[WebElement] = None) -> List[WebElement]:
+    def _cm_find_all(self, by: str, value: str, root: Optional[WebElement] = None) -> List[
+        WebElement]:
         with self._cm_no_implicit_wait():
             try:
                 return (root or self.driver).find_elements(by, value)
@@ -170,7 +184,8 @@ class GHACommissioningPageObject(BasePage):
 
     def _cm_is_gha_foreground(self) -> bool:
         try:
-            return self.driver.query_app_state(constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
+            return self.driver.query_app_state(
+                constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
         except WebDriverException as e:
             self._logger.error(f"Failed to query GHA app state: {e}")
             return False
@@ -178,7 +193,8 @@ class GHACommissioningPageObject(BasePage):
     def stop_gha(self) -> bool:
         """Terminate the GHA application."""
         try:
-            if self.driver.query_app_state(constants.GHA_BUNDLE_ID) == constants.APP_STATE_NOT_RUNNING:
+            if self.driver.query_app_state(
+                    constants.GHA_BUNDLE_ID) == constants.APP_STATE_NOT_RUNNING:
                 self._logger.info("GHA is not running.")
             else:
                 self.driver.terminate_app(constants.GHA_BUNDLE_ID)
@@ -209,7 +225,8 @@ class GHACommissioningPageObject(BasePage):
 
     def is_apple_sheet_present(self) -> bool:
         """Check if Apple's native Matter sheet (SBTransientOverlayWindow) is visible."""
-        return self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_OVERLAY_WINDOW_CHAIN) is not None
+        return self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN,
+                                       self.APPLE_OVERLAY_WINDOW_CHAIN) is not None
 
     def _cm_read_alert_title(self, alert_elem: WebElement) -> str:
         """Extract the title/message from an iOS system alert before dismissing it."""
@@ -227,7 +244,8 @@ class GHACommissioningPageObject(BasePage):
         """Dismiss iOS system alerts like 'Uncertified Accessory'.
         Note: Does NOT click 'OK' on an Apple Matter failure card so _cm_on_apple_failure can handle it.
         """
-        alert_elem = self._cm_find_displayed(AppiumBy.CLASS_NAME, constants.GHA_COMMISSION_WINDOW_ALERT)
+        alert_elem = self._cm_find_displayed(AppiumBy.CLASS_NAME,
+                                             constants.GHA_COMMISSION_WINDOW_ALERT)
         if alert_elem is None:
             return False
         alert_title = self._cm_read_alert_title(alert_elem)
@@ -244,10 +262,12 @@ class GHACommissioningPageObject(BasePage):
                 if _contains_any(card_title, self.APPLE_FAILURE_KEYWORDS):
                     self._cm_apple_failure_title = card_title
                     return False
-        self._logger.warning(f"Detected iOS System Alert dialog{f' ({alert_title!r})' if alert_title else ''}!")
+        self._logger.warning(
+            f"Detected iOS System Alert dialog{f' ({alert_title!r})' if alert_title else ''}!")
         for btn_text in self.SYSTEM_ALERT_BUTTONS:
             if self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, btn_text):
-                if btn_text == "OK" and alert_title and not getattr(self, "_cm_apple_failure_title", ""):
+                if btn_text == "OK" and alert_title and not getattr(self, "_cm_apple_failure_title",
+                                                                    ""):
                     self._cm_apple_failure_title = alert_title
                 self._logger.info(f"Dismissed system alert via '{btn_text}'.")
                 return True
@@ -266,7 +286,8 @@ class GHACommissioningPageObject(BasePage):
                 if title and title.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS:
                     candidates.append(title)
             if not candidates:
-                for elem in self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_CARD_STATIC_TEXT_CHAIN):
+                for elem in self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN,
+                                              self.APPLE_CARD_STATIC_TEXT_CHAIN):
                     try:
                         if not elem.is_displayed():
                             continue
@@ -310,22 +331,46 @@ class GHACommissioningPageObject(BasePage):
         raise _CMAppleSheetFailure(f"Apple sheet failed with '{card_title}'", card_title=card_title)
 
     def _cm_on_apple_bridge_name(self, device_name: str) -> None:
-        self._logger.info(f"[AppleSheet] Naming step detected. Setting device name to '{device_name}'...")
+        self._logger.info(
+            f"[AppleSheet] Naming step detected. Setting device name to '{device_name}'...")
         field = (
                 self._cm_find_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_TEXT_FIELD_CHAIN)
-                or self._cm_find_displayed(AppiumBy.CLASS_NAME, constants.GHA_TEXT_EDIT_VIEW_CLASS_NAME)
+                or self._cm_find_displayed(AppiumBy.CLASS_NAME,
+                                           constants.GHA_TEXT_EDIT_VIEW_CLASS_NAME)
         )
         if field is None:
             self._logger.debug("[AppleSheet] Name field not found yet (sheet transitioning).")
             return
-        try:
-            field.clear()
+        target_name = (device_name or "").strip()
+        current_val = self._cm_read_text(field, ("value",)).strip()
+        already_typed = (
+                bool(target_name)
+                and (
+                        current_val == target_name
+                        or (
+                                getattr(self, "_cm_named_in_current_flow", False)
+                                and current_val in ("", target_name)
+                        )
+                )
+        )
+        if already_typed:
+            self._logger.info(
+                f"[AppleSheet] Name field already set to '{target_name}'; skipping clear() to prevent race."
+            )
+        else:
+            try:
+                field.clear()
+                time.sleep(0.5)
+                field.send_keys(device_name)
+                time.sleep(0.5)
+                self._cm_named_in_current_flow = True
+            except WebDriverException as e:
+                self._logger.debug(f"[AppleSheet] Naming field transition: {e}")
+                return
+        if self._cm_click_displayed(AppiumBy.IOS_CLASS_CHAIN, self.APPLE_KEYBOARD_DONE_CHAIN):
+            self._logger.info(
+                "[AppleSheet] Clicked keyboard 'Done'/'Return' to commit device name.")
             time.sleep(0.5)
-            field.send_keys(device_name)
-            time.sleep(0.5)
-        except WebDriverException as e:
-            self._logger.debug(f"[AppleSheet] Naming field transition: {e}")
-            return
         if self._cm_click_apple_sheet_button("Continue") or \
                 self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, "Continue"):
             self._logger.info("[AppleSheet] Submitted custom device name.")
@@ -364,7 +409,7 @@ class GHACommissioningPageObject(BasePage):
                     if _contains_any(card_title, ("added to",)):
                         self._cm_on_apple_added()
                         return True
-                    if "Bridge Name" in card_title:
+                    if "Bridge Name" in card_title or "Name" in card_title:
                         self._cm_on_apple_bridge_name(device_name)
                         return True
                     if self._cm_click_apple_add_button() or self._cm_click_apple_setup_button():
@@ -383,12 +428,15 @@ class GHACommissioningPageObject(BasePage):
         except AssertionError:
             raise
         except WebDriverException as e:
-            self._logger.debug(f"[AppleSheet] Transition in progress ({e.__class__.__name__}). Retrying...")
+            self._logger.debug(
+                f"[AppleSheet] Transition in progress ({e.__class__.__name__}). Retrying...")
             time.sleep(1.0)
             return True
+
     def _cm_dismiss_commissioning_and_go_to_devices(self) -> None:
         """Dismiss error dialogs / setup screens and return GHA to the Devices tab."""
-        self._logger.info("[Recovery] Dismissing commissioning screens and returning to Devices tab...")
+        self._logger.info(
+            "[Recovery] Dismissing commissioning screens and returning to Devices tab...")
         for _ in range(5):
             btn = self._cm_find_displayed(*self.RECOVERY_EXIT_BTN)
             if btn is None:
@@ -404,7 +452,8 @@ class GHACommissioningPageObject(BasePage):
             self._logger.info("[Recovery] Tapped Devices tab.")
             time.sleep(2.0)
 
-    def _cm_remove_paired_device(self, device_name: str, attempts: int = CM_REMOVE_ATTEMPTS) -> bool:
+    def _cm_remove_paired_device(self, device_name: str,
+                                 attempts: int = CM_REMOVE_ATTEMPTS) -> bool:
         """Restart GHA and remove the paired (offline) device from Home Settings before hardware reset."""
         if not device_name:
             self._logger.warning("[Recovery] No device_name specified for paired device removal.")
@@ -426,7 +475,8 @@ class GHACommissioningPageObject(BasePage):
                 GHADeviceSettingPage(self.driver).get_device_information()
                 if GHADeviceSettingPage(self.driver).click_remove_device_btn() is False:
                     raise RuntimeError(f"Failed to remove '{device_name}' in Device Settings")
-                self._logger.info(f"[Recovery] Successfully removed paired offline device '{device_name}'.")
+                self._logger.info(
+                    f"[Recovery] Successfully removed paired offline device '{device_name}'.")
                 return True
             except Exception as err:
                 self._logger.error(
@@ -435,7 +485,7 @@ class GHACommissioningPageObject(BasePage):
         return False
 
     def _cm_format_apple_sheet_context(self) -> str:
-        """Return a suffix with the Apple sheet's failure or last title if present."""
+        """Return a parenthetical suffix with the Apple sheet's failure or last title if present."""
         apple_fail = getattr(self, "_cm_apple_failure_title", "") or ""
         apple_last = getattr(self, "_cm_last_apple_card_title", "") or ""
         if apple_fail:
@@ -464,7 +514,8 @@ class GHACommissioningPageObject(BasePage):
         method = DeviceResetUtils.describe(device)
         try:
             reset_ok = DeviceResetUtils.reset_device(
-                device, smart_plug_reset=self.power_cycle_smart_plug, reason="commissioning recovery"
+                device, smart_plug_reset=self.power_cycle_smart_plug,
+                reason="commissioning recovery"
             )
         except Exception as e:
             self._logger.warning(f"[Recovery] {method} step error: {e}")
@@ -627,7 +678,8 @@ class GHACommissioningPageObject(BasePage):
                     return False
                 time.sleep(off_wait)
                 tile = self._cm_locate_plug_tile(plug_name) or tile
-            self._logger.info(f"[PowerCycle] Turning ON '{plug_name}', waiting {on_wait}s for boot...")
+            self._logger.info(
+                f"[PowerCycle] Turning ON '{plug_name}', waiting {on_wait}s for boot...")
             if not self._cm_tap_plug_tile(tile, plug_name, target_off=False):
                 return False
             time.sleep(on_wait)
@@ -639,8 +691,8 @@ class GHACommissioningPageObject(BasePage):
     def power_cycle_smart_plug(
             self,
             keywords: Optional[Sequence[str]] = None,
-            off_wait: float = 3.0,
-            on_wait: float = 5.0,
+            off_wait: float = 5.0,
+            on_wait: float = 8.0,
     ) -> bool:
         """Restart GHA, then power-cycle every plug/outlet device on the Devices tab.
         Returns:
@@ -656,9 +708,11 @@ class GHACommissioningPageObject(BasePage):
         time.sleep(2.0)
         plugs = self._cm_discover_plugs(keywords)
         if not plugs:
-            self._logger.error(f"[PowerCycle] No smart plug/outlet found matching {list(keywords)}.")
+            self._logger.error(
+                f"[PowerCycle] No smart plug/outlet found matching {list(keywords)}.")
             return False
-        self._logger.info(f"[PowerCycle] Found {len(plugs)} plug(s): {plugs}. Power-cycling sequentially...")
+        self._logger.info(
+            f"[PowerCycle] Found {len(plugs)} plug(s): {plugs}. Power-cycling sequentially...")
         results = []
         for idx, name in enumerate(plugs, start=1):
             self._logger.info(f"[PowerCycle] [{idx}/{len(plugs)}] Processing '{name}'...")
@@ -687,19 +741,24 @@ class GHACommissioningPageObject(BasePage):
         try:
             GHAWhereIsThisDevicePage(self.driver).select_room_or_add_custom(room_name=room_name)
         except Exception as e:
-            self._logger.warning(f"select_room_or_add_custom error: {e}. Falling back to first visible cell...")
-            cells = self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeCell[`visible == 1`]')
+            self._logger.warning(
+                f"select_room_or_add_custom error: {e}. Falling back to first visible cell...")
+            cells = self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN,
+                                      '**/XCUIElementTypeCell[`visible == 1`]')
             if cells:
                 cells[0].click()
-            self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, constants.GHA_NEXT_BTN_ACCESSIBILITY_ID)
+            self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID,
+                                     constants.GHA_NEXT_BTN_ACCESSIBILITY_ID)
         time.sleep(1.0)
         return False
+
     def _cm_on_device_connected(self, _headline: str) -> bool:
         self._logger.info("Device connected! Clicking Done...")
         try:
             GHADeviceConnectedPage(self.driver).click_done_btn()
         except Exception:
-            self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, constants.GHA_DONE_BTN_ACCESSIBILITY_ID)
+            self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID,
+                                     constants.GHA_DONE_BTN_ACCESSIBILITY_ID)
         return False
 
     def _cm_on_camera_activated(self, headline: str) -> bool:
@@ -709,7 +768,8 @@ class GHACommissioningPageObject(BasePage):
 
     def _cm_on_live_video(self, headline: str) -> bool:
         self._logger.info(f"Device paired and transitioned to '{headline}'!")
-        GHAYouShouldNowSeeLiveVideoPage(self.driver).handle_you_should_now_see_live_video_page_process()
+        GHAYouShouldNowSeeLiveVideoPage(
+            self.driver).handle_you_should_now_see_live_video_page_process()
         return True
 
     def _cm_on_uncertified_warning(self, headline: str) -> bool:
@@ -719,7 +779,8 @@ class GHACommissioningPageObject(BasePage):
         time.sleep(2.0)
         return False
 
-    def _cm_build_headline_handlers(self, room_name: str) -> List[Tuple[Tuple[str, ...], HeadlineHandler]]:
+    def _cm_build_headline_handlers(self, room_name: str) -> List[
+        Tuple[Tuple[str, ...], HeadlineHandler]]:
         """Ordered (keywords, handler) table; the first matching entry wins."""
         return [
             (("Watch setup video",), self._cm_on_watch_setup_video),
@@ -732,7 +793,7 @@ class GHACommissioningPageObject(BasePage):
         ]
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 900
+            self, device_name: str, room_name: str = "Attic", timeout: float = 600
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, and completion.
         Args:
@@ -747,10 +808,12 @@ class GHACommissioningPageObject(BasePage):
                 resetting the device). All final raises happen in THIS method so the reported
                 Failure Stage is COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
         """
-        self._logger.info(f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
+        self._logger.info(
+            f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
         self._cm_reset_device_name = device_name
         self._cm_last_apple_card_title: str = ""
         self._cm_apple_failure_title: str = ""
+        self._cm_named_in_current_flow: bool = False
         handlers = self._cm_build_headline_handlers(room_name)
         start_time = time.time()
         apple_sheet_active = False
@@ -760,7 +823,8 @@ class GHACommissioningPageObject(BasePage):
                     apple_sheet_active = True
                     continue
                 if apple_sheet_active:
-                    self._logger.info("[Commissioning] Apple sheet dismissed. Back in GHA foreground.")
+                    self._logger.info(
+                        "[Commissioning] Apple sheet dismissed. Back in GHA foreground.")
                     apple_sheet_active = False
                     time.sleep(1.0)
                 headline = self._cm_get_headline()
@@ -770,7 +834,8 @@ class GHACommissioningPageObject(BasePage):
                 self._logger.info(f"[{int(time.time() - start_time)}s] GHA Headline: '{headline}'")
                 if _contains_any(headline, self.FAILURE_KEYWORDS):
                     self._logger.error(f"[Commissioning] Failure headline detected: '{headline}'")
-                    is_paired_offline = _contains_any(headline, self.PAIRED_OFFLINE_FAILURE_KEYWORDS)
+                    is_paired_offline = _contains_any(headline,
+                                                      self.PAIRED_OFFLINE_FAILURE_KEYWORDS)
                     if is_paired_offline:
                         self._logger.warning(
                             f"[Commissioning] '{headline}' indicates device '{device_name}' was already added "
@@ -796,7 +861,8 @@ class GHACommissioningPageObject(BasePage):
                     return True
             self._logger.error(f"[Commissioning] Flow timed out after {int(timeout)}s!")
             apple_ctx = self._cm_format_apple_sheet_context()
-            raise AssertionError(self._cm_recover(f"Commissioning timed out after {int(timeout)}s{apple_ctx}"))
+            raise AssertionError(
+                self._cm_recover(f"Commissioning timed out after {int(timeout)}s{apple_ctx}"))
         except _CMAppleSheetFailure as e:
             gha_headline = self._cm_get_headline()
             if gha_headline and _contains_any(gha_headline, self.FAILURE_KEYWORDS):

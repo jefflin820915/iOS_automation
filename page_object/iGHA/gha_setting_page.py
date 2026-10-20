@@ -13,12 +13,61 @@ from utils import logging_utils
 
 class GHASettingsPage(BasePage):
     """Class for interacting with GHA Settings page, horizontal device cards, and settings navigation."""
-    PAGE_LOCATOR = (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeNavigationBar[`name == "Settings"`]')
+    PAGE_LOCATOR = (AppiumBy.IOS_CLASS_CHAIN,
+                    '**/XCUIElementTypeNavigationBar[`name == "Settings"`]')
     HORIZONTAL_CARDS_COLLECTION = "preferenceDisplayingCell_5_0"
     DEVICES_SECTION_LOCATOR = (
         AppiumBy.IOS_PREDICATE,
         'label CONTAINS "Devices, groups & rooms" OR name CONTAINS "preferenceDisplayingCell"'
     )
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Collapse newlines and multiple spaces into a single space."""
+        if not text:
+            return ""
+        return " ".join(text.replace("\n", " ").replace("\r", " ").split()).strip()
+
+    @classmethod
+    def _get_fallback_device_names(cls, device_name: str) -> List[str]:
+        """Return default GHA hardware-type fallback names when custom naming falls back during commissioning.
+        Examples:
+            '2K Battery Doorbell Camera' -> ['Doorbell']
+            'Ref2 Battery Camera'        -> ['Camera']
+        """
+        norm = cls._normalize_text(device_name).lower()
+        if not norm:
+            return []
+        if "doorbell" in norm and norm != "doorbell":
+            return ["Doorbell"]
+        if "camera" in norm and norm != "camera":
+            return ["Camera"]
+        return []
+
+    @classmethod
+    def _matches_exact_card_name(cls, raw_text: str, target_name: str) -> bool:
+        """Check whether a Settings card label represents a device whose title is exactly target_name.
+        Matches e.g. 'Doorbell, Attic', 'Doorbell\\nAttic', 'Camera, Attic', 'Camera\\nAttic',
+        while rejecting unrelated rows or other devices.
+        """
+        norm_target = cls._normalize_text(target_name).lower()
+        if not norm_target or not raw_text:
+            return False
+        first_part = cls._normalize_text(raw_text.replace("\n", ",").split(",")[0]).lower()
+        return first_part == norm_target or first_part == f"attic {norm_target}"
+
+    def _get_resolved_device_name(self) -> Optional[str]:
+        """Return previously resolved fallback/actual device name from self or session, if any."""
+        resolved = getattr(self, "_resolved_device_name", None)
+        if resolved:
+            return resolved
+        session = getattr(self, "session", None)
+        if session is not None:
+            return getattr(session, "_resolved_device_name", None)
+        set_page = getattr(self, "ghasettingspage", None)
+        if set_page is not None:
+            return getattr(set_page, "_resolved_device_name", None)
+        return None
 
     def _find_element(self, by: AppiumBy, locator_value: str) -> Optional[WebElement]:
         """Find an element using specified locator strategy with explicit wait."""
@@ -31,7 +80,7 @@ class GHASettingsPage(BasePage):
             return None
 
     def _find_elements(self, by: AppiumBy, value: str) -> List[WebElement]:
-        """Find an element using specified locator strategy with explicit wait."""
+        """Find elements using specified locator strategy with explicit wait."""
         try:
             return WebDriverWait(self.driver, 2.0).until(
                 EC.presence_of_all_elements_located((by, value))
@@ -40,18 +89,32 @@ class GHASettingsPage(BasePage):
             self._logger.error(f"Timed out waiting for element: by={by}, value='{value}'")
             return None
 
-    def _get_visible_device_card(self, device_name: str) -> Optional[WebElement]:
+    def _get_visible_device_card(
+            self, device_name: str, exact_card_match: bool = False
+    ) -> Optional[WebElement]:
         """Find a visible device card button matching device_name on the current viewport."""
         locators = [
-            f'**/XCUIElementTypeButton[`name == "categoryCard" AND label CONTAINS "{device_name}" AND visible == 1`]',
-            f'**/XCUIElementTypeCell[`label CONTAINS "{device_name}" AND visible == 1`]',
-            f'**/XCUIElementTypeStaticText[`name CONTAINS "{device_name}" AND visible == 1`]',
+            f'**/XCUIElementTypeButton[`name == "categoryCard" AND label CONTAINS[c] "{device_name}" AND visible == 1`]',
+            f'**/XCUIElementTypeCell[`label CONTAINS[c] "{device_name}" AND visible == 1`]',
+            f'**/XCUIElementTypeStaticText[`(name CONTAINS[c] "{device_name}" OR label CONTAINS[c] "{device_name}") AND visible == 1`]',
         ]
         for loc in locators:
             try:
                 elems = self._find_elements(AppiumBy.IOS_CLASS_CHAIN, loc)
+                if not elems:
+                    continue
                 for elem in elems:
                     if elem.is_displayed():
+                        if exact_card_match:
+                            raw_label = (
+                                    elem.get_attribute("label")
+                                    or elem.get_attribute("name")
+                                    or elem.get_attribute("value")
+                                    or elem.text
+                                    or device_name
+                            )
+                            if not GHASettingsPage._matches_exact_card_name(raw_label, device_name):
+                                continue
                         rect = elem.rect
                         window_width = self.driver.get_window_size().get("width", 375)
                         if 0 <= rect["x"] < window_width:
@@ -68,10 +131,11 @@ class GHASettingsPage(BasePage):
                 AppiumBy.IOS_CLASS_CHAIN,
                 '**/XCUIElementTypeButton[`name == "categoryCard" AND visible == 1`]'
             )
-            for elem in elems:
-                if elem.is_displayed():
-                    if label := (elem.get_attribute("label") or elem.get_attribute("name")):
-                        labels.append(label.strip())
+            if elems:
+                for elem in elems:
+                    if elem.is_displayed():
+                        if label := (elem.get_attribute("label") or elem.get_attribute("name")):
+                            labels.append(label.strip())
         except Exception:
             pass
         return labels
@@ -80,9 +144,11 @@ class GHASettingsPage(BasePage):
         """Perform a horizontal swipe on the device cards collection view."""
         self._logger.info(f"Swiping {direction} on horizontal device card list...")
         try:
-            collection = self._find_elements(AppiumBy.ACCESSIBILITY_ID, self.HORIZONTAL_CARDS_COLLECTION)
+            collection = self._find_elements(AppiumBy.ACCESSIBILITY_ID,
+                                             self.HORIZONTAL_CARDS_COLLECTION)
             if collection and collection[0].is_displayed():
-                self.driver.execute_script("mobile: swipe", {"direction": direction, "elementId": collection[0].id})
+                self.driver.execute_script("mobile: swipe",
+                                           {"direction": direction, "elementId": collection[0].id})
                 return
         except WebDriverException:
             pass
@@ -104,29 +170,66 @@ class GHASettingsPage(BasePage):
 
     def find_target_device(self, device_name: str, max_swipes: int = 10) -> Optional[WebElement]:
         """Search for a target device card by swiping horizontally across the cards list.
+        Supports fallback to default hardware names ('Doorbell' / 'Camera') if GHA failed
+        to sync the custom device name during commissioning.
         Args:
-            device_name (str): Visible name of the target device (e.g. 'Onn Wired Indoor Camera').
+            device_name (str): Visible name of the target device (e.g. '2K Battery Doorbell Camera').
             max_swipes (int): Maximum number of swipe attempts. Defaults to 10.
         Returns:
             Optional[WebElement]: The matching card WebElement if found, else None.
         """
         self._logger.info(f"Start searching for device card: '{device_name}' in Settings...")
+        resolved_name = GHASettingsPage._get_resolved_device_name(self)
+        has_pre_resolved_fallback = bool(
+            resolved_name and resolved_name.strip().lower() != device_name.strip().lower()
+        )
+        fallback_names: List[str] = []
+        if has_pre_resolved_fallback:
+            fallback_names.append(resolved_name)
+        for fb in GHASettingsPage._get_fallback_device_names(device_name):
+            if fb not in fallback_names:
+                fallback_names.append(fb)
         last_seen_labels: List[str] = []
+        swipes_done = 0
         for swipe_idx in range(max_swipes):
             if card_elem := self._get_visible_device_card(device_name):
-                self._logger.info(f"Target device card '{device_name}' is VISIBLE! (Swipe #{swipe_idx})")
+                self._logger.info(
+                    f"Target device card '{device_name}' is VISIBLE! (Swipe #{swipe_idx})")
                 return card_elem
+            if has_pre_resolved_fallback:
+                if fb_card := self._get_visible_device_card(resolved_name, exact_card_match=True):
+                    self._logger.warning(
+                        f"[Fallback Name] Target device card '{device_name}' found via pre-resolved fallback "
+                        f"'{resolved_name}' in Settings! (Swipe #{swipe_idx})"
+                    )
+                    return fb_card
             current_labels = self._get_visible_card_labels()
             if current_labels and current_labels == last_seen_labels and swipe_idx > 0:
                 self._logger.info("Reached the end of horizontal card list.")
                 break
             last_seen_labels = current_labels
             self._swipe_horizontal(direction="left")
+            swipes_done += 1
+        # Check fallback names at the current position before swiping right back
+        for fb_name in fallback_names:
+            if fb_card := self._get_visible_device_card(fb_name, exact_card_match=True):
+                self._logger.warning(
+                    f"[Fallback Name] Target '{device_name}' not found in Settings, "
+                    f"but default hardware card '{fb_name}' is VISIBLE! Selecting '{fb_name}'."
+                )
+                return fb_card
         self._logger.info(f"Device '{device_name}' not found swiping left. Swiping right back...")
-        for _ in range(3):
+        for _ in range(max(3, swipes_done)):
             self._swipe_horizontal(direction="right")
             if card_elem := self._get_visible_device_card(device_name):
                 return card_elem
+            for fb_name in fallback_names:
+                if fb_card := self._get_visible_device_card(fb_name, exact_card_match=True):
+                    self._logger.warning(
+                        f"[Fallback Name] Target '{device_name}' matched via fallback card "
+                        f"'{fb_name}' while swiping right in Settings!"
+                    )
+                    return fb_card
         self._logger.warning(f"Could not find device card '{device_name}' in Settings.")
         return None
 
@@ -162,7 +265,6 @@ class GHASettingsPage(BasePage):
         except Exception:
             return False
 
-
     def enter_devices_groups_rooms_page(self) -> bool:
         """Click on 'Devices, groups & rooms' row to open the full devices/rooms list."""
         self._logger.info("Entering 'Devices, groups & rooms' page...")
@@ -180,7 +282,8 @@ class GHASettingsPage(BasePage):
         """Click the close (X) button on the top-left of Settings navigation bar to return home."""
         self._logger.info("Navigating back to main page from Settings...")
         close_locators = [
-            (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeNavigationBar[`name == "Settings"`]/**/XCUIElementTypeButton[1]'),
+            (AppiumBy.IOS_CLASS_CHAIN,
+             '**/XCUIElementTypeNavigationBar[`name == "Settings"`]/**/XCUIElementTypeButton[1]'),
             (AppiumBy.ACCESSIBILITY_ID, "close"),
             (AppiumBy.ACCESSIBILITY_ID, "Close"),
             (AppiumBy.IOS_PREDICATE, 'label == "Close" OR name == "close"'),
