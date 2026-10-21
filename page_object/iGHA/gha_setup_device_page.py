@@ -17,7 +17,8 @@ class GHASetUpDevicePage(BasePage):
         "Onn Wired Indoor Camera": "5502:4233:1658",
         "Ref2 Battery Camera": "4738:21505:2329",
         "HD Wired Indoor Camera": "4738:20482:2443",
-        "Ref2 Battery Doorbell Camera": "4738:21009:1573",
+        "2K Battery Doorbell Camera": "4738:21009:1573",
+        "Onn Wired Indoor Camera New": "5502:4233:687",
     }
 
     @contextlib.contextmanager
@@ -37,12 +38,48 @@ class GHASetUpDevicePage(BasePage):
                 pass
 
     def _get_expected_identifier(self, target_name: str) -> Optional[str]:
-        """Return the hardcoded device identifier (subtitle) for known devices, or None."""
-        target_lower = target_name.strip().lower()
+        """Return the hardcoded device identifier (subtitle) for known devices, or None.
+        Checks exact key match first so 'Onn Wired Indoor Camera New' resolves to '5502:4233:687'
+        while 'Onn Wired Indoor Camera' resolves to '5502:4233:1658'.
+        """
+        target_norm = " ".join(target_name.strip().lower().split())
+        if not target_norm:
+            return None
         for dev_name, identifier in self.EXPECTED_DEVICE_IDENTIFIERS.items():
-            if target_lower == dev_name.strip().lower():
+            dev_norm = " ".join(dev_name.strip().lower().split())
+            if target_norm == dev_norm:
                 return identifier.strip().lower()
         return None
+
+    @staticmethod
+    def _is_name_contained(target_name: str, card_title: str, card_display: str = "") -> bool:
+        """Check whether target_name and card_title contain each other (case-insensitive).
+        Examples:
+            target_name='Onn Wired Indoor Camera New', card_title='Onn Wired Indoor Camera' -> True
+            target_name='Onn Wired Indoor Camera',     card_title='Onn Wired Indoor Camera' -> True
+            target_name='Ref2 Battery Doorbell Camera', card_title='2K Battery Doorbell Camera' -> True
+        """
+        target = " ".join(target_name.strip().lower().split())
+        title = " ".join(card_title.strip().lower().split())
+        display = " ".join(card_display.strip().lower().split())
+        if not target or not title:
+            return False
+        if target == title or target in title or title in target:
+            return True
+        if display and (target == display or target in display or display in target):
+            return True
+        # Handle model prefix aliases such as 'Ref2 Battery Doorbell Camera' vs '2K Battery Doorbell Camera'
+        target_words = target.split()
+        if len(target_words) >= 3:
+            core_suffix = " ".join(target_words[1:])
+            if len(core_suffix) >= 6 and core_suffix in title:
+                return True
+        title_words = title.split()
+        if len(title_words) >= 3:
+            title_suffix = " ".join(title_words[1:])
+            if len(title_suffix) >= 6 and title_suffix in target:
+                return True
+        return False
 
     def _get_window_size_safe(self) -> Tuple[int, int]:
         """Return (width, height) of the screen with safe defaults."""
@@ -199,24 +236,23 @@ class GHASetUpDevicePage(BasePage):
         return tuple(sig)
 
     def _is_target_device_match(self, target_name: str, item: Dict[str, Any]) -> bool:
-        """Check if a device item matches the target device name and its expected identifier."""
+        """Check if a device item matches the target device name (by containment) and its expected identifier."""
         target = target_name.strip().lower()
         title = item["title"].strip().lower()
         subtitle = item["subtitle"].strip().lower()
         display = item["display_name"].strip().lower()
+        name_matched = self._is_name_contained(target_name, title, display)
         expected_id = self._get_expected_identifier(target_name)
         if expected_id:
-            name_matched = (target == title) or (target in title) or (title in target)
-            id_matched = (expected_id == subtitle) or (expected_id in subtitle) or (
-                        expected_id in display)
+            id_matched = (
+                    (expected_id == subtitle)
+                    or (expected_id in subtitle)
+                    or (expected_id in display)
+            )
             return name_matched and id_matched
-        if target == title or target == subtitle or target == display:
+        if name_matched:
             return True
-        if target in title or title in target:
-            return True
-        if subtitle and (target in subtitle or subtitle in target):
-            return True
-        if target in display:
+        if subtitle and (target == subtitle or target in subtitle or subtitle in target):
             return True
         return False
 
@@ -258,7 +294,8 @@ class GHASetUpDevicePage(BasePage):
             self.driver.swipe(cx, start_y, cx, end_y, duration=650)
         except Exception as swipe_err:
             self._logger.debug(
-                f"Coordinate swipe down failed ({swipe_err}), falling back to mobile: swipe...")
+                f"Coordinate swipe down failed ({swipe_err}), falling back to mobile: swipe..."
+            )
             try:
                 self.driver.execute_script("mobile: swipe", {"direction": "up"})
             except Exception as fallback_err:
@@ -274,7 +311,8 @@ class GHASetUpDevicePage(BasePage):
             self.driver.swipe(cx, start_y, cx, end_y, duration=650)
         except Exception as swipe_err:
             self._logger.debug(
-                f"Coordinate swipe up failed ({swipe_err}), falling back to mobile: swipe...")
+                f"Coordinate swipe up failed ({swipe_err}), falling back to mobile: swipe..."
+            )
             try:
                 self.driver.execute_script("mobile: swipe", {"direction": "down"})
             except Exception as fallback_err:
@@ -310,15 +348,18 @@ class GHASetUpDevicePage(BasePage):
             try:
                 elem.click()
                 self._logger.info(
-                    f"Clicked device card '{display_name}' via elem.click() at cy={raw_cy}.")
+                    f"Clicked device card '{display_name}' via elem.click() at cy={raw_cy}."
+                )
                 tapped = True
             except (StaleElementReferenceException, WebDriverException) as click_err:
                 self._logger.warning(
-                    f"elem.click() on '{display_name}' failed ({click_err}); trying mobile: tap...")
+                    f"elem.click() on '{display_name}' failed ({click_err}); trying mobile: tap..."
+                )
                 try:
                     self.driver.execute_script("mobile: tap", {"x": cx, "y": safe_cy})
                     self._logger.info(
-                        f"Coordinate-tapped device card '{display_name}' at ({cx}, {safe_cy}).")
+                        f"Coordinate-tapped device card '{display_name}' at ({cx}, {safe_cy})."
+                    )
                     tapped = True
                 except Exception as tap_err:
                     self._logger.error(f"All tap methods failed for '{display_name}': {tap_err}")
@@ -385,7 +426,8 @@ class GHASetUpDevicePage(BasePage):
                 # If a previous upward nudge accidentally pushed the card above the viewport, nudge back down.
                 if last_nudge == "up" and attempt < 3:
                     self._logger.info(
-                        "Reversing previous upward nudge to pull target card back into view...")
+                        "Reversing previous upward nudge to pull target card back into view..."
+                    )
                     self._nudge_scroll_vertical(int(win_h * 0.35), int(win_h * 0.55))
                     last_nudge = "down"
                 else:
@@ -421,7 +463,7 @@ class GHASetUpDevicePage(BasePage):
                 ).lower()
                 expected_sub = target_item["subtitle"].lower()
                 if current_label and (
-                        target_item["title"].lower() not in current_label
+                        not self._is_name_contained(target_item["title"], current_label)
                         or (
                                 expected_sub and "," in current_label and expected_sub not in current_label)
                 ):
@@ -434,8 +476,9 @@ class GHASetUpDevicePage(BasePage):
                     f"Target device '{target_item['display_name']}' is in safe viewport "
                     f"(y={top_y}, cy={cy}, footer_top={footer_top_y})! Clicking now..."
                 )
-                if self._tap_card_with_fallbacks(elem, rect, target_item["display_name"],
-                                                 footer_top_y):
+                if self._tap_card_with_fallbacks(
+                        elem, rect, target_item["display_name"], footer_top_y
+                ):
                     return True
             except (StaleElementReferenceException, WebDriverException) as e:
                 self._logger.warning(
@@ -474,15 +517,18 @@ class GHASetUpDevicePage(BasePage):
                 if matched_item is None and self._is_target_device_match(device_name, item):
                     matched_item = item
             self._logger.info(
-                f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
+                f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}"
+            )
             if matched_item is not None:
                 self._logger.info(
-                    f"Target device '{target_desc}' detected! Attempting safe click...")
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}'! Attempting safe click..."
+                )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
                 else:
                     self._logger.info(
-                        "Target was pushed off-screen by newly discovered devices. Proceeding to Phase 2 scroll...")
+                        "Target was pushed off-screen by newly discovered devices. Proceeding to Phase 2 scroll..."
+                    )
                     break
             time.sleep(2)
         if not ran_phase1:
@@ -496,10 +542,12 @@ class GHASetUpDevicePage(BasePage):
                 if matched_item is None and self._is_target_device_match(device_name, item):
                     matched_item = item
             self._logger.info(
-                f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
+                f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}"
+            )
             if matched_item is not None:
                 self._logger.info(
-                    f"Target device '{target_desc}' detected at top! Attempting safe click...")
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' at top! Attempting safe click..."
+                )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
         self._logger.info("Phase 2: Scanning downwards through the device list...")
@@ -526,10 +574,12 @@ class GHASetUpDevicePage(BasePage):
                 if matched_item is None and self._is_target_device_match(device_name, item):
                     matched_item = item
             self._logger.info(
-                f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
+                f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}"
+            )
             if matched_item is not None:
                 self._logger.info(
-                    f"Target device '{target_desc}' found during downward scroll! Attempting safe click...")
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' during downward scroll! Attempting safe click..."
+                )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
             curr_viewport_sig = self._get_viewport_signature(items)
@@ -565,9 +615,11 @@ class GHASetUpDevicePage(BasePage):
                     matched_item = item
             if matched_item is not None:
                 self._logger.info(
-                    f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
+                    f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}"
+                )
                 self._logger.info(
-                    f"Target device '{target_desc}' found during upward scroll! Attempting safe click...")
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' during upward scroll! Attempting safe click..."
+                )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
             if self._is_at_top_of_page():
@@ -583,11 +635,14 @@ class GHASetUpDevicePage(BasePage):
                 discovered_device_names.append(name)
             if self._is_target_device_match(device_name, item):
                 self._logger.info(
-                    f"Target device '{target_desc}' found at top after Phase 3! Attempting safe click...")
+                    f"Target device '{target_desc}' matched card '{item['display_name']}' at top after Phase 3! Attempting safe click..."
+                )
                 if self._safe_click_target_device(device_name, initial_item=item):
                     return True
         self._logger.info(
-            f"Final Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}")
+            f"Final Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}"
+        )
         self._logger.error(
-            f"Could not find visible device '{target_desc}' after full bidirectional scan.")
+            f"Could not find visible device '{target_desc}' after full bidirectional scan."
+        )
         return False

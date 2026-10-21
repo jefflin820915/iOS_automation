@@ -129,6 +129,9 @@ class GHACommissioningPageObject(BasePage):
         "Eve Energy plug",
         "Meross",
         "Meross Mini Plug",
+        "Tapo Mini Plug",
+        "Tapo Mini",
+        "Tapo Mini plug"
     )
     PLUG_ON_VALUES = ("on", "1", "true")
     PLUG_OFF_VALUES = ("off", "0", "false")
