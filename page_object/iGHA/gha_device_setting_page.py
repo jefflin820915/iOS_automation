@@ -1,4 +1,4 @@
-"""Page object for handling the Device Settings page, mDNS discovery, and removing device on iOS."""
+"""Page object for handling the Device Settings page, device information extraction, and removing device on iOS."""
 import contextlib
 import re
 import time
@@ -13,9 +13,8 @@ from selenium.common.exceptions import (
 from common import constants
 from common.base_page import BasePage, PageNotPresentException
 from utils import logging_utils
-from utils.mdns_utils import MDNSUtils
 class GHADeviceSettingPage(BasePage):
-    """Class for managing device-specific settings, resolving mDNS, and removing device on iOS."""
+    """Class for managing device-specific settings, extracting device information, and removing device on iOS."""
     REMOVE_DEVICE_LOCATORS: List[Tuple[AppiumBy, str]] = [
         (AppiumBy.ACCESSIBILITY_ID, "Remove device"),
         (AppiumBy.ACCESSIBILITY_ID, "Unlink all"),
@@ -455,10 +454,9 @@ class GHADeviceSettingPage(BasePage):
             message=f"Failed to find 'Remove device' or 'Unlink all' button after {max_scrolls} swipes on Device Settings page."
         )
     def get_device_information(self) -> Dict[str, str]:
-        """Navigate into Device Information page, extract technical metadata, resolve mDNS, and return.
+        """Navigate into Device Information page, extract technical metadata, and return to Device Settings.
         Returns:
-            Dict[str, str]: Dictionary containing device_id, serial_number, software_version, device_ip,
-                            mdns_hostname, mdns_service_name, mdns_port, mdns_status
+            Dict[str, str]: Dictionary containing device_id, serial_number, software_version, and device_ip.
         """
         self._logger.info("Locating and clicking 'Device information'...")
         device_details = {
@@ -466,11 +464,6 @@ class GHADeviceSettingPage(BasePage):
             "serial_number": "UNKNOWN",
             "software_version": "UNKNOWN",
             "device_ip": "UNKNOWN",
-            "mdns_hostname": "UNKNOWN",
-            "mdns_service_name": "UNKNOWN",
-            "mdns_port": "UNKNOWN",
-            "mdns_status": "UNKNOWN",
-            "mdns_txt": "N/A"
         }
         # Clear any previous iteration's cached tech info first so a failed read never leaks stale data.
         self.device_tech_info = device_details
@@ -546,13 +539,7 @@ class GHADeviceSettingPage(BasePage):
                     device_details["device_ip"] = m_ip.group(1).strip()
             else:
                 self._logger.warning("Could not locate 'Device ID:' text on 'Device information' page.")
-            target_ip = device_details.get("device_ip", "")
-            if target_ip and target_ip != "UNKNOWN":
-                mdns_info = MDNSUtils.resolve_mdns_by_ip(target_ip=target_ip, timeout=3.5)
-                device_details.update(mdns_info)
-            else:
-                device_details["mdns_status"] = "NO_IP"
-            self._logger.info(f"Extracted Device & mDNS Information: {device_details}")
+            self._logger.info(f"Extracted Device Information: {device_details}")
             self.device_tech_info = device_details
             if hasattr(self, "driver") and self.driver:
                 self.driver.device_tech_info = device_details
