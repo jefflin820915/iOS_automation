@@ -772,9 +772,26 @@ class GHASession:
                         return False
             self._logger.error(f"Failed to stop GHA: {e}")
             return False
+
+    def ensure_device_unlocked(self) -> bool:
+        """Check if iOS screen is locked before a test run or GHA launch, and auto-unlock if needed."""
+        try:
+            if hasattr(self.driver, "is_locked") and self.driver.is_locked():
+                return BasePage._unlock_device_if_locked(self)
+            return True
+        except WebDriverException as e:
+            if self._is_wda_connection_error(e) and self._reconnect_wda_driver():
+                return BasePage._unlock_device_if_locked(self)
+            self._logger.warning(f"Failed to check lock state: {e}")
+            return False
+        except Exception as e:
+            self._logger.warning(f"Unexpected error checking lock state: {e}")
+            return False
+
     def start_gha(self, timeout: float = 10.0) -> bool:
         """Start GHA and ensure it is running in the active foreground."""
         self._gha_stopped_in_cleanup = False
+        self.ensure_device_unlocked()
         if self._is_gha_running():
             self._logger.info("GHA is already running in foreground.")
             return True
