@@ -27,6 +27,7 @@ from utils import csv_report
 
 logger = logging_utils.get_logger(__name__, "runner")
 
+
 def extract_failure_stage(exc: Exception) -> str:
     """Automatically extract failing method name from exception traceback without manual tagging."""
     if not exc or not hasattr(exc, "__traceback__"):
@@ -34,7 +35,8 @@ def extract_failure_stage(exc: Exception) -> str:
     tb_frames = traceback.extract_tb(exc.__traceback__)
     for frame in reversed(tb_frames):
         if "page_object" in frame.filename:
-            if frame.name not in ("find_element", "find_elements", "click", "send_keys", "__getattr__"):
+            if frame.name not in ("find_element", "find_elements", "click", "send_keys",
+                                  "__getattr__"):
                 return frame.name.upper()
         if "testcase" in frame.filename and frame.line:
             matches = re.findall(r"\.([a-zA-Z0-9_]+)\s*\(", frame.line)
@@ -43,27 +45,28 @@ def extract_failure_stage(exc: Exception) -> str:
             return frame.name.upper()
     return "UNKNOWN"
 
+
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
     DEFAULT_DEVICE_LOG_CAPTURE: Dict[str, Dict[str, Any]] = {
         "Ref2 Battery Camera": {
             "adb_serial": "S1B1D22607000063",
             "shell_command": "catch_log",
-            "file_suffix": "camera",                  # -> Main log/LOG_<ts>_camera.log
+            "file_suffix": "camera",  # -> Main log/LOG_<ts>_camera.log
             "stop_shell_command": "pkill -f catch_log",
             "reconnect_timeout_s": 300,
         },
         "HD Wired Indoor Camera": {
             "adb_serial": "S1W1D22605000105",
             "shell_command": "catch_log",
-            "file_suffix": "camera",                  # -> Main log/LOG_<ts>_camera.log
+            "file_suffix": "camera",  # -> Main log/LOG_<ts>_camera.log
             "stop_shell_command": "pkill -f catch_log",
             "reconnect_timeout_s": 300,
         },
         "2K Battery Doorbell Camera": {
             "adb_serial": "S1D1D32607000176",
             "shell_command": "catch_log",
-            "file_suffix": "camera",                  # -> Main log/LOG_<ts>_camera.log
+            "file_suffix": "camera",  # -> Main log/LOG_<ts>_camera.log
             "stop_shell_command": "pkill -f catch_log",
             "reconnect_timeout_s": 300,
         },
@@ -108,7 +111,7 @@ class MultiProjectTestRunner:
         self.syslog_collector: Optional[SyslogCollector] = None
         self.syslog_file_paths: List[str] = []
         self.device_log_collector: Optional[DeviceLogCollector] = None  # [DEVICE LOG]
-        self.device_log_file_paths: List[str] = []                      # [DEVICE LOG]
+        self.device_log_file_paths: List[str] = []  # [DEVICE LOG]
         self.failure_screenshots: List[str] = []
         self.screen_recordings: List[str] = []
         self.last_error_message: Optional[str] = None
@@ -151,7 +154,8 @@ class MultiProjectTestRunner:
         return re.sub(r'[\\/:*?"<>|]+', "-", text).strip() or "unknown"
 
     def _drive_reserve_case_folder(
-            self, iteration: int, test_status: str, device: Optional[str], class_name: str, test_name: str
+            self, iteration: int, test_status: str, device: Optional[str], class_name: str,
+            test_name: str
     ) -> Tuple[Optional[str], str]:
         """Create the Drive folder for this test case. Returns (folder_id, url) or (None, '')."""
         if not self.drive_uploader:
@@ -197,7 +201,8 @@ class MultiProjectTestRunner:
                         run_folder_id, extra_paths=session_files, label="session logs")
             logger.info(f"[DRIVE] Run folder: {run_url}")
             logger.info("[DRIVE] Waiting for uploads to finish... (Press Ctrl+C to skip)")
-            self.drive_uploader.wait_all(timeout_s=getattr(constants, "DRIVE_UPLOAD_WAIT_TIMEOUT_S", 1800))
+            self.drive_uploader.wait_all(
+                timeout_s=getattr(constants, "DRIVE_UPLOAD_WAIT_TIMEOUT_S", 1800))
         except KeyboardInterrupt:
             self.drive_uploader.abort()
             logger.warning("[DRIVE] Upload wait skipped by user.")
@@ -218,14 +223,16 @@ class MultiProjectTestRunner:
                 return cfg
         return None
 
-    def _start_device_log(self, device: Optional[str], case_main_log_dir: str, current_ts: str) -> Optional[str]:
+    def _start_device_log(self, device: Optional[str], case_main_log_dir: str, current_ts: str) -> \
+    Optional[str]:
         """Start extra device-side log capture (e.g. `adb shell catch_log`) for configured devices."""
         cfg = self._device_log_config_for(device)
         if not cfg:
             return None
         adb = shutil.which("adb")
         if not adb:
-            logger.warning(f"[DEVICE LOG] 'adb' not found in PATH; skipping device log for '{device}'.")
+            logger.warning(
+                f"[DEVICE LOG] 'adb' not found in PATH; skipping device log for '{device}'.")
             return None
         serial = str(cfg.get("adb_serial") or "").strip()
         base = [adb] + (["-s", serial] if serial else [])
@@ -309,7 +316,8 @@ class MultiProjectTestRunner:
             logger.info(f"       Assigned Room Name : {self.room_name}")
         if self.drive_uploader:
             logger.info(f"       Drive Run Folder   : {self.drive_run_folder_name}")
-        targets = self.device_names or ([self.device_name] if isinstance(self.device_name, str) else [])
+        targets = self.device_names or (
+            [self.device_name] if isinstance(self.device_name, str) else [])
         device_log_targets = [d for d in targets if self._device_log_config_for(d)]
         if device_log_targets:
             logger.info(f"       Device Log Capture : {', '.join(device_log_targets)}")
@@ -338,9 +346,11 @@ class MultiProjectTestRunner:
                 before = set(os.listdir(dest)) if os.path.isdir(dest) else set()
                 logging_utils.pull_ios_app_container(self.driver, target_bundle, dest)
                 after = set(os.listdir(dest)) if os.path.isdir(dest) else set()
-                self._container_paths = [os.path.join(dest, name) for name in sorted(after - before)]
+                self._container_paths = [os.path.join(dest, name) for name in
+                                         sorted(after - before)]
                 if self._container_paths:
-                    logger.info(f"[DRIVE] App container artifacts queued for upload: {self._container_paths}")
+                    logger.info(
+                        f"[DRIVE] App container artifacts queued for upload: {self._container_paths}")
             except Exception as e:
                 logger.error(f"Failed to pull {target_bundle} container: {e}")
             logger.info("Quitting Appium WebDriver...")
@@ -348,7 +358,8 @@ class MultiProjectTestRunner:
         if self.syslog_collector:
             self.syslog_collector.stop()
         self._stop_device_log()  # [DEVICE LOG]
-        for extra in [os.path.join(constants.SESSION_LOG_DIR, "Main log"), os.path.join(constants.SESSION_LOG_DIR, "Additional log")]:
+        for extra in [os.path.join(constants.SESSION_LOG_DIR, "Main log"),
+                      os.path.join(constants.SESSION_LOG_DIR, "Additional log")]:
             if os.path.exists(extra) and not os.listdir(extra):
                 try:
                     os.rmdir(extra)
@@ -371,6 +382,43 @@ class MultiProjectTestRunner:
         session_instance.pairing_code = initial_code
         session_instance.room_name = self.room_name
         return session_instance, test_classes
+
+    def _ensure_device_ready_before_run(self, session_instance: Any, iteration: int) -> None:
+        """Ensure the iOS device screen is unlocked and the target app is in the foreground before each run."""
+        if not self.driver:
+            return
+        logger.info(
+            f"[PRE-RUN CHECK] [Iter #{iteration}] Checking iOS screen lock and app state before test run...")
+        for attempt in range(1, 3):
+            try:
+                is_locked = bool(self.driver.is_locked())
+                if is_locked:
+                    logger.warning(
+                        f"[PRE-RUN CHECK] [Iter #{iteration}] iOS device is LOCKED before run. Unlocking...")
+                if hasattr(session_instance, "ensure_device_unlocked_and_ready"):
+                    session_instance.ensure_device_unlocked_and_ready(force=True)
+                else:
+                    if hasattr(session_instance, "_unlock_device_if_locked"):
+                        session_instance._unlock_device_if_locked()
+                    if hasattr(session_instance, "_resume_if_suspended"):
+                        session_instance._resume_if_suspended()
+                return
+            except Exception as err:
+                is_wda_err = (
+                        hasattr(session_instance, "_is_wda_connection_error")
+                        and session_instance._is_wda_connection_error(err)
+                )
+                if attempt == 1 and is_wda_err and hasattr(session_instance,
+                                                           "_reconnect_wda_driver"):
+                    logger.warning(
+                        f"[PRE-RUN CHECK] [Iter #{iteration}] WDA disconnected before run ({err}). "
+                        "Reconnecting WDA and retrying unlock check..."
+                    )
+                    if session_instance._reconnect_wda_driver():
+                        continue
+                logger.warning(
+                    f"[PRE-RUN CHECK] [Iter #{iteration}] Pre-run lock/app check warning: {err}")
+                return
 
     def run(self) -> None:
         """Execute test suite across iterations with dynamically isolated log directories per run."""
@@ -418,7 +466,8 @@ class MultiProjectTestRunner:
                         case_additional_log_dir = os.path.join(case_dir, "Additional log")
                         os.makedirs(case_main_log_dir, exist_ok=True)
                         os.makedirs(case_additional_log_dir, exist_ok=True)
-                        logging_utils.set_current_test_dirs(case_main_log_dir, case_additional_log_dir)
+                        logging_utils.set_current_test_dirs(case_main_log_dir,
+                                                            case_additional_log_dir)
                         logger.info(
                             f"\n>>> [RUNNING] [Iter #{iteration}] {class_name}.{test_name} "
                             f"(Device: '{current_device}', Code: '{current_pairing_code}')"
@@ -427,17 +476,21 @@ class MultiProjectTestRunner:
                         current_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                         case_syslog_path = None
                         if self.udid:
-                            case_syslog_path = os.path.join(case_main_log_dir, f"LOG_{current_ts}_syslog.log")
+                            case_syslog_path = os.path.join(case_main_log_dir,
+                                                            f"LOG_{current_ts}_syslog.log")
                             self.syslog_collector = SyslogCollector(self.udid, case_syslog_path)
                             self.syslog_collector.start()
                         self._start_device_log(current_device, case_main_log_dir, current_ts)
+                        self._ensure_device_ready_before_run(session_instance, iteration)
                         screen_recorder = ScreenRecorder(output_dir=case_additional_log_dir)
                         if self.driver:
                             try:
                                 if screen_recorder.start_recording(self.driver):
-                                    logger.info(f"[REC] Screen recording started for: {class_name}.{test_name}")
+                                    logger.info(
+                                        f"[REC] Screen recording started for: {class_name}.{test_name}")
                                 else:
-                                    logger.warning(f"[REC] Screen recording NOT started for: {class_name}.{test_name}")
+                                    logger.warning(
+                                        f"[REC] Screen recording NOT started for: {class_name}.{test_name}")
                             except Exception as rec_err:
                                 logger.warning(f"Failed to start screen recording: {rec_err}")
                         self.device_id = "UNKNOWN"
@@ -452,7 +505,8 @@ class MultiProjectTestRunner:
                         try:
                             test_method()
                             elapsed = time.time() - start_time
-                            logger.info(f">>> [PASS] [Iter #{iteration}] {class_name}.{test_name} ({elapsed:.2f}s)")
+                            logger.info(
+                                f">>> [PASS] [Iter #{iteration}] {class_name}.{test_name} ({elapsed:.2f}s)")
                             total_passed += 1
                         except Exception as e:
                             elapsed = time.time() - start_time
@@ -487,9 +541,11 @@ class MultiProjectTestRunner:
                                     if saved_video and os.path.exists(saved_video):
                                         self.screen_recordings.append(saved_video)
                                         video_filename = os.path.basename(saved_video)
-                                        logger.info(f"[REC] Screen recording saved: {video_filename}")
+                                        logger.info(
+                                            f"[REC] Screen recording saved: {video_filename}")
                                 except Exception as rec_stop_err:
-                                    logger.warning(f"Failed to save screen recording: {rec_stop_err}")
+                                    logger.warning(
+                                        f"Failed to save screen recording: {rec_stop_err}")
                             if self.syslog_collector:
                                 self.syslog_collector.stop()
                                 if case_syslog_path and os.path.exists(case_syslog_path):
@@ -498,47 +554,60 @@ class MultiProjectTestRunner:
                             self._stop_device_log()  # [DEVICE LOG]
                             if not self.env_info_collected and self.driver:
                                 try:
-                                    logger.info("[ENV INFO] First testcase completed, collecting full environment info...")
+                                    logger.info(
+                                        "[ENV INFO] First testcase completed, collecting full environment info...")
                                     env_info = log_all_version_information(self.driver)
                                     if isinstance(env_info, dict):
                                         if "gha_version" in env_info:
                                             self.gha_version = str(env_info["gha_version"])
-                                        if "device_info" in env_info and "platform_version" in env_info["device_info"]:
-                                            self.ios_version = str(env_info["device_info"]["platform_version"])
-                                        if "wifi_info" in env_info and isinstance(env_info["wifi_info"], dict):
+                                        if "device_info" in env_info and "platform_version" in \
+                                                env_info["device_info"]:
+                                            self.ios_version = str(
+                                                env_info["device_info"]["platform_version"])
+                                        if "wifi_info" in env_info and isinstance(
+                                                env_info["wifi_info"], dict):
                                             w_info = env_info["wifi_info"]
                                             self.wifi_ssid = str(w_info.get("ssid", self.wifi_ssid))
-                                            self.phone_ip = str(w_info.get("ip_address", self.phone_ip))
-                                            self.router_gateway = str(w_info.get("router_gateway", self.router_gateway))
-                                            self.subnet_mask = str(w_info.get("subnet_mask", self.subnet_mask))
+                                            self.phone_ip = str(
+                                                w_info.get("ip_address", self.phone_ip))
+                                            self.router_gateway = str(
+                                                w_info.get("router_gateway", self.router_gateway))
+                                            self.subnet_mask = str(
+                                                w_info.get("subnet_mask", self.subnet_mask))
                                     self.env_info_collected = True
                                     logger.info(
                                         f"[ENV INFO] Initialized: GHA {self.gha_version} | iOS {self.ios_version} | "
                                         f"SSID {self.wifi_ssid} | Phone IP {self.phone_ip} | Gateway {self.router_gateway}"
                                     )
                                 except Exception as env_err:
-                                    logger.warning(f"Failed to collect version information: {env_err}")
+                                    logger.warning(
+                                        f"Failed to collect version information: {env_err}")
                                     self.env_info_collected = True
                             elif self.driver:
                                 try:
-                                    logger.info(f"[ENV INFO] [Iter #{iteration}] Fetching latest Wi-Fi details for current run...")
+                                    logger.info(
+                                        f"[ENV INFO] [Iter #{iteration}] Fetching latest Wi-Fi details for current run...")
                                     w_info = get_wifi_information(self.driver)
                                     if isinstance(w_info, dict):
                                         self.wifi_ssid = str(w_info.get("ssid", self.wifi_ssid))
                                         self.phone_ip = str(w_info.get("ip_address", self.phone_ip))
-                                        self.router_gateway = str(w_info.get("router_gateway", self.router_gateway))
-                                        self.subnet_mask = str(w_info.get("subnet_mask", self.subnet_mask))
+                                        self.router_gateway = str(
+                                            w_info.get("router_gateway", self.router_gateway))
+                                        self.subnet_mask = str(
+                                            w_info.get("subnet_mask", self.subnet_mask))
                                     logger.info(
                                         f"[ENV INFO] [Iter #{iteration}] Updated Wi-Fi: SSID='{self.wifi_ssid}' | "
                                         f"Phone IP='{self.phone_ip}' | Gateway='{self.router_gateway}'"
                                     )
                                 except Exception as wifi_err:
-                                    logger.warning(f"Failed to refresh Wi-Fi info for iteration #{iteration}: {wifi_err}")
+                                    logger.warning(
+                                        f"Failed to refresh Wi-Fi info for iteration #{iteration}: {wifi_err}")
                             dev_tech = (
                                     getattr(self.driver, "device_tech_info", None)
                                     or getattr(test_instance, "device_tech_info", None)
                                     or getattr(session_instance, "device_tech_info", None)
-                                    or getattr(getattr(test_instance, "session", None), "device_tech_info", None)
+                                    or getattr(getattr(test_instance, "session", None),
+                                               "device_tech_info", None)
                             )
                             if isinstance(dev_tech, dict) and dev_tech:
                                 for key, val in dev_tech.items():
@@ -547,9 +616,11 @@ class MultiProjectTestRunner:
                                             self.device_id = str(val)
                                         elif key in ("serial_number", "serial_no", "Serial Number"):
                                             self.serial_number = str(val)
-                                        elif key in ("software_version", "Software Version", "firmware_version"):
+                                        elif key in ("software_version", "Software Version",
+                                                     "firmware_version"):
                                             self.software_version = str(val)
-                                        elif key in ("device_ip", "camera_ip", "Device IP", "ip_address"):
+                                        elif key in ("device_ip", "camera_ip", "Device IP",
+                                                     "ip_address"):
                                             self.device_ip = str(val)
                                 logger.info(
                                     f"[TARGET DEVICE CAPTURED] ID: {self.device_id} | SN: {self.serial_number} | "
@@ -596,16 +667,20 @@ class MultiProjectTestRunner:
                             try:
                                 csv_report.append_test_result_to_csv(**csv_kwargs)
                             except Exception as csv_err:
-                                logger.warning(f"Failed to record result to CSV / Google Sheet: {csv_err}")
-                            self._drive_upload_case_dir(drive_folder_id, case_dir, label=child_folder_name)
+                                logger.warning(
+                                    f"Failed to record result to CSV / Google Sheet: {csv_err}")
+                            self._drive_upload_case_dir(drive_folder_id, case_dir,
+                                                        label=child_folder_name)
         except KeyboardInterrupt:
-            logger.info("\n[INTERRUPT] Received KeyboardInterrupt (Ctrl+C). Terminating test execution gracefully...")
+            logger.info(
+                "\n[INTERRUPT] Received KeyboardInterrupt (Ctrl+C). Terminating test execution gracefully...")
         finally:
             total_duration = time.time() - session_start_time
             self.teardown()
             completed_iterations = iteration if self.count is None else min(iteration, self.count)
             logger.info("\n" + "=" * 65)
-            logger.info(f"Final Execution Summary ({completed_iterations} total iterations completed):")
+            logger.info(
+                f"Final Execution Summary ({completed_iterations} total iterations completed):")
             logger.info(f"  Total Test Executions : {total_runs}")
             logger.info(f"  Total Passed          : {total_passed}")
             logger.info(f"  Total Failed          : {total_failed}")
