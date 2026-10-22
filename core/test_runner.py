@@ -48,7 +48,7 @@ def extract_failure_stage(exc: Exception) -> str:
 
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
-    MIN_FREE_DISK_GB: float = 30.0
+    MIN_FREE_DISK_GB: float = 50.0
     DEFAULT_DEVICE_LOG_CAPTURE: Dict[str, Dict[str, Any]] = {
         "Ref2 Battery Camera": {
             "adb_serial": "S1B1D22607000063",
