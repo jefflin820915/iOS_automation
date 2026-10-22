@@ -48,6 +48,7 @@ def extract_failure_stage(exc: Exception) -> str:
 
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
+    MIN_FREE_DISK_GB: float = 30.0
     DEFAULT_DEVICE_LOG_CAPTURE: Dict[str, Dict[str, Any]] = {
         "Ref2 Battery Camera": {
             "adb_serial": "S1B1D22607000063",
@@ -133,6 +134,7 @@ class MultiProjectTestRunner:
         self.drive_run_folder_name: str = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_name}_{host_short}"
         self._drive_last_case_folder_id: Optional[str] = None
         self._container_paths: List[str] = []
+        self._completed_case_dirs: List[str] = []
         self._csv_accepts_drive_url: bool = self._csv_accepts_param("drive_url")
         if self.drive_uploader and not self._csv_accepts_drive_url:
             logger.warning(
@@ -152,6 +154,83 @@ class MultiProjectTestRunner:
     def _safe_drive_name(text: str) -> str:
         """Sanitize a string for use as a Drive folder name."""
         return re.sub(r'[\\/:*?"<>|]+', "-", text).strip() or "unknown"
+
+    @staticmethod
+    def _get_free_disk_gb(path: str) -> float:
+        """Return available free disk space in GiB for the filesystem containing path."""
+        check_path = path if os.path.exists(path) else os.path.dirname(path) or "."
+        if not os.path.exists(check_path):
+            check_path = "."
+        usage = shutil.disk_usage(check_path)
+        return usage.free / (1024 ** 3)
+
+    def _ensure_sufficient_disk_space(self, min_free_gb: Optional[float] = None) -> None:
+        """Check local disk space and automatically prune oldest logs/sessions if below threshold."""
+        threshold_gb = float(
+            min_free_gb
+            if min_free_gb is not None
+            else getattr(constants, "MIN_FREE_DISK_GB", self.MIN_FREE_DISK_GB)
+        )
+        session_dir = os.path.abspath(constants.SESSION_LOG_DIR)
+        try:
+            free_gb = self._get_free_disk_gb(session_dir)
+        except Exception as e:
+            logger.debug(f"[DISK GUARD] Unable to query disk usage: {e}")
+            return
+        if free_gb >= threshold_gb:
+            return
+        logger.warning(
+            f"[DISK GUARD] Low disk space detected: {free_gb:.2f} GB free "
+            f"(< {threshold_gb:.1f} GB threshold). Pruning old local logs/artifacts..."
+        )
+        logs_root = os.path.dirname(session_dir)
+        if os.path.isdir(logs_root):
+            try:
+                sibling_dirs = []
+                for entry in os.listdir(logs_root):
+                    full_path = os.path.abspath(os.path.join(logs_root, entry))
+                    if full_path == session_dir or not os.path.isdir(full_path):
+                        continue
+                    try:
+                        sibling_dirs.append((os.path.getmtime(full_path), full_path))
+                    except OSError:
+                        continue
+                sibling_dirs.sort(key=lambda item: item[0])
+                for _, old_session_path in sibling_dirs:
+                    if self._get_free_disk_gb(session_dir) >= threshold_gb:
+                        break
+                    try:
+                        shutil.rmtree(old_session_path, ignore_errors=True)
+                        logger.info(
+                            f"[DISK GUARD] Removed old session directory: {old_session_path}")
+                    except Exception as rm_err:
+                        logger.warning(
+                            f"[DISK GUARD] Failed to remove {old_session_path}: {rm_err}")
+            except Exception as scan_err:
+                logger.warning(
+                    f"[DISK GUARD] Error scanning sibling session directories: {scan_err}")
+        if self._get_free_disk_gb(session_dir) < threshold_gb and len(
+                self._completed_case_dirs) > 1:
+            if self.drive_uploader:
+                try:
+                    logger.info(
+                        "[DISK GUARD] Waiting for pending Drive uploads before pruning local case dirs...")
+                    self.drive_uploader.wait_all(timeout_s=120)
+                except Exception as wait_err:
+                    logger.warning(f"[DISK GUARD] Drive wait warning before prune: {wait_err}")
+            while len(self._completed_case_dirs) > 1 and self._get_free_disk_gb(
+                    session_dir) < threshold_gb:
+                oldest_case = self._completed_case_dirs.pop(0)
+                if os.path.isdir(oldest_case):
+                    try:
+                        shutil.rmtree(oldest_case, ignore_errors=True)
+                        logger.info(
+                            f"[DISK GUARD] Removed uploaded local case directory: {oldest_case}")
+                    except Exception as rm_err:
+                        logger.warning(
+                            f"[DISK GUARD] Failed to remove case dir {oldest_case}: {rm_err}")
+        new_free_gb = self._get_free_disk_gb(session_dir)
+        logger.info(f"[DISK GUARD] Disk space after cleanup: {new_free_gb:.2f} GB free.")
 
     def _drive_reserve_case_folder(
             self, iteration: int, test_status: str, device: Optional[str], class_name: str,
@@ -289,6 +368,7 @@ class MultiProjectTestRunner:
 
     def setup(self) -> None:
         """Initialize Appium session and configure implicit wait."""
+        self._ensure_sufficient_disk_space()
         mode_str = f"{self.count} times" if self.count else "INFINITE LOOP (Press Ctrl+C to stop)"
         logger.info("=" * 65)
         logger.info(f"       STARTING TEST SESSION FOR APP: {self.project_name}        ")
@@ -337,6 +417,7 @@ class MultiProjectTestRunner:
         logger.info("=" * 65)
         logger.info("            TEARDOWN & COLLECTING ARTIFACTS                  ")
         logger.info("=" * 65)
+        self._ensure_sufficient_disk_space()
         if self.driver:
             target_bundle = (
                 constants.iGHP_SAMPLE_APP_BUNDLE_ID if self.project_name == "ighp" else constants.GHA_BUNDLE_ID
@@ -383,43 +464,6 @@ class MultiProjectTestRunner:
         session_instance.room_name = self.room_name
         return session_instance, test_classes
 
-    def _ensure_device_ready_before_run(self, session_instance: Any, iteration: int) -> None:
-        """Ensure the iOS device screen is unlocked and the target app is in the foreground before each run."""
-        if not self.driver:
-            return
-        logger.info(
-            f"[PRE-RUN CHECK] [Iter #{iteration}] Checking iOS screen lock and app state before test run...")
-        for attempt in range(1, 3):
-            try:
-                is_locked = bool(self.driver.is_locked())
-                if is_locked:
-                    logger.warning(
-                        f"[PRE-RUN CHECK] [Iter #{iteration}] iOS device is LOCKED before run. Unlocking...")
-                if hasattr(session_instance, "ensure_device_unlocked_and_ready"):
-                    session_instance.ensure_device_unlocked_and_ready(force=True)
-                else:
-                    if hasattr(session_instance, "_unlock_device_if_locked"):
-                        session_instance._unlock_device_if_locked()
-                    if hasattr(session_instance, "_resume_if_suspended"):
-                        session_instance._resume_if_suspended()
-                return
-            except Exception as err:
-                is_wda_err = (
-                        hasattr(session_instance, "_is_wda_connection_error")
-                        and session_instance._is_wda_connection_error(err)
-                )
-                if attempt == 1 and is_wda_err and hasattr(session_instance,
-                                                           "_reconnect_wda_driver"):
-                    logger.warning(
-                        f"[PRE-RUN CHECK] [Iter #{iteration}] WDA disconnected before run ({err}). "
-                        "Reconnecting WDA and retrying unlock check..."
-                    )
-                    if session_instance._reconnect_wda_driver():
-                        continue
-                logger.warning(
-                    f"[PRE-RUN CHECK] [Iter #{iteration}] Pre-run lock/app check warning: {err}")
-                return
-
     def run(self) -> None:
         """Execute test suite across iterations with dynamically isolated log directories per run."""
         total_runs = 0
@@ -434,6 +478,7 @@ class MultiProjectTestRunner:
                 iteration += 1
                 if self.count is not None and iteration > self.count:
                     break
+                self._ensure_sufficient_disk_space()
                 current_device, current_pairing_code = self.get_iteration_targets(iteration)
                 session_instance.device_name = current_device
                 session_instance.pairing_code = current_pairing_code
@@ -481,7 +526,6 @@ class MultiProjectTestRunner:
                             self.syslog_collector = SyslogCollector(self.udid, case_syslog_path)
                             self.syslog_collector.start()
                         self._start_device_log(current_device, case_main_log_dir, current_ts)
-                        self._ensure_device_ready_before_run(session_instance, iteration)
                         screen_recorder = ScreenRecorder(output_dir=case_additional_log_dir)
                         if self.driver:
                             try:
@@ -671,6 +715,7 @@ class MultiProjectTestRunner:
                                     f"Failed to record result to CSV / Google Sheet: {csv_err}")
                             self._drive_upload_case_dir(drive_folder_id, case_dir,
                                                         label=child_folder_name)
+                            self._completed_case_dirs.append(case_dir)
         except KeyboardInterrupt:
             logger.info(
                 "\n[INTERRUPT] Received KeyboardInterrupt (Ctrl+C). Terminating test execution gracefully...")
