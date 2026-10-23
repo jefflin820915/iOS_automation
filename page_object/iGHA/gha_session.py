@@ -20,7 +20,8 @@ from page_object.iGHA.gha_choose_whether_you_want_to_turn_on_video_history impor
     GHAChooseWhetherYouWantToTurnOnVideoPage,
 )
 from page_object.iGHA.gha_commission_flow import GHACommissioningPageObject
-from page_object.iGHA.gha_connect_device_to_google_account_page import GHAConnectDeviceToGoogleAccountPage
+from page_object.iGHA.gha_connect_device_to_google_account_page import \
+    GHAConnectDeviceToGoogleAccountPage
 from page_object.iGHA.gha_device_page import GHADevicePage
 from page_object.iGHA.gha_device_setting_page import GHADeviceSettingPage
 from page_object.iGHA.gha_enter_pairing_code_page import GHAEnterPairingCodePage
@@ -50,6 +51,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from utils import logging_utils
 from utils.camera_reset_utils import DeviceResetUtils
+
 Locator = Tuple[str, str]
 IOS_PREDICATE_BY = getattr(AppiumBy, "IOS_PREDICATE", "-ios predicate string")
 
@@ -87,8 +89,10 @@ class GHASession:
     )
 
     SINGLE_DEVICE_NEXT_BTN_LOCATORS: Tuple[Locator, ...] = (
-        (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "Footer_actionBar" AND label == "Next"`]'),
-        (IOS_PREDICATE_BY, 'type == "XCUIElementTypeButton" AND (label == "Next" OR name == "Next")'),
+        (AppiumBy.IOS_CLASS_CHAIN,
+         '**/XCUIElementTypeButton[`name == "Footer_actionBar" AND label == "Next"`]'),
+        (IOS_PREDICATE_BY,
+         'type == "XCUIElementTypeButton" AND (label == "Next" OR name == "Next")'),
         (AppiumBy.ACCESSIBILITY_ID, "Next"),
     )
 
@@ -144,7 +148,8 @@ class GHASession:
         ),
         (
             AppiumBy.ACCESSIBILITY_ID,
-            getattr(constants, "GHA_ADD_PAGE_DEVICE_BTN_ACCESSIBILITY_ID", "preferenceDisplayingCell_0_0"),
+            getattr(constants, "GHA_ADD_PAGE_DEVICE_BTN_ACCESSIBILITY_ID",
+                    "preferenceDisplayingCell_0_0"),
         ),
         (
             IOS_PREDICATE_BY,
@@ -223,6 +228,7 @@ class GHASession:
             page_instance = cls(driver)
             page_instance.session = self
             setattr(self, attr_name, page_instance)
+
     def __getattr__(self, name: str) -> Any:
         """Automatically delegate method lookup across all registered pages."""
         if name.startswith("__") and name.endswith("__"):
@@ -301,7 +307,8 @@ class GHASession:
         """Return True if the multi-device 'Set up nearby devices' page is currently on screen."""
         if self._count_nearby_device_cards() >= 2:
             return True
-        return self._find_matching_element(self.NEARBY_DEVICES_PAGE_LOCATORS, allow_hidden=True) is not None
+        return self._find_matching_element(self.NEARBY_DEVICES_PAGE_LOCATORS,
+                                           allow_hidden=True) is not None
 
     def _is_single_device_page_present(self) -> bool:
         """Return True if the 'Single Device Found' page is currently on screen."""
@@ -316,17 +323,21 @@ class GHASession:
                 is not None
         ):
             return True
-        has_next = self._find_matching_element(self.SINGLE_DEVICE_NEXT_BTN_LOCATORS, allow_hidden=True) is not None
-        has_diff = self._find_matching_element(self.DIFFERENT_DEVICE_BTN_LOCATORS, allow_hidden=True) is not None
+        has_next = self._find_matching_element(self.SINGLE_DEVICE_NEXT_BTN_LOCATORS,
+                                               allow_hidden=True) is not None
+        has_diff = self._find_matching_element(self.DIFFERENT_DEVICE_BTN_LOCATORS,
+                                               allow_hidden=True) is not None
         return has_next and has_diff and card_count <= 1
 
     def _is_add_a_device_page_present(self) -> bool:
         """Return True if GHA is still on the 'Add a device' page (neither discovery result screen appeared)."""
         if self._is_single_device_page_present() or self._is_setup_nearby_devices_page_present():
             return False
-        if self._find_matching_element(self.ADD_A_DEVICE_PAGE_LOCATORS, allow_hidden=True) is not None:
+        if self._find_matching_element(self.ADD_A_DEVICE_PAGE_LOCATORS,
+                                       allow_hidden=True) is not None:
             return True
-        return self._find_matching_element(self.ADD_DEVICE_CLOSE_BTN_LOCATORS, allow_hidden=True) is not None
+        return self._find_matching_element(self.ADD_DEVICE_CLOSE_BTN_LOCATORS,
+                                           allow_hidden=True) is not None
 
     def _wait_for_discovery_result_page(self, timeout: Optional[float] = None) -> str:
         """Poll after entering 'Add a device' until 'Single Device Found' or 'Set up nearby devices' appears.
@@ -341,16 +352,19 @@ class GHASession:
         wait_timeout = (
             float(timeout)
             if timeout is not None
-            else float(getattr(constants, "ADD_DEVICE_PAGE_TIMEOUT_SECONDS", self.ADD_DEVICE_PAGE_TIMEOUT_SECONDS))
+            else float(getattr(constants, "ADD_DEVICE_PAGE_TIMEOUT_SECONDS",
+                               self.ADD_DEVICE_PAGE_TIMEOUT_SECONDS))
         )
         poll_interval = float(
-            getattr(constants, "ADD_DEVICE_POLL_INTERVAL_SECONDS", self.ADD_DEVICE_POLL_INTERVAL_SECONDS)
+            getattr(constants, "ADD_DEVICE_POLL_INTERVAL_SECONDS",
+                    self.ADD_DEVICE_POLL_INTERVAL_SECONDS)
         )
         deadline = time.time() + max(0.1, wait_timeout)
         saw_add_device_page = False
         while True:
             if self._is_setup_nearby_devices_page_present():
-                self._logger.info("[Device Selection] Detected multi-device 'Set up nearby devices' page.")
+                self._logger.info(
+                    "[Device Selection] Detected multi-device 'Set up nearby devices' page.")
                 return "nearby_list"
             if self._is_single_device_page_present():
                 self._logger.info("[Device Selection] Detected 'Single Device Found' page.")
@@ -368,6 +382,7 @@ class GHASession:
         if saw_add_device_page or self._is_add_a_device_page_present():
             return "add_device_stuck"
         return "unknown"
+
     def _close_add_device_page(self) -> bool:
         """Click the 'Close' button on the 'Add a device' page to return to the GHA Home/Devices screen."""
         self._logger.info("[Device Selection] Clicking 'Close' on 'Add a device' page...")
@@ -390,7 +405,8 @@ class GHASession:
                     )
                 clicked_any = True
             except Exception as click_err:
-                self._logger.debug(f"[Device Selection] Close button click fallback ({click_err}); trying tap...")
+                self._logger.debug(
+                    f"[Device Selection] Close button click fallback ({click_err}); trying tap...")
                 try:
                     rect = btn.rect
                     self.driver.execute_script(
@@ -408,7 +424,8 @@ class GHASession:
                     self._find_matching_element(self.ADD_DEVICE_CLOSE_BTN_LOCATORS) is None
                     and self._find_matching_element(self.HOME_READY_LOCATORS) is not None
             ):
-                self._logger.info("[Device Selection] Closed 'Add a device' page and returned to Home screen.")
+                self._logger.info(
+                    "[Device Selection] Closed 'Add a device' page and returned to Home screen.")
                 return True
         if not clicked_any and hasattr(self.driver, "execute_script"):
             self._logger.warning(
@@ -419,22 +436,26 @@ class GHASession:
                 time.sleep(1.5)
                 return True
             except Exception as tap_err:
-                self._logger.error(f"[Device Selection] Failed to close 'Add a device' page: {tap_err}")
+                self._logger.error(
+                    f"[Device Selection] Failed to close 'Add a device' page: {tap_err}")
                 return False
         return clicked_any
+
     def _open_add_device_page(self, re_enter: bool, swallow_errors: bool) -> bool:
         """Navigate into the 'Add a device' page, clicking '+' first when re-entering from Home."""
         try:
             need_click_plus = re_enter
             if not need_click_plus and hasattr(self.driver, "find_elements"):
                 add_cell_id = getattr(
-                    constants, "GHA_ADD_PAGE_DEVICE_BTN_ACCESSIBILITY_ID", "preferenceDisplayingCell_0_0"
+                    constants, "GHA_ADD_PAGE_DEVICE_BTN_ACCESSIBILITY_ID",
+                    "preferenceDisplayingCell_0_0"
                 )
                 add_sheet_open = (
                         self._find_matching_element(
                             (
                                 (AppiumBy.ACCESSIBILITY_ID, add_cell_id),
-                                (AppiumBy.ACCESSIBILITY_ID, "BottomSheetPresentationViewController"),
+                                (AppiumBy.ACCESSIBILITY_ID,
+                                 "BottomSheetPresentationViewController"),
                             ),
                             allow_hidden=True,
                         )
@@ -445,7 +466,8 @@ class GHASession:
                             (
                                 (
                                     AppiumBy.ACCESSIBILITY_ID,
-                                    getattr(constants, "GHA_ADD_DEVICES_BTN_ACCESSIBILITY_ID", "AddToHomeButton"),
+                                    getattr(constants, "GHA_ADD_DEVICES_BTN_ACCESSIBILITY_ID",
+                                            "AddToHomeButton"),
                                 ),
                                 (AppiumBy.ACCESSIBILITY_ID, "AddToHomeButton"),
                             )
@@ -455,7 +477,8 @@ class GHASession:
                 if plus_btn_visible and not add_sheet_open:
                     need_click_plus = True
             if need_click_plus:
-                self._logger.info("[Device Selection] Clicking '+' (Add devices) button to open 'Add a device'...")
+                self._logger.info(
+                    "[Device Selection] Clicking '+' (Add devices) button to open 'Add a device'...")
                 GHAHomePage.click_add_devices_button(self)
             nav_result = GHAAddPage.navigate_to_setup_device_page(self)
             if nav_result is False:
@@ -465,13 +488,16 @@ class GHASession:
         except Exception as nav_err:
             if not swallow_errors:
                 raise
-            self._logger.error(f"[Device Selection] Navigation to 'Set up device' failed: {nav_err}")
+            self._logger.error(
+                f"[Device Selection] Navigation to 'Set up device' failed: {nav_err}")
             return False
+
     @classmethod
     def _is_wda_connection_error(cls, exc: Exception) -> bool:
         """Return True if the exception indicates WDA (127.0.0.1:8100) or the Appium session disconnected."""
         msg = str(exc)
         return any(sig in msg for sig in cls.WDA_ERROR_SIGNATURES)
+
     def _reconnect_wda_driver(self) -> bool:
         """Rebuild the Appium WebDriver session in-place when WDA (127.0.0.1:8100) disconnects."""
         self._logger.warning(
@@ -495,8 +521,10 @@ class GHASession:
             )
             return True
         except Exception as reconnect_err:
-            self._logger.error(f"[WDA Reconnect] Failed to rebuild Appium WebDriver session: {reconnect_err}")
+            self._logger.error(
+                f"[WDA Reconnect] Failed to rebuild Appium WebDriver session: {reconnect_err}")
             return False
+
     def _get_device_grid_view(self):
         """Locate the device grid collection view or fallback scrollable container (0s implicit wait)."""
         default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
@@ -515,6 +543,7 @@ class GHASession:
             except Exception:
                 pass
         return None
+
     def _pull_down_to_refresh(self, element=None) -> None:
         """Perform a downward drag gesture on the element (or screen viewport) to trigger iOS pull-to-refresh."""
         rect: Optional[Dict[str, int]] = None
@@ -548,6 +577,7 @@ class GHASession:
         actions.w3c_actions.pointer_action.pause(0.5)
         actions.w3c_actions.pointer_action.pointer_up()
         actions.perform()
+
     def _dismiss_setup_new_devices_sheet(self, timeout: float = 10.0) -> bool:
         """Check for and dismiss the 'Set up new devices?' bottom sheet if it appears after launch.
         Args:
@@ -555,10 +585,12 @@ class GHASession:
         Returns:
             bool: True if the sheet was detected and dismissed, False otherwise.
         """
-        self._logger.info(f"Checking for 'Set up new devices?' bottom sheet (polling up to {timeout}s)...")
+        self._logger.info(
+            f"Checking for 'Set up new devices?' bottom sheet (polling up to {timeout}s)...")
         start_time = time.time()
         not_now_locators = [
-            (AppiumBy.XPATH, '//XCUIElementTypeButton[@name="actionBarSecondaryButton" or @name="Not now" or @label="Not now"]'),
+            (AppiumBy.XPATH,
+             '//XCUIElementTypeButton[@name="actionBarSecondaryButton" or @name="Not now" or @label="Not now"]'),
             (AppiumBy.XPATH, '//XCUIElementTypeStaticText[@name="Not now" or @label="Not now"]'),
             (AppiumBy.ACCESSIBILITY_ID, "actionBarSecondaryButton"),
             (AppiumBy.ACCESSIBILITY_ID, "Not now")
@@ -571,7 +603,8 @@ class GHASession:
                     for btn in btns:
                         try:
                             if btn.is_displayed():
-                                self._logger.info("Detected 'Set up new devices?' prompt. Clicking 'Not now'...")
+                                self._logger.info(
+                                    "Detected 'Set up new devices?' prompt. Clicking 'Not now'...")
                                 btn.click()
                                 time.sleep(1.0)
                                 return True
@@ -580,11 +613,14 @@ class GHASession:
             except Exception:
                 pass
             finally:
-                self.driver.implicitly_wait(getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0))
+                self.driver.implicitly_wait(
+                    getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0))
             time.sleep(0.5)
         self._logger.info("No 'Set up new devices?' bottom sheet detected. Continuing.")
         return False
-    def _emergency_recover_and_remove_device(self, attempts: int = EMERGENCY_REMOVE_ATTEMPTS) -> bool:
+
+    def _emergency_recover_and_remove_device(self,
+                                             attempts: int = EMERGENCY_REMOVE_ATTEMPTS) -> bool:
         """Restart GHA and remove the (already commissioned) device so the next run starts clean.
         Note: Hardware reset (smart plug on/off + ADB factory reset) is only run during 'post-test cleanup'.
         Returns:
@@ -606,27 +642,33 @@ class GHASession:
                 self.handle_remove_device()
                 removed = True
                 self._device_removed_in_emergency = True
-                self._logger.info("[Emergency Teardown] Device successfully removed during emergency cleanup.")
+                self._logger.info(
+                    "[Emergency Teardown] Device successfully removed during emergency cleanup.")
                 break
             except Exception as cleanup_err:
-                self._logger.error(f"[Emergency Teardown] Attempt {attempt}/{attempts} failed: {cleanup_err}")
+                self._logger.error(
+                    f"[Emergency Teardown] Attempt {attempt}/{attempts} failed: {cleanup_err}")
         try:
             self.refresh_gha_devices()
         except Exception as refresh_err:
             self._logger.warning(f"[Emergency Teardown] Refresh GHA devices failed: {refresh_err}")
         return removed
+
     def _start_wda_keepalive(self, interval_seconds: float = 15.0) -> threading.Event:
         """Send a lightweight query_app_state command every interval_seconds to prevent Appium's 60s newCommandTimeout."""
         stop_event = threading.Event()
+
         def _heartbeat() -> None:
             while not stop_event.wait(interval_seconds):
                 try:
                     self.driver.query_app_state(constants.GHA_BUNDLE_ID)
                 except Exception as hb_err:
                     self._logger.debug(f"[WDA KeepAlive] Heartbeat ignored error: {hb_err}")
+
         thread = threading.Thread(target=_heartbeat, name="wda-keepalive", daemon=True)
         thread.start()
         return stop_event
+
     def reset_target_device(self, reason: str = "post-test cleanup") -> bool:
         """Reset devices at post-test cleanup by executing BOTH Smart plug power-cycle AND ADB factory reset.
         Does not branch by device_name: every test cleanup runs:
@@ -644,31 +686,37 @@ class GHASession:
         )
         plug_ok = False
         try:
-            self._logger.info("[Device Reset] Step 1/2: Running Smart plug power-cycle (plug on/off)...")
+            self._logger.info(
+                "[Device Reset] Step 1/2: Running Smart plug power-cycle (plug on/off)...")
             GHACommissioningPageObject.power_cycle_smart_plug(self)
             plug_ok = True
             self._logger.info("[Device Reset] Step 1/2: Smart plug power-cycle SUCCESS.")
         except Exception as plug_err:
-            self._logger.error(f"[Device Reset] Step 1/2: Smart plug power-cycle FAILED: {plug_err}")
+            self._logger.error(
+                f"[Device Reset] Step 1/2: Smart plug power-cycle FAILED: {plug_err}")
         try:
             if self.stop_gha():
                 self._gha_stopped_in_cleanup = True
         except Exception:
             pass
-        self._logger.info("[Device Reset] Step 2/2: Running ADB factory reset (with WDA keep-alive)...")
+        self._logger.info(
+            "[Device Reset] Step 2/2: Running ADB factory reset (with WDA keep-alive)...")
         stop_keepalive = self._start_wda_keepalive(interval_seconds=15.0)
         try:
-            adb_target = device if DeviceResetUtils.get_config(device) is not None else "Ref2 Battery Camera"
+            adb_target = device if DeviceResetUtils.get_config(
+                device) is not None else "Ref2 Battery Camera"
             adb_ok = DeviceResetUtils.adb_factory_reset(adb_target, reason=reason)
         finally:
             stop_keepalive.set()
-        self._logger.info(f"[Device Reset] Step 2/2: ADB factory reset {'SUCCESS' if adb_ok else 'FAILED'}.")
+        self._logger.info(
+            f"[Device Reset] Step 2/2: ADB factory reset {'SUCCESS' if adb_ok else 'FAILED'}.")
         ok = plug_ok and adb_ok
         self._logger.info(
             f"[Device Reset] Result for '{device}' ({reason or 'n/a'}): "
             f"smart_plug={'SUCCESS' if plug_ok else 'FAILED'}, adb_reset={'SUCCESS' if adb_ok else 'FAILED'}."
         )
         return ok
+
     def refresh_gha_devices(self, timeout: float = 5.0) -> None:
         """Refresh all devices in the Google Home App (iOS).
         Ensures the Devices tab is active, performs a pull-to-refresh on the device grid
@@ -682,13 +730,15 @@ class GHASession:
             time.sleep(3)
             grid_view = self._get_device_grid_view()
             if grid_view is None:
-                self._logger.info("Device grid not immediately visible; navigating to Devices tab before refresh...")
+                self._logger.info(
+                    "Device grid not immediately visible; navigating to Devices tab before refresh...")
                 try:
                     devices_tab = getattr(getattr(constants, "TAB", None), "DEVICES", "Devices")
                     GHATabPage(self.driver).go_to_tab(devices_tab)
                     time.sleep(1.5)
                 except Exception as tab_err:
-                    self._logger.debug(f"GHATabPage.go_to_tab fallback ({tab_err}); trying direct Devices tab tap...")
+                    self._logger.debug(
+                        f"GHATabPage.go_to_tab fallback ({tab_err}); trying direct Devices tab tap...")
                     try:
                         self.driver.implicitly_wait(0)
                         btns = self.driver.find_elements(
@@ -729,13 +779,16 @@ class GHASession:
             self._logger.critical(f"Refresh too long..., timeout: {timeout}")
         except Exception as e:
             self._logger.error(f"Failed to refresh GHA devices: {e}")
+
     def _is_gha_running(self) -> bool:
         """Check if GHA is currently running in the active foreground."""
         try:
-            return self.driver.query_app_state(constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
+            return self.driver.query_app_state(
+                constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
         except WebDriverException as e:
             self._logger.error(f"Failed to query GHA app state: {e}")
             return False
+
     def stop_gha(self) -> bool:
         """Terminate the GHA application, with automatic WDA fallback and self-healing."""
         try:
@@ -757,7 +810,8 @@ class GHASession:
                 )
                 return True
             if self._is_wda_connection_error(e):
-                self._logger.warning(f"Failed to stop GHA due to WDA disconnect ({e}). Attempting WDA reconnect...")
+                self._logger.warning(
+                    f"Failed to stop GHA due to WDA disconnect ({e}). Attempting WDA reconnect...")
                 if self._reconnect_wda_driver():
                     try:
                         app_state = self.driver.query_app_state(constants.GHA_BUNDLE_ID)
@@ -821,6 +875,7 @@ class GHASession:
                 pass
         self._logger.error(f"Timed out after {timeout}s waiting for GHA.")
         return False
+
     def _restart_gha_to_home(self) -> None:
         """Terminate and relaunch GHA so navigation starts from the home screen."""
         self.stop_gha()
@@ -828,6 +883,7 @@ class GHASession:
         if not self.start_gha():
             self._logger.warning("[Device Selection] GHA did not come to foreground after restart.")
         time.sleep(3.0)
+
     def _try_select_target_device_once(self, target_name: str, swallow_errors: bool) -> bool:
         """One pass: open 'Add a device' and select the target (single-device screen or nearby list).
         If GHA stays on the 'Add a device' page too long without either the Single Device page
@@ -842,7 +898,8 @@ class GHASession:
             0, int(getattr(constants, "ADD_DEVICE_MAX_REENTRIES", self.ADD_DEVICE_MAX_REENTRIES))
         )
         wait_timeout = float(
-            getattr(constants, "ADD_DEVICE_PAGE_TIMEOUT_SECONDS", self.ADD_DEVICE_PAGE_TIMEOUT_SECONDS)
+            getattr(constants, "ADD_DEVICE_PAGE_TIMEOUT_SECONDS",
+                    self.ADD_DEVICE_PAGE_TIMEOUT_SECONDS)
         )
         total_entries = max_reentries + 1
         for entry_idx in range(1, total_entries + 1):
@@ -868,7 +925,9 @@ class GHASession:
             if page_state != "nearby_list":
                 self._logger.info("Checking for Single Device Found screen before checking list...")
                 try:
-                    if GHASingleDeviceFoundPage.handle_if_present(self, target_device_name=target_name, timeout=3.0):
+                    if GHASingleDeviceFoundPage.handle_if_present(self,
+                                                                  target_device_name=target_name,
+                                                                  timeout=3.0):
                         self._logger.info(
                             f"Target device '{target_name}' successfully confirmed and selected via Single Device screen!"
                         )
@@ -896,13 +955,16 @@ class GHASession:
             self._logger.info(
                 f"Single device not present or switched to list. Searching '{target_name}' in device list..."
             )
-            return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self, device_name=target_name)
+            return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self,
+                                                                           device_name=target_name)
         return False
+
     def _recover_device_discovery(self) -> None:
         """Relaunch GHA to home and refresh the device grid so discovery starts fresh.
         Note: Hardware reset (smart plug on/off + ADB factory reset) is only run during 'post-test cleanup'.
         """
-        self._logger.warning("[Device Selection] Recovering discovery: restarting GHA and refreshing devices...")
+        self._logger.warning(
+            "[Device Selection] Recovering discovery: restarting GHA and refreshing devices...")
         self._restart_gha_to_home()
         self.refresh_gha_devices()
         self._restart_gha_to_home()
@@ -921,7 +983,8 @@ class GHASession:
         max_attempts = max(1, int(getattr(constants, "DEVICE_SELECTION_MAX_ATTEMPTS", 2)))
         for attempt in range(1, max_attempts + 1):
             is_last = attempt == max_attempts
-            self._logger.info(f"[Device Selection] Attempt {attempt}/{max_attempts} for '{target_name}'...")
+            self._logger.info(
+                f"[Device Selection] Attempt {attempt}/{max_attempts} for '{target_name}'...")
             if self._try_select_target_device_once(target_name, swallow_errors=not is_last):
                 if attempt > 1:
                     self._logger.info(
@@ -969,6 +1032,16 @@ class GHASession:
         GHACommissioningPageObject(self.driver).complete_commissioning_and_pairing_flow(
             device_name=device_name, room_name=room_name
         )
+        if getattr(self.driver, "_commissioned_via_timeout_online", False):
+            self._logger.info(
+                "[Commissioning] Device was confirmed ONLINE on 'All devices' after timeout recovery; "
+                "skipping post-commissioning OOBE wizard steps and continuing test flow."
+            )
+            try:
+                setattr(self.driver, "_commissioned_via_timeout_online", False)
+            except Exception:
+                pass
+            return True
         step = "Video history"
         try:
             GHAChooseWhetherYouWantToTurnOnVideoPage.enable_video_history_and_proceed(self)
@@ -982,14 +1055,16 @@ class GHASession:
             GHAYourCameraDeviceIsReadyPage.click_done_btn(self)
             return True
         except OOBEInternalErrorException as e:
-            self._logger.error(f"[OOBE Failure] Internal error at '{step}' (OK already clicked): {e}")
+            self._logger.error(
+                f"[OOBE Failure] Internal error at '{step}' (OK already clicked): {e}")
             removed = self._emergency_recover_and_remove_device()
             raise AssertionError(
                 f"Commissioning OOBE failed at '{step}' due to internal error: {e} "
                 f"Emergency device removal: {'SUCCESS' if removed else 'FAILED'}."
             ) from e
         except Exception as e:
-            self._logger.error(f"[OOBE Failure] Unexpected error at '{step}': {e}. Removing commissioned device...")
+            self._logger.error(
+                f"[OOBE Failure] Unexpected error at '{step}': {e}. Removing commissioned device...")
             self._emergency_recover_and_remove_device()
             raise
 
@@ -1002,6 +1077,7 @@ class GHASession:
         session_obj._device_removed_in_emergency = False
         main_error: Optional[Exception] = None
         try:
+            self.refresh_gha_devices()
             GHADevicePage.is_device_exist_device_page(self, device_name=self.device_name)
             GHADevicePage.enter_device_page(self, device_name=self.device_name)
             GHACameraLivePage.verify_camera_live_stream(self)
@@ -1030,11 +1106,13 @@ class GHASession:
                         try:
                             self.refresh_gha_devices()
                         except Exception as refresh_exc:
-                            self._logger.warning(f"[Post-Test Cleanup] Refresh GHA devices failed: {refresh_exc}")
+                            self._logger.warning(
+                                f"[Post-Test Cleanup] Refresh GHA devices failed: {refresh_exc}")
             finally:
                 GHASession.reset_target_device(self, reason="post-test cleanup")
             if remove_error is not None and main_error is None:
                 raise remove_error
+
     def handle_remove_device(self) -> None:
         """Navigate to Settings and completely remove/unpair the camera device."""
         self._logger.info("Start test case: remove device")

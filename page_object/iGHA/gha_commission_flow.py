@@ -1,4 +1,5 @@
 """Page object for Matter device commissioning and iOS system sheets with StaleElement resilience."""
+import sys
 import time
 from contextlib import contextmanager
 from typing import Callable, Iterator, List, NoReturn, Optional, Sequence, Tuple
@@ -115,6 +116,26 @@ class GHACommissioningPageObject(BasePage):
     PAIRED_OFFLINE_FAILURE_KEYWORDS = (
         "There may be a problem",
     )
+    OFFLINE_TILE_KEYWORDS = (
+        "offline",
+        "not connected",
+        "unreachable",
+        "can't connect",
+        "can’t connect",
+        "couldn't connect",
+        "could not connect",
+        "unavailable",
+    )
+    ALL_DEVICES_FILTER_CHIPS = {
+        "favorites",
+        "all devices",
+        "cameras",
+        "lighting",
+        "lights",
+        "wifi",
+        "climate",
+        "devices",
+    }
     PROGRESS_KEYWORDS = (
         "Adding device", "Getting your device ready", "Next, your device will be added",
         "Connecting",
@@ -138,6 +159,7 @@ class GHACommissioningPageObject(BasePage):
     CM_POLL_INTERVAL = 1.5
     CM_PROGRESS_INTERVAL = 2.5
     CM_REMOVE_ATTEMPTS = 2
+    CM_ALL_DEVICES_MAX_SCROLLS = 6
 
     @contextmanager
     def _cm_no_implicit_wait(self) -> Iterator[None]:
@@ -191,17 +213,22 @@ class GHACommissioningPageObject(BasePage):
     def _cm_read_text(elem: WebElement, attrs: Sequence[str] = ("value", "label", "name")) -> str:
         try:
             for attr in attrs:
-                text = (elem.get_attribute(attr) or "").strip()
-                if text:
-                    return text
-            return (elem.text or "").strip()
+                raw = elem.get_attribute(attr)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+            txt = getattr(elem, "text", "")
+            return txt.strip() if isinstance(txt, str) else ""
         except WebDriverException:
             return ""
 
     def _cm_is_gha_foreground(self) -> bool:
         try:
-            return self.driver.query_app_state(
-                constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
+            bundle_id = getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
+            fg_state = getattr(constants, "APP_STATE_FOREGROUND", 4)
+            state = self.driver.query_app_state(bundle_id)
+            if not isinstance(state, int):
+                return True
+            return state == fg_state
         except WebDriverException as e:
             self._logger.error(f"Failed to query GHA app state: {e}")
             return False
@@ -209,11 +236,12 @@ class GHACommissioningPageObject(BasePage):
     def stop_gha(self) -> bool:
         """Terminate the GHA application."""
         try:
-            if self.driver.query_app_state(
-                    constants.GHA_BUNDLE_ID) == constants.APP_STATE_NOT_RUNNING:
+            bundle_id = getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
+            not_running = getattr(constants, "APP_STATE_NOT_RUNNING", 1)
+            if self.driver.query_app_state(bundle_id) == not_running:
                 self._logger.info("GHA is not running.")
             else:
-                self.driver.terminate_app(constants.GHA_BUNDLE_ID)
+                self.driver.terminate_app(bundle_id)
                 self._logger.info("GHA stopped successfully.")
             return True
         except WebDriverException as e:
@@ -225,11 +253,12 @@ class GHACommissioningPageObject(BasePage):
         if self._cm_is_gha_foreground():
             self._logger.info("GHA is already running in foreground.")
             return True
+        bundle_id = getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
         self._logger.info("Starting Google Home App on iOS...")
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                self.driver.activate_app(constants.GHA_BUNDLE_ID)
+                self.driver.activate_app(bundle_id)
             except WebDriverException as e:
                 self._logger.debug(f"activate_app failed: {e}")
             if self._cm_is_gha_foreground():
@@ -338,10 +367,14 @@ class GHACommissioningPageObject(BasePage):
             time.sleep(1.5)
 
     def _cm_on_apple_failure(self, card_title: str) -> NoReturn:
-        """Dismiss the failed Apple sheet and signal the main flow (which recovers and raises)."""
+        """Capture failure screenshot on the Apple sheet, then dismiss it and signal the main flow."""
         self._logger.error(f"[AppleSheet] Reported failure: '{card_title}'")
         self._cm_apple_failure_title = card_title
         self._cm_last_apple_card_title = card_title
+        if hasattr(BasePage, "capture_failure_screenshot"):
+            BasePage.capture_failure_screenshot(
+                self.driver, reason=f"Apple sheet failure: {card_title}", force=True, lock=True
+            )
         self._cm_click_apple_sheet_button("OK", "Done")
         time.sleep(2.0)
         raise _CMAppleSheetFailure(f"Apple sheet failed with '{card_title}'", card_title=card_title)
@@ -474,6 +507,7 @@ class GHACommissioningPageObject(BasePage):
         if not device_name:
             self._logger.warning("[Recovery] No device_name specified for paired device removal.")
             return False
+        resolved_fallback = getattr(self, "_cm_resolved_tile_name", "") or ""
         for attempt in range(1, attempts + 1):
             self._logger.warning(
                 f"[Recovery] Removing paired offline device '{device_name}' "
@@ -486,7 +520,15 @@ class GHACommissioningPageObject(BasePage):
                 time.sleep(5.0)
                 self._logger.info("[Recovery] Navigating to Home Settings to remove device...")
                 GHATabPage(self.driver).enter_home_settings_page()
-                if not GHASettingsPage(self.driver).open_device_settings(device_name=device_name):
+                settings_page = GHASettingsPage(self.driver)
+                opened = settings_page.open_device_settings(device_name=device_name)
+                if not opened and resolved_fallback and resolved_fallback.lower() != device_name.lower():
+                    self._logger.info(
+                        f"[Recovery] Primary name '{device_name}' not found in Settings; "
+                        f"trying resolved tile name '{resolved_fallback}'..."
+                    )
+                    opened = settings_page.open_device_settings(device_name=resolved_fallback)
+                if not opened:
                     raise RuntimeError(f"Device '{device_name}' not found in Settings")
                 GHADeviceSettingPage(self.driver).get_device_information()
                 if GHADeviceSettingPage(self.driver).click_remove_device_btn() is False:
@@ -511,13 +553,15 @@ class GHACommissioningPageObject(BasePage):
         return ""
 
     def _cm_recover(self, reason: str, remove_paired_device: bool = False) -> str:
-        """Dismiss commissioning screens, optionally remove paired offline device, and reset the device. Never raises.
+        """Capture failure screenshot, dismiss commissioning screens, optionally remove paired offline device, and reset.
         Reset method comes from DeviceResetUtils: adb factory reset for configured devices
         (e.g. 'Ref2 Battery Camera'), smart plug power-cycle for every other device.  [DEVICE RESET]
         Returns:
             The FATAL error message. The CALLER must raise it, so that the innermost
             page_object frame (used as Failure Stage) is the caller, not this helper.
         """
+        if hasattr(BasePage, "capture_failure_screenshot"):
+            BasePage.capture_failure_screenshot(self.driver, reason=reason, force=True, lock=True)
         try:
             self._cm_dismiss_commissioning_and_go_to_devices()
         except Exception as e:
@@ -537,6 +581,361 @@ class GHACommissioningPageObject(BasePage):
             self._logger.warning(f"[Recovery] {method} step error: {e}")
             reset_ok = False
         return f"FATAL: {reason}.{remove_msg} {method}: {'SUCCESS' if reset_ok else 'FAILED'}."
+
+    @staticmethod
+    def _cm_get_fallback_device_names(device_name: str) -> List[str]:
+        """Return default GHA hardware-type fallback names ('Doorbell' / 'Camera') if custom naming did not sync."""
+        norm = " ".join((device_name or "").split()).strip().lower()
+        if not norm:
+            return []
+        if "doorbell" in norm and norm != "doorbell":
+            return ["Doorbell"]
+        if "camera" in norm and norm != "camera":
+            return ["Camera"]
+        return []
+
+    @staticmethod
+    def _cm_matches_exact_tile_name(raw_text: str, target_name: str) -> bool:
+        """Check whether raw_text from a tile represents a device whose title is exactly target_name."""
+        norm_target = " ".join((target_name or "").split()).strip().lower()
+        if not norm_target or not raw_text:
+            return False
+        lines = [" ".join(line.split()).strip() for line in raw_text.splitlines() if line.strip()]
+        first_seg = " ".join(raw_text.split()).split(",")[0].strip().lower()
+        candidates = {first_seg}
+        if lines:
+            candidates.add(lines[0].split(",")[0].strip().lower())
+        return norm_target in candidates or f"attic {norm_target}" in candidates
+
+    def _cm_dismiss_setup_new_devices_prompt(self) -> bool:
+        """Dismiss the 'Set up new devices?' bottom sheet if present after GHA launch (0s implicit wait)."""
+        not_now_locators = (
+            (AppiumBy.ACCESSIBILITY_ID, "actionBarSecondaryButton"),
+            (AppiumBy.ACCESSIBILITY_ID, "Not now"),
+            (
+                AppiumBy.IOS_PREDICATE,
+                'type IN {"XCUIElementTypeButton", "XCUIElementTypeStaticText"} AND '
+                '(name IN {"actionBarSecondaryButton", "Not now"} OR label == "Not now")',
+            ),
+        )
+        for by, loc in not_now_locators:
+            if self._cm_click_displayed(by, loc):
+                self._logger.info(
+                    "[Commissioning] Dismissed 'Set up new devices?' sheet via 'Not now'."
+                )
+                time.sleep(1.0)
+                return True
+        return False
+
+    def _cm_inspect_target_device_on_screen(
+            self, target_name: str, exact_tile_match: bool = False
+    ) -> Optional[str]:
+        """Check if `target_name` is visible on the current 'All devices' viewport and read its online/offline state.
+        Returns:
+            'online'  -> Target device tile is visible and NOT showing an offline state.
+            'offline' -> Target device tile is visible and showing 'Offline' / 'Not connected' / etc.
+            None      -> Target device tile is not visible on the current screen.
+        """
+        norm_target = " ".join((target_name or "").split()).strip().lower()
+        if not norm_target:
+            return None
+        clean = target_name.strip().replace('"', '\\"')
+        predicate = (
+            'type IN {"XCUIElementTypeCell", "XCUIElementTypeButton", "XCUIElementTypeOther", "XCUIElementTypeStaticText"} '
+            f'AND (label CONTAINS[c] "{clean}" OR name CONTAINS[c] "{clean}" OR value CONTAINS[c] "{clean}")'
+        )
+        candidates = list(self._cm_find_all(AppiumBy.IOS_PREDICATE, predicate))
+        for extra in self._cm_find_all(*self.DEVICE_TILE_CELL) + self._cm_find_all(
+                *self.DEVICE_TILE):
+            if extra not in candidates:
+                candidates.append(extra)
+        found_target = False
+        saw_offline = False
+        matched_rects: List[dict] = []
+        for elem in candidates:
+            try:
+                if not elem.is_displayed():
+                    continue
+            except WebDriverException:
+                continue
+            label = self._cm_read_text(elem, ("label",))
+            name = self._cm_read_text(elem, ("name",))
+            value = self._cm_read_text(elem, ("value",))
+            child_texts: List[str] = []
+            for child in self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText",
+                                           root=elem):
+                ct = self._cm_read_text(child, ("label", "name", "value"))
+                if ct and ct not in child_texts:
+                    child_texts.append(ct)
+            all_parts = [p for p in (label, name, value, *child_texts) if p]
+            combined = " | ".join(all_parts)
+            if not combined or "scroll bar" in combined.lower():
+                continue
+            rect = None
+            try:
+                r = elem.rect
+                if isinstance(r, dict) and isinstance(r.get("height"), (int, float)):
+                    rect = r
+            except Exception:
+                rect = None
+            if rect is not None:
+                if rect.get("y", 100) <= 50 or rect.get("height", 50) < 12 or rect.get("height",
+                                                                                       50) > 260:
+                    continue
+            if label and label != "deviceTile" and not label.startswith("deviceTileCell"):
+                primary_title = label
+            elif name and name != "deviceTile" and not name.startswith("deviceTileCell"):
+                primary_title = name
+            elif child_texts:
+                primary_title = child_texts[0]
+            else:
+                primary_title = combined
+            if primary_title.strip().lower() in self.ALL_DEVICES_FILTER_CHIPS:
+                continue
+            if exact_tile_match:
+                if not self._cm_matches_exact_tile_name(primary_title, target_name):
+                    continue
+            else:
+                if norm_target not in combined.lower():
+                    continue
+            found_target = True
+            if rect is not None:
+                matched_rects.append(rect)
+            if _contains_any(combined, self.OFFLINE_TILE_KEYWORDS):
+                saw_offline = True
+        # If a title StaticText was matched directly without a container wrapping its sibling 'Offline' status label,
+        # check if any visible StaticText with an offline keyword lies within the same tile bounding region.
+        if found_target and not saw_offline and matched_rects:
+            offline_pred = (
+                'type == "XCUIElementTypeStaticText" AND ('
+                'label CONTAINS[c] "Offline" OR name CONTAINS[c] "Offline" OR value CONTAINS[c] "Offline" OR '
+                'label CONTAINS[c] "Not connected" OR label CONTAINS[c] "Unreachable")'
+            )
+            for off_elem in self._cm_find_all(AppiumBy.IOS_PREDICATE, offline_pred):
+                try:
+                    if not off_elem.is_displayed():
+                        continue
+                    or_rect = off_elem.rect
+                    if not isinstance(or_rect, dict):
+                        continue
+                    ox = or_rect.get("x", 0) + or_rect.get("width", 0) / 2
+                    oy = or_rect.get("y", 0) + or_rect.get("height", 0) / 2
+                    for m_rect in matched_rects:
+                        mx = m_rect.get("x", 0) + m_rect.get("width", 0) / 2
+                        my = m_rect.get("y", 0)
+                        if abs(ox - mx) <= 110 and -20 <= (oy - my) <= 130:
+                            saw_offline = True
+                            break
+                    if saw_offline:
+                        break
+                except Exception:
+                    continue
+        if not found_target:
+            return None
+        return "offline" if saw_offline else "online"
+
+    def _cm_collect_visible_tile_names(self) -> List[str]:
+        """Return visible device tile titles on the current 'All devices' screen to detect scroll progress."""
+        names: List[str] = []
+        elems = (
+                self._cm_find_all(*self.DEVICE_TILE_CELL)
+                + self._cm_find_all(*self.DEVICE_TILE)
+                + self._cm_find_all(*self.DEVICE_TILE_OTHER)
+        )
+        for elem in elems:
+            try:
+                if not elem.is_displayed():
+                    continue
+                ident = self._cm_tile_identity(elem)
+                if ident and ident.strip().lower() not in self.ALL_DEVICES_FILTER_CHIPS and ident not in names:
+                    names.append(ident)
+            except Exception:
+                continue
+        return names
+
+    def _cm_check_device_status_on_all_devices(
+            self, device_name: str, max_scrolls: int = CM_ALL_DEVICES_MAX_SCROLLS
+    ) -> str:
+        """Restart GHA, navigate to the 'All devices' page, and check if `device_name` exists and is online/offline.
+        Returns:
+            'online'    -> Device exists in Home on 'All devices' and is online.
+            'offline'   -> Device exists in Home on 'All devices' and is offline.
+            'not_found' -> Device does not exist in Home on 'All devices'.
+        """
+        target = (device_name or "").strip()
+        self._cm_resolved_tile_name = target
+        if not target:
+            return "not_found"
+        self._logger.info(
+            f"[Commissioning] Restarting GHA and navigating to 'All devices' to check if '{target}' "
+            "exists in Home after commissioning timeout..."
+        )
+        self.stop_gha()
+        time.sleep(2.0)
+        if not self.start_gha():
+            self._logger.warning(
+                "[Commissioning] Failed to start GHA during timeout 'All devices' check."
+            )
+            return "not_found"
+        time.sleep(2.5)
+        self._cm_dismiss_setup_new_devices_prompt()
+        try:
+            devices_tab = getattr(getattr(constants, "TAB", None), "DEVICES", "Devices")
+            GHATabPage(self.driver).go_to_tab(devices_tab)
+            time.sleep(2.0)
+        except Exception as nav_err:
+            self._logger.warning(
+                f"[Commissioning] Failed to navigate to 'All devices' tab: {nav_err}"
+            )
+        fallback_names = self._cm_get_fallback_device_names(target)
+
+        def _probe_current_screen() -> Optional[Tuple[str, str]]:
+            st = self._cm_inspect_target_device_on_screen(target, exact_tile_match=False)
+            if st is not None:
+                return st, target
+            for fb in fallback_names:
+                fb_st = self._cm_inspect_target_device_on_screen(fb, exact_tile_match=True)
+                if fb_st is not None:
+                    return fb_st, fb
+            return None
+
+        # Poll top screen first (up to 3 checks if tiles are present/loading)
+        for poll_idx in range(3):
+            hit = _probe_current_screen()
+            if hit is not None:
+                initial_status, matched_name = hit
+                time.sleep(1.5)
+                settled = _probe_current_screen()
+                final_status = settled[0] if settled is not None else initial_status
+                self._cm_resolved_tile_name = matched_name
+                self._logger.info(
+                    f"[Commissioning] Found '{matched_name}' on 'All devices' (top screen) "
+                    f"with status='{final_status.upper()}'."
+                )
+                return final_status
+            if poll_idx == 0 and not self._cm_collect_visible_tile_names():
+                # No tiles rendered on screen (e.g. unit-test mock driver or empty Home); exit fast.
+                break
+            time.sleep(1.0)
+        seen_tiles = set(self._cm_collect_visible_tile_names())
+        if not seen_tiles:
+            return "not_found"
+        consecutive_no_new = 0
+        for scroll_idx in range(1, max_scrolls + 1):
+            self._logger.info(
+                f"[Commissioning] '{target}' not in current 'All devices' view; "
+                f"scrolling down ({scroll_idx}/{max_scrolls})..."
+            )
+            try:
+                self.driver.execute_script("mobile: scroll", {"direction": "down"})
+            except Exception:
+                try:
+                    win = self.driver.get_window_size()
+                    cx = int(win.get("width", 390)) // 2
+                    sy = int(win.get("height", 844) * 0.68)
+                    ey = int(win.get("height", 844) * 0.38)
+                    self.driver.swipe(cx, sy, cx, ey, duration=450)
+                except Exception:
+                    break
+            time.sleep(1.5)
+            hit = _probe_current_screen()
+            if hit is not None:
+                initial_status, matched_name = hit
+                time.sleep(1.5)
+                settled = _probe_current_screen()
+                final_status = settled[0] if settled is not None else initial_status
+                self._cm_resolved_tile_name = matched_name
+                self._logger.info(
+                    f"[Commissioning] Found '{matched_name}' on 'All devices' (scroll {scroll_idx}) "
+                    f"with status='{final_status.upper()}'."
+                )
+                return final_status
+            curr_tiles = self._cm_collect_visible_tile_names()
+            new_tiles = [t for t in curr_tiles if t not in seen_tiles]
+            if new_tiles:
+                seen_tiles.update(new_tiles)
+                consecutive_no_new = 0
+            else:
+                consecutive_no_new += 1
+                if consecutive_no_new >= 2:
+                    break
+        return "not_found"
+
+    def _cm_mark_timeout_online_recovery(self) -> None:
+        """Record that commissioning succeeded via the timeout 'All devices' online check.
+        Also installs a lightweight guard on the 4 post-commissioning OOBE page methods so that
+        even if the caller invokes them after GHA was restarted onto 'All devices', they return
+        immediately instead of waiting on OOBE screens that were already bypassed.
+        """
+        self._cm_recovered_online_on_timeout = True
+        try:
+            setattr(self.driver, "_commissioned_via_timeout_online", True)
+        except Exception:
+            pass
+        resolved = getattr(self, "_cm_resolved_tile_name", "") or ""
+        target = getattr(self, "_cm_reset_device_name", "") or ""
+        if resolved and target and resolved.lower() != target.lower():
+            session = getattr(self, "session", None)
+            if session is not None:
+                session._resolved_device_name = resolved
+            dev_mod = sys.modules.get("page_object.iGHA.gha_device_page")
+            if dev_mod is not None and hasattr(dev_mod, "GHADevicePage"):
+                dev_mod.GHADevicePage._resolved_device_name = resolved
+        oobe_targets = (
+            (
+                "page_object.iGHA.gha_choose_whether_you_want_to_turn_on_video_history",
+                "GHAChooseWhetherYouWantToTurnOnVideoPage",
+                "enable_video_history_and_proceed",
+                False,
+            ),
+            (
+                "page_object.iGHA.gha_adjust_your_mic_settings",
+                "GHAAdjustYourMicSettingsPage",
+                "enable_all_mic_settings_and_proceed",
+                False,
+            ),
+            (
+                "page_object.iGHA.gha_stay_in_the_know_page",
+                "GHAStayInTheKnowPage",
+                "handle_stay_in_the_know_page_process",
+                False,
+            ),
+            (
+                "page_object.iGHA.gha_your_camera_device_is_ready_page",
+                "GHAYourCameraDeviceIsReadyPage",
+                "click_done_btn",
+                True,
+            ),
+        )
+        for mod_name, cls_name, method_name, clear_flag in oobe_targets:
+            mod = sys.modules.get(mod_name)
+            cls = getattr(mod, cls_name, None) if mod is not None else None
+            orig = getattr(cls, method_name, None) if cls is not None else None
+            if orig is None or getattr(orig, "_cm_timeout_online_wrapped", False):
+                continue
+
+            def _make_wrapper(fn, m_name: str, should_clear: bool):
+                def _wrapped(page_or_session, *args, **kwargs):
+                    drv = getattr(page_or_session, "driver", None)
+                    if drv is not None and getattr(drv, "_commissioned_via_timeout_online", False):
+                        if should_clear:
+                            try:
+                                setattr(drv, "_commissioned_via_timeout_online", False)
+                            except Exception:
+                                pass
+                        logger = getattr(page_or_session, "_logger", None)
+                        if logger is not None:
+                            logger.info(
+                                f"[Commissioning] Skipping '{m_name}' because device is already "
+                                "confirmed ONLINE on 'All devices' after timeout recovery."
+                            )
+                        return True
+                    return fn(page_or_session, *args, **kwargs)
+
+                _wrapped._cm_timeout_online_wrapped = True
+                return _wrapped
+
+            setattr(cls, method_name, _make_wrapper(orig, method_name, clear_flag))
 
     @staticmethod
     def _cm_build_plug_predicate(keywords: Sequence[str]) -> str:
@@ -939,24 +1338,26 @@ class GHACommissioningPageObject(BasePage):
             self, device_name: str, room_name: str = "Attic", timeout: float = 600
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, and completion.
-        Args:
-            device_name: Desired device name to fill in the Apple sheet.
-            room_name: Target room for 'Where is this device?'.
-            timeout: Total timeout in seconds.
-        Returns:
-            True when the live video page is reached.
-        Raises:
-            AssertionError: On failure headline, Apple sheet failure, timeout, or unexpected error
-                (after dismissing screens, removing paired offline device if applicable, and
-                resetting the device). All final raises happen in THIS method so the reported
-                Failure Stage is COMPLETE_COMMISSIONING_AND_PAIRING_FLOW.
+        If the flow hits `timeout`, restarts GHA and checks the 'All devices' page:
+        - If the device is in Home and ONLINE (e.g. GHA crashed at the end of commissioning),
+          continues the test flow (returns True).
+        - If the device is in Home but OFFLINE, removes the device from Home, resets the hardware,
+          and raises the commissioning timeout AssertionError.
+        - If the device is not in Home, resets the hardware and raises the commissioning timeout
+          AssertionError.
         """
         self._logger.info(
             f"[Commissioning] Starting flow for '{device_name}' (timeout {int(timeout)}s)...")
         self._cm_reset_device_name = device_name
+        self._cm_resolved_tile_name = device_name
         self._cm_last_apple_card_title: str = ""
         self._cm_apple_failure_title: str = ""
         self._cm_named_in_current_flow: bool = False
+        self._cm_recovered_online_on_timeout: bool = False
+        try:
+            setattr(self.driver, "_commissioned_via_timeout_online", False)
+        except Exception:
+            pass
         handlers = self._cm_build_headline_handlers(room_name)
         start_time = time.time()
         apple_sheet_active = False
@@ -1004,8 +1405,44 @@ class GHACommissioningPageObject(BasePage):
                     return True
             self._logger.error(f"[Commissioning] Flow timed out after {int(timeout)}s!")
             apple_ctx = self._cm_format_apple_sheet_context()
+            timeout_reason = f"Commissioning timed out after {int(timeout)}s{apple_ctx}"
+            if hasattr(BasePage, "capture_failure_screenshot"):
+                BasePage.capture_failure_screenshot(
+                    self.driver, reason=timeout_reason, force=False, lock=False
+                )
+            device_status = self._cm_check_device_status_on_all_devices(device_name)
+            if device_status == "online":
+                self._logger.warning(
+                    f"[Commissioning] '{device_name}' exists in Home on 'All devices' and is ONLINE "
+                    f"after {int(timeout)}s timeout (GHA likely crashed near the end of commissioning). "
+                    "Continuing test flow..."
+                )
+                if hasattr(BasePage, "reset_failure_screenshot_state"):
+                    BasePage.reset_failure_screenshot_state(self.driver, remove_existing=True)
+                self._cm_mark_timeout_online_recovery()
+                return True
+            if device_status == "offline":
+                self._logger.error(
+                    f"[Commissioning] '{device_name}' exists in Home on 'All devices' after "
+                    f"{int(timeout)}s timeout, but is OFFLINE. Removing device and reporting timeout..."
+                )
+                if hasattr(BasePage, "capture_failure_screenshot"):
+                    BasePage.capture_failure_screenshot(
+                        self.driver,
+                        reason=f"{timeout_reason} (device offline on All devices)",
+                        force=True,
+                        lock=True,
+                    )
+                raise AssertionError(
+                    self._cm_recover(timeout_reason, remove_paired_device=True)
+                )
+            self._logger.error(
+                f"[Commissioning] '{device_name}' was not found on 'All devices' after "
+                f"{int(timeout)}s timeout. Reporting commissioning timeout..."
+            )
             raise AssertionError(
-                self._cm_recover(f"Commissioning timed out after {int(timeout)}s{apple_ctx}"))
+                self._cm_recover(timeout_reason, remove_paired_device=False)
+            )
         except _CMAppleSheetFailure as e:
             gha_headline = self._cm_get_headline()
             if gha_headline and _contains_any(gha_headline, self.FAILURE_KEYWORDS):

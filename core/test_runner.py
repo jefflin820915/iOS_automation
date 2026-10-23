@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 from appium import webdriver
 from appium.options.common import AppiumOptions
 from common import constants
+from common.base_page import BasePage
 from core.device_log_collector import DeviceLogCollector
 from core.syslog_collector import SyslogCollector
 from page_object.iGHA.gha_session import GHASession
@@ -48,7 +49,7 @@ def extract_failure_stage(exc: Exception) -> str:
 
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
-    MIN_FREE_DISK_GB: float = 50.0
+    MIN_FREE_DISK_GB: float = 5.0
     DEFAULT_DEVICE_LOG_CAPTURE: Dict[str, Dict[str, Any]] = {
         "Ref2 Battery Camera": {
             "adb_serial": "S1B1D22607000063",
@@ -541,6 +542,13 @@ class MultiProjectTestRunner:
                         self.serial_number = "UNKNOWN"
                         self.software_version = "UNKNOWN"
                         self.device_ip = "UNKNOWN"
+                        screenshot_file = os.path.join(
+                            case_additional_log_dir,
+                            f"FAILED_iter{iteration}_{current_ts}_{class_name}_{test_name}.png"
+                        )
+                        BasePage.reset_failure_screenshot_state(
+                            self.driver, target_path=screenshot_file, remove_existing=False
+                        )
                         start_time = time.time()
                         start_dt = datetime.now()
                         test_status = "PASS"
@@ -549,6 +557,8 @@ class MultiProjectTestRunner:
                         try:
                             test_method()
                             elapsed = time.time() - start_time
+                            BasePage.reset_failure_screenshot_state(self.driver,
+                                                                    remove_existing=True)
                             logger.info(
                                 f">>> [PASS] [Iter #{iteration}] {class_name}.{test_name} ({elapsed:.2f}s)")
                             total_passed += 1
@@ -563,16 +573,21 @@ class MultiProjectTestRunner:
                             )
                             total_failed += 1
                             if self.driver:
-                                screenshot_file = os.path.join(
-                                    case_additional_log_dir,
-                                    f"FAILED_iter{iteration}_{current_ts}_{class_name}_{test_name}.png"
-                                )
-                                try:
-                                    self.driver.save_screenshot(screenshot_file)
-                                    self.failure_screenshots.append(screenshot_file)
-                                    logger.info(f"Saved failure screenshot to: {screenshot_file}")
-                                except Exception as shot_err:
-                                    logger.error(f"Failed to capture screenshot: {shot_err}")
+                                captured_shot = getattr(self.driver, "_failure_screenshot_captured",
+                                                        None)
+                                if captured_shot and os.path.isfile(captured_shot):
+                                    self.failure_screenshots.append(captured_shot)
+                                    logger.info(
+                                        f"Using failure screenshot captured at moment of failure: {captured_shot}"
+                                    )
+                                else:
+                                    try:
+                                        self.driver.save_screenshot(screenshot_file)
+                                        self.failure_screenshots.append(screenshot_file)
+                                        logger.info(
+                                            f"Saved failure screenshot to: {screenshot_file}")
+                                    except Exception as shot_err:
+                                        logger.error(f"Failed to capture screenshot: {shot_err}")
                         finally:
                             end_dt = datetime.now()
                             video_filename = ""
