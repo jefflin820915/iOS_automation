@@ -1077,7 +1077,6 @@ class GHASession:
         session_obj._device_removed_in_emergency = False
         main_error: Optional[Exception] = None
         try:
-            self.refresh_gha_devices()
             GHADevicePage.is_device_exist_device_page(self, device_name=self.device_name)
             GHADevicePage.enter_device_page(self, device_name=self.device_name)
             GHACameraLivePage.verify_camera_live_stream(self)
