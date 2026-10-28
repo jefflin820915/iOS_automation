@@ -92,7 +92,7 @@ class GHASetUpDevicePage(BasePage):
     def _get_footer_top_y(self) -> int:
         """Return the top y-coordinate of the sticky 'Set up a different device' footer container.
         On iOS GHA, the white footer container sits at roughly the bottom 22% of the screen (~y=650 on 844pt,
-        ~y=625 on 812pt), and any tap at y >= footer_top_y risks hitting 'Set up a different device'.
+        ~y=625 on 812pt), and any element or text at y >= footer_top_y is covered by the footer.
         """
         _, win_h = self._get_window_size_safe()
         default_footer_top = int(win_h * 0.77)  # ~650 on 844pt screen, ~625 on 812pt screen
@@ -117,20 +117,80 @@ class GHASetUpDevicePage(BasePage):
                 pass
         return default_footer_top
 
+    @staticmethod
+    def _compute_name_bounds(
+            top_y: int,
+            height: int,
+            footer_top_y: int,
+            title_rect: Optional[Dict[str, int]] = None,
+            has_visible_title_elem: bool = True,
+    ) -> Tuple[int, int, bool]:
+        """Compute (name_top_y, name_bottom_y, name_visible) for a device card.
+        On GHA 'Set up nearby devices', each ~223pt card renders the illustration image in the upper ~135pt
+        and the device name ('title') + identifier ('subtitle') in the bottom ~88pt (bottom_y - 88 .. bottom_y - 12).
+        A card's device name is only visible on the UI (`name_visible=True`) when that bottom text region is
+        completely above `footer_top_y - 10` (not covered by 'Set up a different device') and below the top header (y >= 90).
+        """
+        bottom_y = top_y + height
+        if height >= 140:
+            est_name_top = bottom_y - 88
+            est_name_bottom = bottom_y - 12
+        else:
+            est_name_top = max(top_y + 5, bottom_y - 40)
+            est_name_bottom = bottom_y - 5
+        if title_rect is not None:
+            t_top = int(title_rect.get("y", est_name_top))
+            t_bottom = t_top + int(title_rect.get("height", 24))
+            name_top_y = min(est_name_top, t_top)
+            name_bottom_y = max(est_name_bottom, t_bottom)
+        else:
+            name_top_y = est_name_top
+            name_bottom_y = est_name_bottom
+        name_visible = (
+                has_visible_title_elem
+                and top_y >= 60
+                and name_top_y >= 90
+                and name_bottom_y <= (footer_top_y - 10)
+        )
+        return name_top_y, name_bottom_y, name_visible
+
     def _get_all_visible_device_items(self) -> List[Dict[str, Any]]:
-        """Retrieve all currently VISIBLE device cards on screen with title, subtitle, and element.
-        Includes cards near the bottom of the scroll view whose top edge is above the
-        'Set up a different device' footer or cards partially clipped at the top header
-        even if XCUITest reports visible=false due to partial clipping.
+        """Retrieve all currently detected device cards on screen with title, subtitle, element,
+        and `name_visible` indicating whether the device name text is actually visible on the UI
+        (not covered by the sticky 'Set up a different device' footer or top header).
         """
         visible_items: List[Dict[str, Any]] = []
         _, win_h = self._get_window_size_safe()
+        footer_top_y = self._get_footer_top_y()
         footer_cutoff_y = int(win_h * 0.82)
         button_predicate = (
             'type == "XCUIElementTypeButton" AND '
             'name == "image-title-subtitle"'
         )
         with self._setup_no_implicit_wait():
+            title_meta: List[Tuple[str, Dict[str, int]]] = []
+            try:
+                raw_titles = self.driver.find_elements(
+                    AppiumBy.IOS_PREDICATE, 'name == "title" AND visible == 1'
+                )
+                for t_el in raw_titles:
+                    try:
+                        if not t_el.is_displayed():
+                            continue
+                        tr = dict(t_el.rect)
+                        tt = (
+                                t_el.get_attribute("value")
+                                or t_el.get_attribute("label")
+                                or t_el.text
+                                or ""
+                        ).strip()
+                        # Ignore mock echoes where find_elements returns the card button itself for every query
+                        if int(tr.get("height", 0)) < 120 and tt and "," not in tt:
+                            title_meta.append((tt.lower(), tr))
+                    except Exception:
+                        continue
+            except Exception:
+                pass
             try:
                 buttons = self.driver.find_elements(AppiumBy.IOS_PREDICATE, button_predicate)
                 for btn in buttons:
@@ -147,7 +207,7 @@ class GHASetUpDevicePage(BasePage):
                             is_vis = bool(btn.is_displayed())
                         except Exception:
                             is_vis = False
-                        # Accept the card if XCUITest marks it displayed OR if a substantial portion of it
+                        # Accept the card for discovery logging if XCUITest marks it displayed OR if a portion of it
                         # sits inside the scrollable viewport between the header (y=90) and footer_cutoff_y.
                         if not is_vis and not (top_y < footer_cutoff_y and bottom_y > 110):
                             continue
@@ -165,12 +225,34 @@ class GHASetUpDevicePage(BasePage):
                         title = title.strip()
                         subtitle = subtitle.strip()
                         display_name = f"{title} ({subtitle})" if subtitle else title
+                        matched_title_rect: Optional[Dict[str, int]] = None
+                        has_visible_title_elem = True
+                        if title_meta:
+                            has_visible_title_elem = False
+                            for t_text_lower, t_rect in title_meta:
+                                t_cy = int(t_rect["y"] + t_rect["height"] / 2)
+                                if (top_y - 10 <= t_cy <= bottom_y + 15) and (
+                                        t_text_lower == title.lower() or t_text_lower in title.lower()
+                                ):
+                                    matched_title_rect = t_rect
+                                    has_visible_title_elem = True
+                                    break
+                        name_top_y, name_bottom_y, name_visible = self._compute_name_bounds(
+                            top_y=top_y,
+                            height=height,
+                            footer_top_y=footer_top_y,
+                            title_rect=matched_title_rect,
+                            has_visible_title_elem=has_visible_title_elem,
+                        )
                         visible_items.append({
                             "title": title,
                             "subtitle": subtitle,
                             "display_name": display_name,
                             "element": btn,
                             "rect": dict(rect),
+                            "name_top_y": name_top_y,
+                            "name_bottom_y": name_bottom_y,
+                            "name_visible": name_visible,
                         })
                     except (StaleElementReferenceException, WebDriverException):
                         continue
@@ -199,10 +281,13 @@ class GHASetUpDevicePage(BasePage):
                             ).strip()
                             if not t_text:
                                 continue
-                            t_y = t_rect["y"]
+                            t_y = int(t_rect["y"])
+                            t_h = int(t_rect.get("height", 24))
                             matching_sub = ""
+                            sub_bottom = t_y + t_h
                             for s_elem in subtitle_elements:
-                                s_y = s_elem.rect["y"]
+                                s_rect = s_elem.rect
+                                s_y = int(s_rect["y"])
                                 if 0 <= (s_y - t_y) <= 60:
                                     matching_sub = (
                                             s_elem.get_attribute("value")
@@ -210,14 +295,20 @@ class GHASetUpDevicePage(BasePage):
                                             or s_elem.text
                                             or ""
                                     ).strip()
+                                    sub_bottom = max(sub_bottom,
+                                                     s_y + int(s_rect.get("height", 20)))
                                     break
                             display_name = f"{t_text} ({matching_sub})" if matching_sub else t_text
+                            name_visible = (t_y >= 90) and (sub_bottom <= footer_top_y - 10)
                             visible_items.append({
                                 "title": t_text,
                                 "subtitle": matching_sub,
                                 "display_name": display_name,
                                 "element": t_elem,
                                 "rect": dict(t_rect),
+                                "name_top_y": t_y,
+                                "name_bottom_y": sub_bottom,
+                                "name_visible": name_visible,
                             })
                         except (StaleElementReferenceException, WebDriverException):
                             continue
@@ -228,7 +319,7 @@ class GHASetUpDevicePage(BasePage):
     @staticmethod
     def _get_viewport_signature(items: List[Dict[str, Any]]) -> Tuple[Tuple[str, int], ...]:
         """Build a geometry signature of visible cards (display_name + quantized y) to detect scroll movement."""
-        sig: List[Tuple[str, int]] = []
+        sig: List[Tuple[str, int], ...] = []
         for item in items:
             rect = item.get("rect") or {}
             y_bucket = int(round(float(rect.get("y", 0)) / 15.0))
@@ -319,13 +410,15 @@ class GHASetUpDevicePage(BasePage):
                 self._logger.warning(f"mobile: swipe up failed: {fallback_err}")
 
     def _tap_card_with_fallbacks(
-            self, elem: WebElement, rect: Dict[str, int], display_name: str, footer_top_y: int
+            self,
+            target_name: str,
+            elem: WebElement,
+            rect: Dict[str, int],
+            display_name: str,
+            footer_top_y: int,
     ) -> bool:
-        """Click the device card element safely above the 'Set up a different device' footer.
-        IMPORTANT: In XCUITest, elem.click() always taps the geometric center (cx, cy) of the element.
-        If cy is near or below footer_top_y (e.g. y=608, cy=719), elem.click() will hit the
-        'Set up a different device' button! And if rect['y'] < 70, cy might be near the top header.
-        In those cases, we use coordinate tap clamped inside the safe viewport [95, footer_top_y - 30].
+        """Click the device card element only when its device name is visible above the footer,
+        and verify that a sudden nearby-device list update did not shift the card away without navigating.
         """
         safe_min_tap_y = max(95, int(rect["y"]) + 30)
         safe_max_tap_y = footer_top_y - 30
@@ -364,51 +457,60 @@ class GHASetUpDevicePage(BasePage):
                 except Exception as tap_err:
                     self._logger.error(f"All tap methods failed for '{display_name}': {tap_err}")
                     return False
-        # If the list was still decelerating from a scroll, the first tap may have only stopped inertia.
-        # Check after 1.0s if the same card is still visible on this page; if so, tap its safe coordinates.
+        # Wait 1.0s and inspect the screen:
+        # 1) If no nearby-device cards remain on screen, we successfully navigated to the next setup page!
+        # 2) If nearby-device cards are still on screen, check whether our target card ran away or is still visible.
         time.sleep(1.0)
+        post_click_items = self._get_all_visible_device_items()
+        if not post_click_items:
+            return tapped
         still_present = None
-        for item in self._get_all_visible_device_items():
-            if item["display_name"].strip().lower() == display_name.strip().lower():
+        for item in post_click_items:
+            if self._is_target_device_match(target_name, item):
                 still_present = item
                 break
-        if still_present is not None:
-            try:
-                r2 = still_present.get("rect") or still_present["element"].rect
-                cx2 = int(r2["x"] + r2["width"] / 2)
-                raw_cy2 = int(r2["y"] + r2["height"] / 2)
-                min_y2 = max(95, int(r2["y"]) + 30)
-                cy2 = max(min_y2, min(raw_cy2, safe_max_tap_y))
-                self._logger.info(
-                    f"Device card '{display_name}' still visible after initial click; "
-                    f"sending follow-up coordinate tap at ({cx2}, {cy2})..."
-                )
-                self.driver.execute_script("mobile: tap", {"x": cx2, "y": cy2})
-                time.sleep(0.8)
-            except Exception:
-                pass
+        if still_present is None:
+            # Other nearby device cards are still on screen, but our target card disappeared!
+            # That means the nearby devices list updated right as we clicked and pushed our target card off-screen.
+            self._logger.warning(
+                f"Nearby devices list updated during click and '{display_name}' shifted off-screen "
+                f"(still on 'Set up nearby devices' with {len(post_click_items)} visible card(s)). "
+                f"Continuing scan to re-locate '{display_name}'..."
+            )
+            return False
+        if not still_present.get("name_visible", False):
+            self._logger.warning(
+                f"After initial click, '{display_name}' shifted so its device name is now covered on UI "
+                f"(y={still_present['rect']['y']}, name_bottom={still_present.get('name_bottom_y')}, "
+                f"footer_top={footer_top_y}). Scrolling to reveal device name before re-clicking..."
+            )
+            return False
+        try:
+            r2 = still_present.get("rect") or still_present["element"].rect
+            cx2 = int(r2["x"] + r2["width"] / 2)
+            raw_cy2 = int(r2["y"] + r2["height"] / 2)
+            min_y2 = max(95, int(r2["y"]) + 30)
+            cy2 = max(min_y2, min(raw_cy2, safe_max_tap_y))
+            self._logger.info(
+                f"Device card '{display_name}' still visible with device name on UI after initial click; "
+                f"sending follow-up coordinate tap at ({cx2}, {cy2})..."
+            )
+            self.driver.execute_script("mobile: tap", {"x": cx2, "y": cy2})
+            time.sleep(0.8)
+        except Exception:
+            pass
         return tapped
 
     def _safe_click_target_device(
             self, target_name: str, initial_item: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Safely locate, bounds-check, and click the target device card.
-        Note on card geometry:
-        - Each device card on 'Set up nearby devices' is ~223pt tall.
-        - A card at y=452..481 (cy=563..592) has 140pt+ of its body above footer_top_y (~625) and its
-          center cy is already above footer_top_y, so it is IMMEDIATELY clickable without scrolling!
-        - Only when a card's top is too close to the footer (y > footer_top_y - 80, e.g. y=608) or its
-          center cy > footer_top_y - 20 (e.g. cy=719) do we gently nudge-scroll it up (~150pt over 800ms).
+        """Safely locate, verify that the device name is visible on the UI (not covered by the footer or header),
+        confirm list position stability against sudden nearby-device list updates, and click the target device card.
         Returns:
-            bool: True if clicked successfully, False if not visible or shifted out.
+            bool: True if clicked and navigated successfully, False if not visible or shifted out.
         """
         _, win_h = self._get_window_size_safe()
         footer_top_y = self._get_footer_top_y()
-        # A card is safe to click immediately if its center is at least 20pt above footer_top_y
-        # (e.g. cy <= 605 when footer_top=625) AND at least 80pt of the card top is above footer_top_y
-        # (e.g. y <= 545 when footer_top=625). This covers y=481, cy=592 and y=452, cy=563 directly!
-        safe_bottom_cy = footer_top_y - 20
-        safe_max_top_y = footer_top_y - 80
         last_nudge: Optional[str] = None
         for attempt in range(4):
             items = self._get_all_visible_device_items()
@@ -423,7 +525,6 @@ class GHASetUpDevicePage(BasePage):
                 self._logger.warning(
                     f"Target '{target_name}' not visible on click attempt {attempt + 1}/4. Retrying..."
                 )
-                # If a previous upward nudge accidentally pushed the card above the viewport, nudge back down.
                 if last_nudge == "up" and attempt < 3:
                     self._logger.info(
                         "Reversing previous upward nudge to pull target card back into view..."
@@ -437,26 +538,72 @@ class GHASetUpDevicePage(BasePage):
             try:
                 rect = target_item.get("rect") or elem.rect
                 top_y = int(rect["y"])
-                cy = int(rect["y"] + rect["height"] / 2)
-                card_bottom = int(rect["y"] + rect["height"])
-                if (cy > safe_bottom_cy or top_y > safe_max_top_y) and attempt < 2:
-                    self._logger.info(
-                        f"Target '{target_item['display_name']}' overlaps or is too close to 'Set up a different device' "
-                        f"footer (y={top_y}, cy={cy}, bottom={card_bottom}, footer_top={footer_top_y}). "
-                        f"Nudging up gently to pull card into safe view (attempt {attempt + 1}/2)..."
-                    )
-                    # Gentle ~150pt drag (56% -> 38%) over 800ms so UIScrollView does not inertia-fling the card off-screen
-                    self._nudge_scroll_vertical(int(win_h * 0.56), int(win_h * 0.38))
-                    last_nudge = "up"
-                    continue
-                if (top_y < 50 or cy < 110) and attempt < 2:
-                    self._logger.info(
-                        f"Target '{target_item['display_name']}' clipped at top edge (y={top_y}, cy={cy}). "
-                        f"Nudging down gently..."
-                    )
-                    self._nudge_scroll_vertical(int(win_h * 0.35), int(win_h * 0.53))
-                    last_nudge = "down"
-                    continue
+                height = int(rect["height"])
+                cy = int(top_y + height / 2)
+                card_bottom = int(top_y + height)
+                name_top_y = int(target_item.get("name_top_y", card_bottom - 88))
+                name_bottom_y = int(target_item.get("name_bottom_y", card_bottom - 12))
+                name_visible = bool(target_item.get("name_visible", False))
+                # Requirement: Device name MUST be visible on the UI (not covered by 'Set up a different device' footer)
+                if not name_visible and attempt < 3:
+                    if name_bottom_y > footer_top_y - 10:
+                        self._logger.info(
+                            f"Target '{target_item['display_name']}' is detected on screen, but its device name is "
+                            f"covered by the 'Set up a different device' footer (y={top_y}, bottom={card_bottom}, "
+                            f"name_bottom={name_bottom_y}, footer_top={footer_top_y}). "
+                            f"Scrolling up gently so device name is visible on UI (attempt {attempt + 1}/3)..."
+                        )
+                        # Calculate gentle drag distance to pull name_bottom_y ~65pt above footer_top_y
+                        needed_shift = max(135, min(210, name_bottom_y - (footer_top_y - 65)))
+                        start_y = int(win_h * 0.56)
+                        end_y = max(int(win_h * 0.25), start_y - needed_shift)
+                        self._nudge_scroll_vertical(start_y, end_y)
+                        last_nudge = "up"
+                        continue
+                    if top_y < 60 or name_top_y < 90:
+                        self._logger.info(
+                            f"Target '{target_item['display_name']}' is clipped near the top header "
+                            f"(y={top_y}, name_top={name_top_y}). Nudging down gently (attempt {attempt + 1}/3)..."
+                        )
+                        self._nudge_scroll_vertical(int(win_h * 0.35), int(win_h * 0.53))
+                        last_nudge = "down"
+                        continue
+                # Pre-click stability re-verification: pause briefly and re-check the live UI to ensure
+                # the nearby devices list did not suddenly update and shift the card or cover its name.
+                time.sleep(0.4)
+                fresh_items = self._get_all_visible_device_items()
+                if fresh_items:
+                    fresh_target = None
+                    for f_item in fresh_items:
+                        if self._is_target_device_match(target_name, f_item):
+                            fresh_target = f_item
+                            break
+                    if fresh_target is None:
+                        self._logger.warning(
+                            f"Target '{target_item['display_name']}' disappeared from viewport right before click "
+                            f"(nearby devices list updated). Re-locating..."
+                        )
+                        continue
+                    fresh_rect = fresh_target.get("rect") or fresh_target["element"].rect
+                    fresh_top_y = int(fresh_rect["y"])
+                    if not fresh_target.get("name_visible", False) and attempt < 3:
+                        self._logger.warning(
+                            f"Nearby devices list updated and '{fresh_target['display_name']}' device name is now "
+                            f"covered (y={fresh_top_y}, name_bottom={fresh_target.get('name_bottom_y')}, "
+                            f"footer_top={footer_top_y}). Scrolling to reveal device name before clicking..."
+                        )
+                        continue
+                    if abs(fresh_top_y - top_y) > 35 and attempt < 3:
+                        self._logger.warning(
+                            f"Nearby devices list is shifting ('{fresh_target['display_name']}' moved from "
+                            f"y={top_y} to y={fresh_top_y}). Waiting for list to stabilize before clicking..."
+                        )
+                        continue
+                    target_item = fresh_target
+                    elem = fresh_target["element"]
+                    rect = fresh_rect
+                    top_y = fresh_top_y
+                    cy = int(rect["y"] + rect["height"] / 2)
                 current_label = (
                         elem.get_attribute("label") or elem.get_attribute(
                     "value") or elem.text or ""
@@ -473,11 +620,12 @@ class GHASetUpDevicePage(BasePage):
                     time.sleep(0.5)
                     continue
                 self._logger.info(
-                    f"Target device '{target_item['display_name']}' is in safe viewport "
-                    f"(y={top_y}, cy={cy}, footer_top={footer_top_y})! Clicking now..."
+                    f"Target device '{target_item['display_name']}' has device name clearly visible on UI "
+                    f"(y={top_y}, cy={cy}, name_bottom={target_item.get('name_bottom_y')}, footer_top={footer_top_y})! "
+                    f"Clicking now..."
                 )
                 if self._tap_card_with_fallbacks(
-                        elem, rect, target_item["display_name"], footer_top_y
+                        target_name, elem, rect, target_item["display_name"], footer_top_y
                 ):
                     return True
             except (StaleElementReferenceException, WebDriverException) as e:
@@ -490,7 +638,8 @@ class GHASetUpDevicePage(BasePage):
     def is_device_exist_in_setup_device_page(
             self, device_name: str, max_scrolls: int = 15, initial_wait_seconds: int = 6
     ) -> bool:
-        """Scan nearby devices, log discovered device list (title + subtitle), and click the target device.
+        """Scan nearby devices, log discovered device list (title + subtitle), and click the target device
+        only when its device name is visible on the UI.
         Guarantees scrolling all the way to the bottom of the 'Set up nearby devices' list before
         scanning back up to the top.
         """
@@ -521,13 +670,14 @@ class GHASetUpDevicePage(BasePage):
             )
             if matched_item is not None:
                 self._logger.info(
-                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}'! Attempting safe click..."
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' "
+                    f"(name_visible={matched_item.get('name_visible')})! Attempting safe click..."
                 )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
                 else:
                     self._logger.info(
-                        "Target was pushed off-screen by newly discovered devices. Proceeding to Phase 2 scroll..."
+                        "Target was pushed off-screen or list updated during Phase 1. Proceeding to Phase 2 scroll..."
                     )
                     break
             time.sleep(2)
@@ -546,7 +696,8 @@ class GHASetUpDevicePage(BasePage):
             )
             if matched_item is not None:
                 self._logger.info(
-                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' at top! Attempting safe click..."
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' at top "
+                    f"(name_visible={matched_item.get('name_visible')})! Attempting safe click..."
                 )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
@@ -578,7 +729,8 @@ class GHASetUpDevicePage(BasePage):
             )
             if matched_item is not None:
                 self._logger.info(
-                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' during downward scroll! Attempting safe click..."
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' during downward scroll "
+                    f"(name_visible={matched_item.get('name_visible')})! Attempting safe click..."
                 )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
@@ -618,7 +770,8 @@ class GHASetUpDevicePage(BasePage):
                     f"Discovered Device Name List ({len(discovered_device_names)}): {discovered_device_names}"
                 )
                 self._logger.info(
-                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' during upward scroll! Attempting safe click..."
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' during upward scroll "
+                    f"(name_visible={matched_item.get('name_visible')})! Attempting safe click..."
                 )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
@@ -635,7 +788,8 @@ class GHASetUpDevicePage(BasePage):
                 discovered_device_names.append(name)
             if self._is_target_device_match(device_name, item):
                 self._logger.info(
-                    f"Target device '{target_desc}' matched card '{item['display_name']}' at top after Phase 3! Attempting safe click..."
+                    f"Target device '{target_desc}' matched card '{item['display_name']}' at top after Phase 3 "
+                    f"(name_visible={item.get('name_visible')})! Attempting safe click..."
                 )
                 if self._safe_click_target_device(device_name, initial_item=item):
                     return True

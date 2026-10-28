@@ -17,13 +17,20 @@ from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
     """Class for handling GHA Video History toggle and setup on iOS."""
     VH_NEXT_BTN_PREDICATE = 'label == "Next" OR name == "actionBarPrimaryButton"'
-    # Locators for internal error dialog
-    VH_INTERNAL_ERROR_PREDICATE = 'label == "Internal error encountered." OR name == "Internal error encountered."'
+    # Locators for internal / offline error dialogs
+    VH_INTERNAL_ERROR_PREDICATE = (
+        'label == "Internal error encountered." OR name == "Internal error encountered." '
+        'OR label CONTAINS[c] "Internal error encountered" OR name CONTAINS[c] "Internal error encountered" '
+        'OR label == "The Internet connection appears to be offline." '
+        'OR name == "The Internet connection appears to be offline." '
+        'OR label CONTAINS[c] "Internet connection appears to be offline" '
+        'OR name CONTAINS[c] "Internet connection appears to be offline"'
+    )
     VH_ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
     VH_SWITCH_ON_VALUES = ("1", "true")
-    VH_PAGE_TIMEOUT = 20.0          # Max wait for the page (title + toggle) to appear
+    VH_PAGE_TIMEOUT = 20.0  # Max wait for the page (title + toggle) to appear
     VH_TOGGLE_SETTLE_SECONDS = 1.5  # Watch for the internal error alert after tapping the toggle
-    VH_LEAVE_PAGE_TIMEOUT = 8.0     # Max wait for the page transition after tapping Next
+    VH_LEAVE_PAGE_TIMEOUT = 8.0  # Max wait for the page transition after tapping Next
     VH_MAX_NEXT_ATTEMPTS = 3
     VH_POLL_INTERVAL = 0.5
 
@@ -58,12 +65,14 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
 
     def _vh_get_title(self) -> Optional[WebElement]:
         """Get the 'Video history' title element (also used as the page indicator)."""
-        return self._vh_quick_find(AppiumBy.ACCESSIBILITY_ID, constants.GHA_VIDEO_HISTORY_ACCESSIBILITY_ID)
+        return self._vh_quick_find(AppiumBy.ACCESSIBILITY_ID,
+                                   constants.GHA_VIDEO_HISTORY_ACCESSIBILITY_ID)
 
     def _vh_get_next_btn(self) -> Optional[WebElement]:
         """Get the 'Next' button using ACCESSIBILITY_ID or predicate fallback."""
         return (
-                self._vh_quick_find(AppiumBy.ACCESSIBILITY_ID, constants.GHA_NEXT_BTN_ACCESSIBILITY_ID)
+                self._vh_quick_find(AppiumBy.ACCESSIBILITY_ID,
+                                    constants.GHA_NEXT_BTN_ACCESSIBILITY_ID)
                 or self._vh_quick_find(AppiumBy.IOS_PREDICATE, self.VH_NEXT_BTN_PREDICATE)
         )
 
@@ -71,13 +80,29 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
         return self._vh_get_title() is not None
 
     def _vh_check_for_internal_error(self) -> None:
-        """If the 'Internal error encountered.' alert is shown, click OK and raise.
+        """If the 'Internal error encountered.' or 'The Internet connection appears to be offline.' alert is shown, click OK and raise.
         Raises:
-            OOBEInternalErrorException: If the internal error alert is displayed.
+            OOBEInternalErrorException: If the error alert is displayed.
         """
-        if self._vh_quick_find(AppiumBy.IOS_PREDICATE, self.VH_INTERNAL_ERROR_PREDICATE) is None:
+        alert_elem = self._vh_quick_find(AppiumBy.IOS_PREDICATE, self.VH_INTERNAL_ERROR_PREDICATE)
+        if alert_elem is None:
             return
-        self._logger.warning("[VideoHistory] Detected 'Internal error encountered.' alert dialog!")
+        try:
+            alert_text = (
+                    alert_elem.get_attribute("label")
+                    or alert_elem.get_attribute("name")
+                    or "Internal error encountered."
+            ).strip()
+        except WebDriverException:
+            alert_text = "Internal error encountered."
+        self._logger.warning(f"[VideoHistory] Detected '{alert_text}' alert dialog!")
+        if hasattr(BasePage, "capture_failure_screenshot"):
+            BasePage.capture_failure_screenshot(
+                self.driver,
+                reason=f"GHA displayed '{alert_text}' during Video History setup.",
+                force=False,
+                lock=True,
+            )
         for _ in range(4):
             ok_btn = self._vh_quick_find(AppiumBy.IOS_PREDICATE, self.VH_ALERT_OK_PREDICATE)
             if ok_btn is not None:
@@ -88,7 +113,8 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
                 except WebDriverException as e:
                     self._logger.warning(f"[VideoHistory] Failed to click OK on alert: {e}")
             time.sleep(self.VH_POLL_INTERVAL)
-        raise OOBEInternalErrorException("GHA displayed 'Internal error encountered.' during Video History setup.")
+        raise OOBEInternalErrorException(
+            f"GHA displayed '{alert_text}' during Video History setup.")
 
     def _vh_watch_for_internal_error(self, seconds: float) -> None:
         """Keep checking for the internal error alert for `seconds` (raises if it shows up)."""
@@ -131,7 +157,8 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
         except WebDriverException:
             return False
         is_on = value in self.VH_SWITCH_ON_VALUES
-        self._logger.info(f"Current Video History Toggle state: {'ON' if is_on else 'OFF'} (value={value})")
+        self._logger.info(
+            f"Current Video History Toggle state: {'ON' if is_on else 'OFF'} (value={value})")
         return is_on
 
     def _vh_turn_on_toggle(self) -> bool:
@@ -180,7 +207,8 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
                     return True
                 self._logger.error("Cannot click 'Next': Button element not found.")
                 return False
-            self._logger.info(f"Clicking 'Next' button (attempt {attempt}/{self.VH_MAX_NEXT_ATTEMPTS})...")
+            self._logger.info(
+                f"Clicking 'Next' button (attempt {attempt}/{self.VH_MAX_NEXT_ATTEMPTS})...")
             try:
                 btn.click()
             except WebDriverException as e:
@@ -196,7 +224,8 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
                 f"[VideoHistory] Still on Video history page after tapping 'Next' "
                 f"(attempt {attempt}/{self.VH_MAX_NEXT_ATTEMPTS}). Retrying..."
             )
-        self._logger.error("[VideoHistory] Failed to leave Video history page after all 'Next' attempts.")
+        self._logger.error(
+            "[VideoHistory] Failed to leave Video history page after all 'Next' attempts.")
         return False
 
     def enable_video_history_and_proceed(self) -> bool:
@@ -204,7 +233,7 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
         Returns:
             bool: True if both actions succeeded, False otherwise.
         Raises:
-            OOBEInternalErrorException: If GHA shows 'Internal error encountered.'.
+            OOBEInternalErrorException: If GHA shows 'Internal error encountered.' or 'The Internet connection appears to be offline.'.
         """
         turned_on = self._vh_turn_on_toggle()
         if not turned_on and not self._vh_is_on_page():

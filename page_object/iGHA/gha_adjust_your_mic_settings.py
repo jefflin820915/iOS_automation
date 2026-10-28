@@ -37,18 +37,26 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         'type == "XCUIElementTypeStaticText" AND ('
         'label CONTAINS "turn on video history" OR name CONTAINS "turn on video history" OR '
         'name == "{0}")'.format(
-            getattr(constants, "GHA_VIDEO_HISTORY_ACCESSIBILITY_ID", "Choose whether you want to turn on video history")
+            getattr(constants, "GHA_VIDEO_HISTORY_ACCESSIBILITY_ID",
+                    "Choose whether you want to turn on video history")
         )
     )
     MIC_NEXT_BTN_PREDICATE = 'label == "Next" OR name == "Next" OR name == "actionBarPrimaryButton"'
     MIC_LOADING_PREDICATE = 'type == "XCUIElementTypeActivityIndicator" AND visible == 1'
-    MIC_INTERNAL_ERROR_PREDICATE = 'label == "Internal error encountered." OR name == "Internal error encountered."'
+    MIC_INTERNAL_ERROR_PREDICATE = (
+        'label == "Internal error encountered." OR name == "Internal error encountered." '
+        'OR label CONTAINS[c] "Internal error encountered" OR name CONTAINS[c] "Internal error encountered" '
+        'OR label == "The Internet connection appears to be offline." '
+        'OR name == "The Internet connection appears to be offline." '
+        'OR label CONTAINS[c] "Internet connection appears to be offline" '
+        'OR name CONTAINS[c] "Internet connection appears to be offline"'
+    )
     MIC_ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
     MIC_SWITCH_ON_VALUES = ("1", "true")
-    MIC_PAGE_WAIT_TIMEOUT = 30.0     # Max wait for Adjust your mic settings page to appear
-    MIC_IDLE_TIMEOUT = 20.0          # Max wait for page to become idle
-    MIC_IDLE_STABLE_SECONDS = 1.5    # Idle state must hold this long before tapping Next
-    MIC_LEAVE_PAGE_TIMEOUT = 8.0     # Max wait for page transition after tapping Next
+    MIC_PAGE_WAIT_TIMEOUT = 30.0  # Max wait for Adjust your mic settings page to appear
+    MIC_IDLE_TIMEOUT = 20.0  # Max wait for page to become idle
+    MIC_IDLE_STABLE_SECONDS = 1.5  # Idle state must hold this long before tapping Next
+    MIC_LEAVE_PAGE_TIMEOUT = 8.0  # Max wait for page transition after tapping Next
     MIC_SWITCH_LOCATE_TIMEOUT = 5.0
     MIC_SWITCH_STATE_TIMEOUT = 3.0
     MIC_MAX_NEXT_ATTEMPTS = 3
@@ -113,13 +121,15 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         )
 
     def _mic_is_on_page(self) -> bool:
-        return self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_PAGE_INDICATOR_PREDICATE) is not None
+        return self._mic_quick_find(AppiumBy.IOS_PREDICATE,
+                                    self.MIC_PAGE_INDICATOR_PREDICATE) is not None
 
     def _mic_is_still_on_video_history_page(self) -> bool:
         vh_id = getattr(constants, "GHA_VIDEO_HISTORY_ACCESSIBILITY_ID", "")
         if vh_id and self._mic_quick_find(AppiumBy.ACCESSIBILITY_ID, vh_id) is not None:
             return True
-        return self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_VIDEO_HISTORY_PREDICATE) is not None
+        return self._mic_quick_find(AppiumBy.IOS_PREDICATE,
+                                    self.MIC_VIDEO_HISTORY_PREDICATE) is not None
 
     def _mic_advance_past_late_video_history_page(self) -> None:
         """If the previous VideoHistory step timed out before the page loaded, complete it now so we reach Mic settings."""
@@ -164,7 +174,8 @@ class GHAAdjustYourMicSettingsPage(BasePage):
                 self._mic_advance_past_late_video_history_page()
                 continue
             time.sleep(self.MIC_POLL_INTERVAL)
-        self._logger.error(f"[MicSettings] 'Adjust your mic settings' page did not appear within {timeout:.0f}s.")
+        self._logger.error(
+            f"[MicSettings] 'Adjust your mic settings' page did not appear within {timeout:.0f}s.")
         return False
 
     def _mic_is_idle_now(self) -> bool:
@@ -209,13 +220,29 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         return False
 
     def _mic_check_for_internal_error(self) -> None:
-        """Dismiss 'Internal error encountered.' alert if present and raise.
+        """Dismiss 'Internal error encountered.' / 'The Internet connection appears to be offline.' alert if present and raise.
         Raises:
-            OOBEInternalErrorException: If the internal error alert is displayed.
+            OOBEInternalErrorException: If the error alert is displayed.
         """
-        if not self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_INTERNAL_ERROR_PREDICATE):
+        alert_elem = self._mic_quick_find(AppiumBy.IOS_PREDICATE, self.MIC_INTERNAL_ERROR_PREDICATE)
+        if alert_elem is None:
             return
-        self._logger.warning("[MicSettings] Detected 'Internal error encountered.' alert dialog!")
+        try:
+            alert_text = (
+                    alert_elem.get_attribute("label")
+                    or alert_elem.get_attribute("name")
+                    or "Internal error encountered."
+            ).strip()
+        except WebDriverException:
+            alert_text = "Internal error encountered."
+        self._logger.warning(f"[MicSettings] Detected '{alert_text}' alert dialog!")
+        if hasattr(BasePage, "capture_failure_screenshot"):
+            BasePage.capture_failure_screenshot(
+                self.driver,
+                reason=f"GHA displayed '{alert_text}' during Mic settings.",
+                force=False,
+                lock=True,
+            )
         try:
             ok_btn = WebDriverWait(self.driver, 2.0).until(
                 EC.element_to_be_clickable((AppiumBy.IOS_PREDICATE, self.MIC_ALERT_OK_PREDICATE))
@@ -224,7 +251,7 @@ class GHAAdjustYourMicSettingsPage(BasePage):
             self._logger.info("[MicSettings] Clicked 'OK' on internal error alert.")
         except Exception as dismiss_err:
             self._logger.warning(f"[MicSettings] Failed to click OK on alert: {dismiss_err}")
-        raise OOBEInternalErrorException("GHA displayed 'Internal error encountered.' during Mic settings.")
+        raise OOBEInternalErrorException(f"GHA displayed '{alert_text}' during Mic settings.")
 
     def _mic_locate_switch(self, class_chain: str, fallback_index: int) -> Optional[WebElement]:
         switch = self._mic_quick_find(AppiumBy.IOS_CLASS_CHAIN, class_chain)
@@ -251,7 +278,8 @@ class GHAAdjustYourMicSettingsPage(BasePage):
                 time.sleep(0.3)
         return None
 
-    def _mic_wait_for_switch_state(self, class_chain: str, fallback_index: int, expected: bool) -> bool:
+    def _mic_wait_for_switch_state(self, class_chain: str, fallback_index: int,
+                                   expected: bool) -> bool:
         deadline = time.time() + self.MIC_SWITCH_STATE_TIMEOUT
         while time.time() < deadline:
             if self._mic_read_switch_state(class_chain, fallback_index) is expected:
@@ -290,7 +318,8 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         self._logger.info(f"'{switch_name}' is OFF. Clicking to turn ON...")
         for use_coordinates in (False, True):
             if use_coordinates:
-                self._logger.warning(f"'{switch_name}' still OFF after click. Trying coordinate tap...")
+                self._logger.warning(
+                    f"'{switch_name}' still OFF after click. Trying coordinate tap...")
             if self._mic_tap_switch(class_chain, fallback_index, use_coordinates) and \
                     self._mic_wait_for_switch_state(class_chain, fallback_index, expected=True):
                 self._logger.info(f"Successfully turned ON '{switch_name}'.")
@@ -303,7 +332,8 @@ class GHAAdjustYourMicSettingsPage(BasePage):
         self._logger.info("Starting to enable all mic settings toggles...")
         results = [
             self._mic_turn_on_switch("Microphone", self.MIC_MICROPHONE_SWITCH_CLASS_CHAIN, 0),
-            self._mic_turn_on_switch("Audio recording", self.MIC_AUDIO_RECORDING_SWITCH_CLASS_CHAIN, 1),
+            self._mic_turn_on_switch("Audio recording", self.MIC_AUDIO_RECORDING_SWITCH_CLASS_CHAIN,
+                                     1),
         ]
         return all(results)
 
@@ -319,7 +349,8 @@ class GHAAdjustYourMicSettingsPage(BasePage):
                     btn.click()
                     return
                 except WebDriverException as e:
-                    self._logger.warning(f"Direct click failed: {e}. Trying coordinate tap fallback...")
+                    self._logger.warning(
+                        f"Direct click failed: {e}. Trying coordinate tap fallback...")
             fresh_btn = self._mic_get_next_btn() or btn
             if fresh_btn is not None:
                 self._mic_tap_element_center(fresh_btn)
@@ -356,7 +387,8 @@ class GHAAdjustYourMicSettingsPage(BasePage):
                 f"[MicSettings] [Attempt {attempt}/{self.MIC_MAX_NEXT_ATTEMPTS}] Still on mic settings page "
                 f"after tapping 'Next' (tap likely swallowed during loading). Retrying..."
             )
-        self._logger.error("[MicSettings] Failed to leave mic settings page after all 'Next' attempts.")
+        self._logger.error(
+            "[MicSettings] Failed to leave mic settings page after all 'Next' attempts.")
         return False
 
     def enable_all_mic_settings_and_proceed(self) -> bool:
