@@ -19,6 +19,7 @@ from core.syslog_collector import SyslogCollector
 from page_object.iGHA.gha_session import GHASession
 from page_object.iGHP.ghp_session import GHPSession
 from testcase.iGHA.test_home import TestGHAHome
+from testcase.iGHP.test_home import TestGHPHome
 from utils import logging_utils
 from utils.drive_uploader import DriveUploader
 from utils.environment_utils import log_all_version_information, get_wifi_information
@@ -455,7 +456,7 @@ class MultiProjectTestRunner:
         """Resolve session instance and test classes for the target project."""
         if self.project_name == "ighp":
             session_instance = GHPSession(self.driver)
-            test_classes = [TestGHAHome]
+            test_classes = [TestGHPHome]
         else:
             session_instance = GHASession(self.driver)
             test_classes = [TestGHAHome]
