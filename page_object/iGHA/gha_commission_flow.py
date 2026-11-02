@@ -1,4 +1,5 @@
 """Page object for Matter device commissioning and iOS system sheets with StaleElement resilience."""
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -46,7 +47,8 @@ class GHACommissioningPageObject(BasePage):
     """Unified handler for Apple Matter system sheets and Google Home App commissioning steps.
     NOTE: Private helpers are prefixed with `_cm_` to avoid MRO name collisions in GHASession.
     NOTE: Failure Stage is derived from the innermost page_object frame of the traceback, so
-          private helpers must NOT raise the final AssertionError; the public flow method does.
+          private helpers must NOT raise the final AssertionError; public flow methods
+          (`complete_commissioning_and_pairing_flow` and `handle_ota_update`) raise it directly.
     """
     HEADLINE_LOCATOR: Locator = (AppiumBy.ACCESSIBILITY_ID,
                                  constants.GHA_CONNECTING_TITLE_ACCESSIBILITY_ID)
@@ -136,10 +138,40 @@ class GHACommissioningPageObject(BasePage):
         "climate",
         "devices",
     }
+    OTA_KEYWORDS = (
+        "Updating your",
+        "Updating firmware",
+        "Updating software",
+        "Preparing update",
+        "Downloading update",
+        "Installing update",
+        "Applying update",
+        "Update finished",
+    )
+    OTA_FAILURE_KEYWORDS = (
+        "Update failed",
+        "Couldn't update",
+        "Could not update",
+        "Unable to update",
+    )
+    OTA_PERCENT_PREDICATE = (
+        'type IN {"XCUIElementTypeStaticText", "XCUIElementTypeTextView", '
+        '"XCUIElementTypeOther", "XCUIElementTypeProgressIndicator"} '
+        'AND (label CONTAINS "%" OR value CONTAINS "%" OR name CONTAINS "%")'
+    )
+    OTA_ERROR_ALERT_PREDICATE = (
+        'label CONTAINS[c] "Internal error encountered" OR name CONTAINS[c] "Internal error encountered" '
+        'OR label CONTAINS[c] "Internet connection appears to be offline" '
+        'OR name CONTAINS[c] "Internet connection appears to be offline" '
+        'OR label CONTAINS[c] "Stream removed" OR name CONTAINS[c] "Stream removed" '
+        'OR label CONTAINS[c] "NSPOSIXErrorDomain" OR name CONTAINS[c] "NSPOSIXErrorDomain" '
+        'OR label CONTAINS[c] "Socket is not connected" OR name CONTAINS[c] "Socket is not connected"'
+    )
+    OTA_ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
     PROGRESS_KEYWORDS = (
         "Adding device", "Getting your device ready", "Next, your device will be added",
         "Connecting",
-        "Setting up", "Activating camera", "Downloading update", "Update finished",
+        "Setting up", "Activating camera",
     )
     DEFAULT_PLUG_KEYWORDS = (
         "Plug",
@@ -158,6 +190,10 @@ class GHACommissioningPageObject(BasePage):
     PLUG_OFF_VALUES = ("off", "0", "false")
     CM_POLL_INTERVAL = 1.5
     CM_PROGRESS_INTERVAL = 2.5
+    CM_OTA_POLL_INTERVAL = 1.5
+    CM_OTA_ZERO_PERCENT_TIMEOUT = 20.0
+    CM_OTA_DEFAULT_TIMEOUT = 300.0
+    CM_OTA_EMPTY_HEADLINE_TOLERANCE = 3
     CM_REMOVE_ATTEMPTS = 2
     CM_ALL_DEVICES_MAX_SCROLLS = 6
 
@@ -528,6 +564,15 @@ class GHACommissioningPageObject(BasePage):
                         f"trying resolved tile name '{resolved_fallback}'..."
                     )
                     opened = settings_page.open_device_settings(device_name=resolved_fallback)
+                if not opened:
+                    for fb_name in self._cm_get_fallback_device_names(device_name):
+                        if fb_name.lower() not in {device_name.lower(), resolved_fallback.lower()}:
+                            self._logger.info(
+                                f"[Recovery] Trying hardware-type fallback name '{fb_name}' in Settings..."
+                            )
+                            if settings_page.open_device_settings(device_name=fb_name):
+                                opened = True
+                                break
                 if not opened:
                     raise RuntimeError(f"Device '{device_name}' not found in Settings")
                 GHADeviceSettingPage(self.driver).get_device_information()
@@ -1266,6 +1311,216 @@ class GHACommissioningPageObject(BasePage):
         elem = self._cm_find_displayed(*self.HEADLINE_LOCATOR)
         return self._cm_read_text(elem) if elem is not None else ""
 
+    def _cm_read_ota_progress_percent(self) -> Tuple[Optional[int], str]:
+        """Read OTA download/install percentage (e.g. '0% downloaded' -> (0, '0% downloaded')) from visible UI.
+        Ignores iOS top status-bar battery elements (y < 55 or 'battery' in text) and full-screen containers.
+        """
+        preferred: List[Tuple[int, str]] = []
+        fallback: List[Tuple[int, str]] = []
+        for elem in self._cm_find_all(AppiumBy.IOS_PREDICATE, self.OTA_PERCENT_PREDICATE):
+            try:
+                if not elem.is_displayed():
+                    continue
+            except WebDriverException:
+                continue
+            elem_type = self._cm_read_text(elem, ("type",))
+            try:
+                r = elem.rect
+                if isinstance(r, dict):
+                    y = r.get("y")
+                    h = r.get("height", 0)
+                    if isinstance(y, (int, float)) and 0 <= y < 55 and (
+                            not isinstance(h, (int, float)) or h < 45
+                    ):
+                        continue
+                    if isinstance(h, (int, float)) and h > 150 and elem_type in ("",
+                                                                                 "XCUIElementTypeOther"):
+                        continue
+            except Exception:
+                pass
+            texts: List[str] = []
+            for attr in ("label", "value", "name"):
+                t = self._cm_read_text(elem, (attr,))
+                if t and t not in texts:
+                    texts.append(t)
+            for txt in texts:
+                low = txt.lower()
+                if "battery" in low or "charging" in low or "scroll bar" in low:
+                    continue
+                for m in re.finditer(r"(?<![\d.])(\d{1,3})(?:\.(\d+))?\s*%", txt):
+                    whole = int(m.group(1))
+                    frac_str = m.group(2) or ""
+                    val = float(f"{whole}.{frac_str}") if frac_str else float(whole)
+                    if not (0.0 <= val <= 100.0):
+                        continue
+                    pct = 0 if val == 0.0 else max(1, int(round(val)))
+                    if any(
+                            kw in low
+                            for kw in ("download", "install", "updat", "complete", "progress")
+                    ) or re.fullmatch(r"\d{1,3}(?:\.\d+)?\s*%", txt.strip()):
+                        preferred.append((pct, txt))
+                    else:
+                        fallback.append((pct, txt))
+        if preferred:
+            return preferred[0]
+        if fallback:
+            return fallback[0]
+        return None, ""
+
+    def _cm_check_ota_error_alert(self) -> Optional[str]:
+        """Check if a modal error alert popped up during OTA, capture screenshot, click OK, and return its text."""
+        alert_elem = self._cm_find_displayed(AppiumBy.IOS_PREDICATE, self.OTA_ERROR_ALERT_PREDICATE)
+        if alert_elem is None:
+            return None
+        alert_text = self._cm_read_text(alert_elem,
+                                        ("label", "name", "value")) or "Internal error encountered."
+        self._logger.error(f"[OTA] Detected error alert dialog during OTA: '{alert_text}'")
+        if hasattr(BasePage, "capture_failure_screenshot"):
+            BasePage.capture_failure_screenshot(
+                self.driver, reason=f"OTA error alert: {alert_text}", force=True, lock=True
+            )
+        if self._cm_click_displayed(AppiumBy.IOS_PREDICATE, self.OTA_ALERT_OK_PREDICATE):
+            self._logger.info("[OTA] Clicked 'OK' on OTA error alert.")
+            time.sleep(0.5)
+        return alert_text
+
+    def handle_ota_update(
+            self,
+            device_name: str,
+            initial_headline: str = "",
+            deadline: Optional[float] = None,
+            zero_percent_timeout: Optional[float] = None,
+    ) -> bool:
+        """Dedicated handler for OTA firmware update screens during OOBE commissioning.
+        Because `extract_failure_stage` inspects the innermost `page_object` frame, raising
+        `AssertionError` directly in this method reports Failure Stage as `HANDLE_OTA_UPDATE`.
+        Fails OOBE immediately if OTA progress stays stuck at 0% for more than `zero_percent_timeout`
+        seconds (default 20s), or if an OTA failure headline / error alert / timeout occurs.
+        """
+        self._cm_reset_device_name = device_name
+        if not getattr(self, "_cm_resolved_tile_name", ""):
+            self._cm_resolved_tile_name = device_name
+        zero_limit = float(
+            zero_percent_timeout
+            if zero_percent_timeout is not None
+            else getattr(
+                constants, "OTA_ZERO_PERCENT_TIMEOUT_SECONDS", self.CM_OTA_ZERO_PERCENT_TIMEOUT
+            )
+        )
+        ota_deadline = (
+            deadline
+            if deadline is not None
+            else time.time() + float(
+                getattr(constants, "OTA_TIMEOUT_SECONDS", self.CM_OTA_DEFAULT_TIMEOUT))
+        )
+        start_label = initial_headline or self._cm_get_headline() or "OTA update"
+        self._logger.info(
+            f"[OTA] Entering OTA update step on headline '{start_label}' "
+            f"(0% stuck threshold: {zero_limit:.0f}s)..."
+        )
+        zero_pct_since: Optional[float] = None
+        last_zero_text: str = "0%"
+        consecutive_empty_headlines = 0
+        while time.time() < ota_deadline:
+            alert_text = self._cm_check_ota_error_alert()
+            if alert_text:
+                raise AssertionError(
+                    self._cm_recover(
+                        f"OTA update failed with alert '{alert_text}'",
+                        remove_paired_device=True,
+                    )
+                )
+            headline = self._cm_get_headline()
+            if not headline:
+                consecutive_empty_headlines += 1
+                if consecutive_empty_headlines >= self.CM_OTA_EMPTY_HEADLINE_TOLERANCE:
+                    self._logger.info(
+                        "[OTA] OTA headline cleared; returning to commissioning flow."
+                    )
+                    return True
+                time.sleep(self.CM_OTA_POLL_INTERVAL)
+                continue
+            consecutive_empty_headlines = 0
+            if _contains_any(headline, self.FAILURE_KEYWORDS) or _contains_any(
+                    headline, self.OTA_FAILURE_KEYWORDS
+            ):
+                self._logger.error(f"[OTA] Failure headline detected during OTA: '{headline}'")
+                raise AssertionError(
+                    self._cm_recover(
+                        f"OTA update failed with headline '{headline}'",
+                        remove_paired_device=True,
+                    )
+                )
+            if not _contains_any(headline, self.OTA_KEYWORDS):
+                self._logger.info(
+                    f"[OTA] OTA update step completed; transitioned to '{headline}'."
+                )
+                return True
+            if _contains_any(headline, ("Update finished",)):
+                zero_pct_since = None
+                self._logger.info(f"[OTA] Waiting for GHA post-OTA transition: '{headline}'...")
+                time.sleep(self.CM_OTA_POLL_INTERVAL)
+                continue
+            pct, pct_text = self._cm_read_ota_progress_percent()
+            now = time.time()
+            if pct is not None and pct > 0:
+                zero_pct_since = None
+                self._logger.info(
+                    f"[OTA] Headline: '{headline}' | Progress: {pct}% ('{pct_text}')"
+                )
+            elif pct == 0:
+                if zero_pct_since is None:
+                    zero_pct_since = now
+                last_zero_text = pct_text or "0%"
+                stuck_sec = now - zero_pct_since
+                self._logger.info(
+                    f"[OTA] Headline: '{headline}' | Progress: 0% ('{last_zero_text}') "
+                    f"| At 0% for {stuck_sec:.1f}s / {zero_limit:.0f}s"
+                )
+                if stuck_sec > zero_limit:
+                    reason = (
+                        f"OTA update stuck at 0% ('{last_zero_text}') for {stuck_sec:.1f}s "
+                        f"(>{zero_limit:.0f}s) on '{headline}'"
+                    )
+                    self._logger.error(f"[OTA] OOBE failed: {reason}!")
+                    raise AssertionError(
+                        self._cm_recover(reason, remove_paired_device=True)
+                    )
+            else:
+                self._logger.info(f"[OTA] Waiting for OTA progress: '{headline}'...")
+            time.sleep(self.CM_OTA_POLL_INTERVAL)
+        last_headline = self._cm_get_headline() or start_label
+        timeout_reason = f"OTA update timed out on '{last_headline}'"
+        self._logger.error(f"[OTA] {timeout_reason}!")
+        if hasattr(BasePage, "capture_failure_screenshot"):
+            BasePage.capture_failure_screenshot(
+                self.driver, reason=timeout_reason, force=False, lock=False
+            )
+        device_status = self._cm_check_device_status_on_all_devices(device_name)
+        if device_status == "online":
+            self._logger.warning(
+                f"[OTA] '{device_name}' exists in Home on 'All devices' and is ONLINE "
+                "after OTA timeout. Continuing test flow..."
+            )
+            if hasattr(BasePage, "reset_failure_screenshot_state"):
+                BasePage.reset_failure_screenshot_state(self.driver, remove_existing=True)
+            self._cm_mark_timeout_online_recovery()
+            return True
+        if device_status == "offline":
+            if hasattr(BasePage, "capture_failure_screenshot"):
+                BasePage.capture_failure_screenshot(
+                    self.driver,
+                    reason=f"{timeout_reason} (device offline on All devices)",
+                    force=True,
+                    lock=True,
+                )
+            raise AssertionError(
+                self._cm_recover(timeout_reason, remove_paired_device=True)
+            )
+        raise AssertionError(
+            self._cm_recover(timeout_reason, remove_paired_device=False)
+        )
+
     def _cm_on_watch_setup_video(self, _headline: str) -> bool:
         self._logger.info("Detected 'Watch setup video'. Clicking Next/Done...")
         GHAWatchSetupVideoPage(self.driver).handle_watch_setup_video_page_process()
@@ -1337,7 +1592,7 @@ class GHACommissioningPageObject(BasePage):
     def complete_commissioning_and_pairing_flow(
             self, device_name: str, room_name: str = "Attic", timeout: float = 600
     ) -> bool:
-        """State machine handling Apple sheets, GHA loading, room setup, and completion.
+        """State machine handling Apple sheets, GHA loading, room setup, OTA updates, and completion.
         If the flow hits `timeout`, restarts GHA and checks the 'All devices' page:
         - If the device is in Home and ONLINE (e.g. GHA crashed at the end of commissioning),
           continues the test flow (returns True).
@@ -1392,6 +1647,15 @@ class GHACommissioningPageObject(BasePage):
                             remove_paired_device=is_paired_offline,
                         )
                     )
+                if _contains_any(headline, self.OTA_KEYWORDS):
+                    self.handle_ota_update(
+                        device_name=device_name,
+                        initial_headline=headline,
+                        deadline=start_time + timeout,
+                    )
+                    if getattr(self.driver, "_commissioned_via_timeout_online", False):
+                        return True
+                    continue
                 if _contains_any(headline, self.PROGRESS_KEYWORDS):
                     self._logger.info(f"Waiting for GHA background progress: '{headline}'...")
                     time.sleep(self.CM_PROGRESS_INTERVAL)
