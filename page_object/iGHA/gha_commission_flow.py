@@ -174,8 +174,6 @@ class GHACommissioningPageObject(BasePage):
         "Setting up", "Activating camera",
     )
     DEFAULT_PLUG_KEYWORDS = (
-        "Plug",
-        "Outlet",
         "Eve",
         "Eve Energy Plug",
         "Eve Energy",
