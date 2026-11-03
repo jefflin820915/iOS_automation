@@ -1,5 +1,6 @@
 """Page object method for verifying device existence on the Set up nearby devices page in iOS."""
 import contextlib
+import re
 import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from appium.webdriver.common.appiumby import AppiumBy
@@ -21,6 +22,8 @@ class GHASetUpDevicePage(BasePage):
         "Onn Wired Indoor Camera New": "5502:4233:687",
         "HD Wired Indoor Camera DVT": "4738:20483:1628",
     }
+    _MATTER_ID_SUFFIX_RE = re.compile(r"^(.*?)(?:[\s,]+)(\d+:\d+:\d+)\s*$", re.DOTALL)
+    _MATTER_ID_INLINE_RE = re.compile(r"\b(\d+:\d+:\d+)\b")
 
     @contextlib.contextmanager
     def _setup_no_implicit_wait(self) -> Iterator[None]:
@@ -40,8 +43,10 @@ class GHASetUpDevicePage(BasePage):
 
     def _get_expected_identifier(self, target_name: str) -> Optional[str]:
         """Return the hardcoded device identifier (subtitle) for known devices, or None.
-        Checks exact key match first so 'Onn Wired Indoor Camera New' resolves to '5502:4233:687'
-        while 'Onn Wired Indoor Camera' resolves to '5502:4233:1658'.
+        Checks exact key match first so 'HD Wired Indoor Camera DVT' resolves to '4738:20483:1628'
+        while 'HD Wired Indoor Camera' resolves to '4738:20482:2447', and 'Onn Wired Indoor Camera New'
+        resolves to '5502:4233:687' while 'Onn Wired Indoor Camera' resolves to '5502:4233:1658'.
+        Also extracts an inline 'VID:PID:Discriminator' if passed directly in target_name.
         """
         target_norm = " ".join(target_name.strip().lower().split())
         if not target_norm:
@@ -50,14 +55,47 @@ class GHASetUpDevicePage(BasePage):
             dev_norm = " ".join(dev_name.strip().lower().split())
             if target_norm == dev_norm:
                 return identifier.strip().lower()
+        inline_match = self._MATTER_ID_INLINE_RE.search(target_norm)
+        if inline_match:
+            return inline_match.group(1).strip().lower()
         return None
+
+    @classmethod
+    def _split_card_label(cls, raw_label: str) -> Tuple[str, str]:
+        """Split a nearby-device card accessibility label into (title, subtitle).
+        Supports comma, newline, or whitespace separators before Matter 'VID:PID:Discriminator'
+        (e.g. 'HD Wired Indoor Camera, 4738:20483:1628',
+              'HD Wired Indoor Camera  4738:20483:1628',
+              'HD Wired Indoor Camera\\n4738:20483:1628').
+        """
+        cleaned = (raw_label or "").strip()
+        if not cleaned:
+            return "", ""
+        match = cls._MATTER_ID_SUFFIX_RE.match(cleaned)
+        if match:
+            title_part = " ".join(match.group(1).rstrip(",").split()).strip()
+            sub_part = match.group(2).strip()
+            if title_part:
+                return title_part, sub_part
+        if ", " in cleaned:
+            title_part, sub_part = cleaned.rsplit(", ", 1)
+            return " ".join(title_part.split()).strip(), " ".join(sub_part.split()).strip()
+        if "," in cleaned:
+            title_part, sub_part = cleaned.rsplit(",", 1)
+            return " ".join(title_part.split()).strip(), " ".join(sub_part.split()).strip()
+        if "\n" in cleaned:
+            lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                return " ".join(lines[:-1]).strip(), lines[-1]
+        return " ".join(cleaned.split()).strip(), ""
 
     @staticmethod
     def _is_name_contained(target_name: str, card_title: str, card_display: str = "") -> bool:
         """Check whether target_name and card_title contain each other (case-insensitive).
         Examples:
-            target_name='Onn Wired Indoor Camera New', card_title='Onn Wired Indoor Camera' -> True
-            target_name='Onn Wired Indoor Camera',     card_title='Onn Wired Indoor Camera' -> True
+            target_name='HD Wired Indoor Camera DVT',   card_title='HD Wired Indoor Camera' -> True
+            target_name='Onn Wired Indoor Camera New',  card_title='Onn Wired Indoor Camera' -> True
+            target_name='Onn Wired Indoor Camera',      card_title='Onn Wired Indoor Camera' -> True
             target_name='Ref2 Battery Doorbell Camera', card_title='2K Battery Doorbell Camera' -> True
         """
         target = " ".join(target_name.strip().lower().split())
@@ -92,11 +130,13 @@ class GHASetUpDevicePage(BasePage):
 
     def _get_footer_top_y(self) -> int:
         """Return the top y-coordinate of the sticky 'Set up a different device' footer container.
-        On iOS GHA, the white footer container sits at roughly the bottom 22% of the screen (~y=650 on 844pt,
-        ~y=625 on 812pt), and any element or text at y >= footer_top_y is covered by the footer.
+        Uses the live 'Set up a different device' (`Footer_actionBar`) button rect when present
+        (`btn_y - 20`, where the white footer panel begins), falling back to `int(win_h * 0.77)`
+        only when the footer button is not exposed in the DOM.
         """
         _, win_h = self._get_window_size_safe()
-        default_footer_top = int(win_h * 0.77)  # ~650 on 844pt screen, ~625 on 812pt screen
+        default_footer_top = int(win_h * 0.77)  # Fallback (~650 on 844pt, ~625 on 812pt)
+        max_footer_top = int(win_h * 0.90)
         with self._setup_no_implicit_wait():
             try:
                 footer_btns = self.driver.find_elements(
@@ -109,9 +149,20 @@ class GHASetUpDevicePage(BasePage):
                     try:
                         r = btn.rect
                         btn_y = int(r.get("y", 0))
-                        if btn_y > win_h * 0.5:
-                            # The white footer panel extends ~20pt above the button's top edge
-                            return min(default_footer_top, btn_y - 20)
+                        btn_h = int(r.get("height", 0))
+                        btn_ident = (
+                            f"{btn.get_attribute('label') or ''} "
+                            f"{btn.get_attribute('name') or ''} "
+                            f"{getattr(btn, 'text', '') or ''}"
+                        ).strip().lower()
+                        if (
+                                btn_y > win_h * 0.5
+                                and (btn_h <= 0 or btn_h < 120)
+                                and (
+                                "different device" in btn_ident or "footer_actionbar" in btn_ident)
+                        ):
+                            # The sticky white footer panel begins ~20pt above the pill button's top edge
+                            return min(max_footer_top, btn_y - 20)
                     except Exception:
                         continue
             except Exception:
@@ -124,13 +175,12 @@ class GHASetUpDevicePage(BasePage):
             height: int,
             footer_top_y: int,
             title_rect: Optional[Dict[str, int]] = None,
-            has_visible_title_elem: bool = True,
     ) -> Tuple[int, int, bool]:
         """Compute (name_top_y, name_bottom_y, name_visible) for a device card.
         On GHA 'Set up nearby devices', each ~223pt card renders the illustration image in the upper ~135pt
         and the device name ('title') + identifier ('subtitle') in the bottom ~88pt (bottom_y - 88 .. bottom_y - 12).
-        A card's device name is only visible on the UI (`name_visible=True`) when that bottom text region is
-        completely above `footer_top_y - 10` (not covered by 'Set up a different device') and below the top header (y >= 90).
+        A card's device name is visible on the UI (`name_visible=True`) when that bottom text region is
+        above `footer_top_y - 10` (not covered by 'Set up a different device') and below the top header (y >= 90).
         """
         bottom_y = top_y + height
         if height >= 140:
@@ -148,8 +198,7 @@ class GHASetUpDevicePage(BasePage):
             name_top_y = est_name_top
             name_bottom_y = est_name_bottom
         name_visible = (
-                has_visible_title_elem
-                and top_y >= 60
+                top_y >= 60
                 and name_top_y >= 90
                 and name_bottom_y <= (footer_top_y - 10)
         )
@@ -163,10 +212,10 @@ class GHASetUpDevicePage(BasePage):
         visible_items: List[Dict[str, Any]] = []
         _, win_h = self._get_window_size_safe()
         footer_top_y = self._get_footer_top_y()
-        footer_cutoff_y = int(win_h * 0.82)
+        footer_cutoff_y = max(int(win_h * 0.82), footer_top_y)
         button_predicate = (
-            'type == "XCUIElementTypeButton" AND '
-            'name == "image-title-subtitle"'
+            'type IN {"XCUIElementTypeButton", "XCUIElementTypeCell"} AND '
+            '(name == "image-title-subtitle" OR label MATCHES ".*[0-9]+:[0-9]+:[0-9]+.*")'
         )
         with self._setup_no_implicit_wait():
             title_meta: List[Tuple[str, Dict[str, int]]] = []
@@ -192,6 +241,7 @@ class GHASetUpDevicePage(BasePage):
                         continue
             except Exception:
                 pass
+            seen_subtitles_at_y: List[Tuple[str, int]] = []
             try:
                 buttons = self.driver.find_elements(AppiumBy.IOS_PREDICATE, button_predicate)
                 for btn in buttons:
@@ -212,38 +262,42 @@ class GHASetUpDevicePage(BasePage):
                         # sits inside the scrollable viewport between the header (y=90) and footer_cutoff_y.
                         if not is_vis and not (top_y < footer_cutoff_y and bottom_y > 110):
                             continue
-                        raw_label = btn.get_attribute("label") or btn.get_attribute(
-                            "value") or btn.text or ""
-                        raw_label = raw_label.strip()
+                        raw_label = (
+                                btn.get_attribute("label")
+                                or btn.get_attribute("value")
+                                or btn.text
+                                or ""
+                        ).strip()
                         if not raw_label:
                             continue
-                        if ", " in raw_label:
-                            title, subtitle = raw_label.rsplit(", ", 1)
-                        elif "," in raw_label:
-                            title, subtitle = raw_label.rsplit(",", 1)
-                        else:
-                            title, subtitle = raw_label, ""
-                        title = title.strip()
-                        subtitle = subtitle.strip()
+                        title, subtitle = self._split_card_label(raw_label)
+                        if not title:
+                            continue
+                        # Deduplicate if both a parent Cell and child Button matched the same card
+                        if subtitle and any(
+                                sub == subtitle.lower() and abs(prev_y - top_y) < 30
+                                for sub, prev_y in seen_subtitles_at_y
+                        ):
+                            continue
+                        if subtitle:
+                            seen_subtitles_at_y.append((subtitle.lower(), top_y))
                         display_name = f"{title} ({subtitle})" if subtitle else title
+                        # Optional child-title geometry refinement only when XCUITest exposes a matching child 'title'.
+                        # Never mark a card invisible when `title_meta` only contains the page header ('Set up nearby devices')
+                        # because accessible XCUIElementTypeButton cards normally hide child StaticTexts in XCUITest.
                         matched_title_rect: Optional[Dict[str, int]] = None
-                        has_visible_title_elem = True
-                        if title_meta:
-                            has_visible_title_elem = False
-                            for t_text_lower, t_rect in title_meta:
-                                t_cy = int(t_rect["y"] + t_rect["height"] / 2)
-                                if (top_y - 10 <= t_cy <= bottom_y + 15) and (
-                                        t_text_lower == title.lower() or t_text_lower in title.lower()
-                                ):
-                                    matched_title_rect = t_rect
-                                    has_visible_title_elem = True
-                                    break
+                        for t_text_lower, t_rect in title_meta:
+                            t_cy = int(t_rect["y"] + t_rect["height"] / 2)
+                            if (top_y - 10 <= t_cy <= bottom_y + 15) and (
+                                    t_text_lower == title.lower() or t_text_lower in title.lower()
+                            ):
+                                matched_title_rect = t_rect
+                                break
                         name_top_y, name_bottom_y, name_visible = self._compute_name_bounds(
                             top_y=top_y,
                             height=height,
                             footer_top_y=footer_top_y,
                             title_rect=matched_title_rect,
-                            has_visible_title_elem=has_visible_title_elem,
                         )
                         visible_items.append({
                             "title": title,
@@ -259,6 +313,40 @@ class GHASetUpDevicePage(BasePage):
                         continue
             except WebDriverException as e:
                 self._logger.debug(f"Error finding device buttons via predicate: {e}")
+            # If any card button did not include its 'VID:PID:Discriminator' inside `btn.label`,
+            # pair it with any overlapping `subtitle` StaticText on screen.
+            if visible_items and any(not item["subtitle"] for item in visible_items):
+                try:
+                    sub_elems = self.driver.find_elements(
+                        AppiumBy.IOS_PREDICATE,
+                        'type == "XCUIElementTypeStaticText" AND '
+                        '(name == "subtitle" OR label MATCHES "^[0-9]+:[0-9]+:[0-9]+$")',
+                    )
+                    for item in visible_items:
+                        if item["subtitle"]:
+                            continue
+                        ir = item["rect"]
+                        i_top = int(ir.get("y", 0))
+                        i_bot = i_top + int(ir.get("height", 0))
+                        for s_el in sub_elems:
+                            try:
+                                sr = s_el.rect
+                                s_cy = int(sr.get("y", 0) + sr.get("height", 0) / 2)
+                                if i_top <= s_cy <= i_bot + 20:
+                                    s_txt = (
+                                            s_el.get_attribute("value")
+                                            or s_el.get_attribute("label")
+                                            or s_el.text
+                                            or ""
+                                    ).strip()
+                                    if s_txt and "," not in s_txt:
+                                        item["subtitle"] = s_txt
+                                        item["display_name"] = f"{item['title']} ({s_txt})"
+                                        break
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
             if not visible_items:
                 try:
                     title_elements = self.driver.find_elements(
@@ -280,7 +368,7 @@ class GHASetUpDevicePage(BasePage):
                                     or t_elem.text
                                     or ""
                             ).strip()
-                            if not t_text:
+                            if not t_text or t_text.lower() == "set up nearby devices":
                                 continue
                             t_y = int(t_rect["y"])
                             t_h = int(t_rect.get("height", 24))
@@ -296,8 +384,9 @@ class GHASetUpDevicePage(BasePage):
                                             or s_elem.text
                                             or ""
                                     ).strip()
-                                    sub_bottom = max(sub_bottom,
-                                                     s_y + int(s_rect.get("height", 20)))
+                                    sub_bottom = max(
+                                        sub_bottom, s_y + int(s_rect.get("height", 20))
+                                    )
                                     break
                             display_name = f"{t_text} ({matching_sub})" if matching_sub else t_text
                             name_visible = (t_y >= 90) and (sub_bottom <= footer_top_y - 10)
@@ -320,7 +409,7 @@ class GHASetUpDevicePage(BasePage):
     @staticmethod
     def _get_viewport_signature(items: List[Dict[str, Any]]) -> Tuple[Tuple[str, int], ...]:
         """Build a geometry signature of visible cards (display_name + quantized y) to detect scroll movement."""
-        sig: List[Tuple[str, int], ...] = []
+        sig: List[Tuple[str, int]] = []
         for item in items:
             rect = item.get("rect") or {}
             y_bucket = int(round(float(rect.get("y", 0)) / 15.0))
@@ -328,21 +417,21 @@ class GHASetUpDevicePage(BasePage):
         return tuple(sig)
 
     def _is_target_device_match(self, target_name: str, item: Dict[str, Any]) -> bool:
-        """Check if a device item matches the target device name (by containment) and its expected identifier."""
-        target = target_name.strip().lower()
-        title = item["title"].strip().lower()
-        subtitle = item["subtitle"].strip().lower()
-        display = item["display_name"].strip().lower()
-        name_matched = self._is_name_contained(target_name, title, display)
+        """Check if a device item matches the target device's expected Matter identifier (when configured)
+        or matches the target device name by containment.
+        """
+        target = " ".join(target_name.strip().lower().split())
+        title = " ".join(item["title"].strip().lower().split())
+        subtitle = " ".join(item["subtitle"].strip().lower().split())
+        display = " ".join(item["display_name"].strip().lower().split())
         expected_id = self._get_expected_identifier(target_name)
         if expected_id:
-            id_matched = (
+            return (
                     (expected_id == subtitle)
                     or (expected_id in subtitle)
                     or (expected_id in display)
             )
-            return name_matched and id_matched
-        if name_matched:
+        if self._is_name_contained(target_name, title, display):
             return True
         if subtitle and (target == subtitle or target in subtitle or subtitle in target):
             return True
@@ -417,19 +506,21 @@ class GHASetUpDevicePage(BasePage):
             rect: Dict[str, int],
             display_name: str,
             footer_top_y: int,
+            allow_bottom_limit: bool = False,
     ) -> bool:
-        """Click the device card element only when its device name is visible above the footer,
+        """Click the device card element safely above the 'Set up a different device' footer,
         and verify that a sudden nearby-device list update did not shift the card away without navigating.
         """
-        safe_min_tap_y = max(95, int(rect["y"]) + 30)
+        old_top_y = int(rect["y"])
+        safe_min_tap_y = max(95, old_top_y + 30)
         safe_max_tap_y = footer_top_y - 30
         cx = int(rect["x"] + rect["width"] / 2)
-        raw_cy = int(rect["y"] + rect["height"] / 2)
+        raw_cy = int(old_top_y + rect["height"] / 2)
         safe_cy = max(safe_min_tap_y, min(raw_cy, safe_max_tap_y))
         tapped = False
-        if raw_cy > safe_max_tap_y or int(rect["y"]) < 60:
+        if raw_cy > safe_max_tap_y or old_top_y < 60:
             self._logger.info(
-                f"Card '{display_name}' (y={rect['y']}, cy={raw_cy}, footer_top={footer_top_y}) "
+                f"Card '{display_name}' (y={old_top_y}, cy={raw_cy}, footer_top={footer_top_y}) "
                 f"using safe coordinate tap at ({cx}, {safe_cy}) instead of elem.click()..."
             )
             try:
@@ -460,7 +551,7 @@ class GHASetUpDevicePage(BasePage):
                     return False
         # Wait 1.0s and inspect the screen:
         # 1) If no nearby-device cards remain on screen, we successfully navigated to the next setup page!
-        # 2) If nearby-device cards are still on screen, check whether our target card ran away or is still visible.
+        # 2) If nearby-device cards are still on screen, check whether our target card ran away or needs a follow-up tap.
         time.sleep(1.0)
         post_click_items = self._get_all_visible_device_items()
         if not post_click_items:
@@ -479,21 +570,26 @@ class GHASetUpDevicePage(BasePage):
                 f"Continuing scan to re-locate '{display_name}'..."
             )
             return False
-        if not still_present.get("name_visible", False):
+        r2 = still_present.get("rect") or still_present["element"].rect
+        new_top_y = int(r2["y"])
+        if (
+                not still_present.get("name_visible", False)
+                and not allow_bottom_limit
+                and abs(new_top_y - old_top_y) > 25
+        ):
             self._logger.warning(
                 f"After initial click, '{display_name}' shifted so its device name is now covered on UI "
-                f"(y={still_present['rect']['y']}, name_bottom={still_present.get('name_bottom_y')}, "
+                f"(y={new_top_y}, name_bottom={still_present.get('name_bottom_y')}, "
                 f"footer_top={footer_top_y}). Scrolling to reveal device name before re-clicking..."
             )
             return False
         try:
-            r2 = still_present.get("rect") or still_present["element"].rect
             cx2 = int(r2["x"] + r2["width"] / 2)
-            raw_cy2 = int(r2["y"] + r2["height"] / 2)
-            min_y2 = max(95, int(r2["y"]) + 30)
+            raw_cy2 = int(new_top_y + r2["height"] / 2)
+            min_y2 = max(95, new_top_y + 30)
             cy2 = max(min_y2, min(raw_cy2, safe_max_tap_y))
             self._logger.info(
-                f"Device card '{display_name}' still visible with device name on UI after initial click; "
+                f"Device card '{display_name}' still present on UI after initial click; "
                 f"sending follow-up coordinate tap at ({cx2}, {cy2})..."
             )
             self.driver.execute_script("mobile: tap", {"x": cx2, "y": cy2})
@@ -511,9 +607,12 @@ class GHASetUpDevicePage(BasePage):
             bool: True if clicked and navigated successfully, False if not visible or shifted out.
         """
         _, win_h = self._get_window_size_safe()
-        footer_top_y = self._get_footer_top_y()
+        max_attempts = 5
         last_nudge: Optional[str] = None
-        for attempt in range(4):
+        prev_nudge_top_y: Optional[int] = None
+        at_scroll_bottom_limit = False
+        for attempt in range(max_attempts):
+            footer_top_y = self._get_footer_top_y()
             items = self._get_all_visible_device_items()
             target_item = None
             for item in items:
@@ -524,14 +623,15 @@ class GHASetUpDevicePage(BasePage):
                 target_item = initial_item
             if not target_item:
                 self._logger.warning(
-                    f"Target '{target_name}' not visible on click attempt {attempt + 1}/4. Retrying..."
+                    f"Target '{target_name}' not visible on click attempt {attempt + 1}/{max_attempts}. Retrying..."
                 )
-                if last_nudge == "up" and attempt < 3:
+                if last_nudge == "up" and attempt < max_attempts - 1:
                     self._logger.info(
                         "Reversing previous upward nudge to pull target card back into view..."
                     )
                     self._nudge_scroll_vertical(int(win_h * 0.35), int(win_h * 0.55))
                     last_nudge = "down"
+                    prev_nudge_top_y = None
                 else:
                     time.sleep(0.5)
                 continue
@@ -545,27 +645,45 @@ class GHASetUpDevicePage(BasePage):
                 name_top_y = int(target_item.get("name_top_y", card_bottom - 88))
                 name_bottom_y = int(target_item.get("name_bottom_y", card_bottom - 12))
                 name_visible = bool(target_item.get("name_visible", False))
-                # Requirement: Device name MUST be visible on the UI (not covered by 'Set up a different device' footer)
-                if not name_visible and attempt < 3:
+                # Requirement: Device name MUST be visible on the UI (not covered by 'Set up a different device' footer),
+                # unless UIScrollView has already reached its physical bottom limit and cannot scroll up further.
+                if not name_visible and not at_scroll_bottom_limit and attempt < max_attempts - 1:
                     if name_bottom_y > footer_top_y - 10:
-                        self._logger.info(
-                            f"Target '{target_item['display_name']}' is detected on screen, but its device name is "
-                            f"covered by the 'Set up a different device' footer (y={top_y}, bottom={card_bottom}, "
-                            f"name_bottom={name_bottom_y}, footer_top={footer_top_y}). "
-                            f"Scrolling up gently so device name is visible on UI (attempt {attempt + 1}/3)..."
-                        )
-                        # Calculate gentle drag distance to pull name_bottom_y ~65pt above footer_top_y
-                        needed_shift = max(135, min(210, name_bottom_y - (footer_top_y - 65)))
-                        start_y = int(win_h * 0.56)
-                        end_y = max(int(win_h * 0.25), start_y - needed_shift)
-                        self._nudge_scroll_vertical(start_y, end_y)
-                        last_nudge = "up"
-                        continue
-                    if top_y < 60 or name_top_y < 90:
+                        if (
+                                last_nudge == "up"
+                                and prev_nudge_top_y is not None
+                                and abs(top_y - prev_nudge_top_y) < 15
+                                and name_top_y <= footer_top_y - 15
+                        ):
+                            at_scroll_bottom_limit = True
+                            self._logger.info(
+                                f"Scroll view reached bottom limit for '{target_item['display_name']}' "
+                                f"(card stayed at y={top_y}, name_top={name_top_y}, footer_top={footer_top_y}). "
+                                "Proceeding to click..."
+                            )
+                        else:
+                            self._logger.info(
+                                f"Target '{target_item['display_name']}' is detected on screen, but its device name is "
+                                f"covered by the 'Set up a different device' footer (y={top_y}, bottom={card_bottom}, "
+                                f"name_bottom={name_bottom_y}, footer_top={footer_top_y}). "
+                                f"Scrolling up gently so device name is visible on UI "
+                                f"(attempt {attempt + 1}/{max_attempts - 1})..."
+                            )
+                            prev_nudge_top_y = top_y
+                            # Calculate gentle drag distance to pull name_bottom_y ~65pt above footer_top_y
+                            needed_shift = max(135, min(210, name_bottom_y - (footer_top_y - 65)))
+                            start_y = int(win_h * 0.56)
+                            end_y = max(int(win_h * 0.25), start_y - needed_shift)
+                            self._nudge_scroll_vertical(start_y, end_y)
+                            last_nudge = "up"
+                            continue
+                    elif top_y < 60 or name_top_y < 90:
                         self._logger.info(
                             f"Target '{target_item['display_name']}' is clipped near the top header "
-                            f"(y={top_y}, name_top={name_top_y}). Nudging down gently (attempt {attempt + 1}/3)..."
+                            f"(y={top_y}, name_top={name_top_y}). Nudging down gently "
+                            f"(attempt {attempt + 1}/{max_attempts - 1})..."
                         )
+                        prev_nudge_top_y = top_y
                         self._nudge_scroll_vertical(int(win_h * 0.35), int(win_h * 0.53))
                         last_nudge = "down"
                         continue
@@ -587,14 +705,18 @@ class GHASetUpDevicePage(BasePage):
                         continue
                     fresh_rect = fresh_target.get("rect") or fresh_target["element"].rect
                     fresh_top_y = int(fresh_rect["y"])
-                    if not fresh_target.get("name_visible", False) and attempt < 3:
+                    if (
+                            not fresh_target.get("name_visible", False)
+                            and not at_scroll_bottom_limit
+                            and attempt < max_attempts - 1
+                    ):
                         self._logger.warning(
                             f"Nearby devices list updated and '{fresh_target['display_name']}' device name is now "
                             f"covered (y={fresh_top_y}, name_bottom={fresh_target.get('name_bottom_y')}, "
                             f"footer_top={footer_top_y}). Scrolling to reveal device name before clicking..."
                         )
                         continue
-                    if abs(fresh_top_y - top_y) > 35 and attempt < 3:
+                    if abs(fresh_top_y - top_y) > 35 and attempt < max_attempts - 1:
                         self._logger.warning(
                             f"Nearby devices list is shifting ('{fresh_target['display_name']}' moved from "
                             f"y={top_y} to y={fresh_top_y}). Waiting for list to stabilize before clicking..."
@@ -606,32 +728,43 @@ class GHASetUpDevicePage(BasePage):
                     top_y = fresh_top_y
                     cy = int(rect["y"] + rect["height"] / 2)
                 current_label = (
-                        elem.get_attribute("label") or elem.get_attribute(
-                    "value") or elem.text or ""
-                ).lower()
-                expected_sub = target_item["subtitle"].lower()
-                if current_label and (
-                        not self._is_name_contained(target_item["title"], current_label)
-                        or (
-                                expected_sub and "," in current_label and expected_sub not in current_label)
-                ):
-                    self._logger.warning(
-                        f"List shifted! Element is now '{current_label}' instead of '{target_item['display_name']}'. Re-locating..."
-                    )
-                    time.sleep(0.5)
-                    continue
+                        elem.get_attribute("label")
+                        or elem.get_attribute("value")
+                        or elem.text
+                        or ""
+                ).strip()
+                if current_label:
+                    curr_title, curr_sub = self._split_card_label(current_label)
+                    curr_probe = {
+                        "title": curr_title,
+                        "subtitle": curr_sub,
+                        "display_name": f"{curr_title} ({curr_sub})" if curr_sub else curr_title,
+                    }
+                    if not self._is_target_device_match(target_name, curr_probe):
+                        self._logger.warning(
+                            f"List shifted! Element is now '{current_label}' instead of "
+                            f"'{target_item['display_name']}'. Re-locating..."
+                        )
+                        time.sleep(0.5)
+                        continue
                 self._logger.info(
                     f"Target device '{target_item['display_name']}' has device name clearly visible on UI "
                     f"(y={top_y}, cy={cy}, name_bottom={target_item.get('name_bottom_y')}, footer_top={footer_top_y})! "
                     f"Clicking now..."
                 )
                 if self._tap_card_with_fallbacks(
-                        target_name, elem, rect, target_item["display_name"], footer_top_y
+                        target_name,
+                        elem,
+                        rect,
+                        target_item["display_name"],
+                        footer_top_y,
+                        allow_bottom_limit=at_scroll_bottom_limit,
                 ):
                     return True
             except (StaleElementReferenceException, WebDriverException) as e:
                 self._logger.warning(
-                    f"List re-rendered during click ({e.__class__.__name__}). Retrying ({attempt + 1}/4)..."
+                    f"List re-rendered during click ({e.__class__.__name__}). "
+                    f"Retrying ({attempt + 1}/{max_attempts})..."
                 )
                 time.sleep(0.8)
         return False
@@ -655,6 +788,7 @@ class GHASetUpDevicePage(BasePage):
         poll_start = time.time()
         last_items: List[Dict[str, Any]] = []
         ran_phase1 = False
+        phase1_interrupted = False
         while time.time() - poll_start < initial_wait_seconds:
             ran_phase1 = True
             items = self._get_all_visible_device_items()
@@ -676,13 +810,13 @@ class GHASetUpDevicePage(BasePage):
                 )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
                     return True
-                else:
-                    self._logger.info(
-                        "Target was pushed off-screen or list updated during Phase 1. Proceeding to Phase 2 scroll..."
-                    )
-                    break
+                self._logger.info(
+                    "Target was pushed off-screen or list updated during Phase 1. Proceeding to Phase 2 scroll..."
+                )
+                phase1_interrupted = True
+                break
             time.sleep(2)
-        if not ran_phase1:
+        if not ran_phase1 or phase1_interrupted:
             items = self._get_all_visible_device_items()
             last_items = items
             matched_item = None
@@ -697,7 +831,7 @@ class GHASetUpDevicePage(BasePage):
             )
             if matched_item is not None:
                 self._logger.info(
-                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' at top "
+                    f"Target device '{target_desc}' matched card '{matched_item['display_name']}' in current view "
                     f"(name_visible={matched_item.get('name_visible')})! Attempting safe click..."
                 )
                 if self._safe_click_target_device(device_name, initial_item=matched_item):
@@ -747,7 +881,7 @@ class GHASetUpDevicePage(BasePage):
                     unchanged_viewport_count = 0
                 else:
                     unchanged_viewport_count += 1
-            if unchanged_viewport_count >= 2 or consecutive_no_new_devices >= 4:
+            if unchanged_viewport_count >= 2:
                 self._logger.info(
                     f"Reached bottom of nearby device list in downward scan "
                     f"(unchanged_viewport={unchanged_viewport_count}, no_new_devices={consecutive_no_new_devices})."
