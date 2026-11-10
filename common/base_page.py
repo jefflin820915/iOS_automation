@@ -291,8 +291,13 @@ class BasePage:
             return False
 
     def _resume_if_suspended(self) -> None:
-        """Auto-heal: If GHA is suspended/backgrounded, pull it back to foreground."""
-        bundle_id = getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
+        """Auto-heal: If the target app (GHA or GHP Sample App) is suspended/backgrounded, pull it back to foreground."""
+        bundle_id = (
+                getattr(self, "APP_BUNDLE_ID", None)
+                or getattr(self.driver, "_active_app_bundle_id", None)
+                or getattr(constants, "ACTIVE_APP_BUNDLE_ID", None)
+                or getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
+        )
         try:
             if self.driver.query_app_state(bundle_id) != 4:
                 self._logger.warning(
