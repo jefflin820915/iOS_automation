@@ -29,6 +29,7 @@ from page_object.iGHA.gha_enter_pairing_code_page import GHAEnterPairingCodePage
 from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 from page_object.iGHA.gha_help_improve_camera_device_page import GHAHelpImproveCameraDevicePage
 from page_object.iGHA.gha_home_page import GHAHomePage
+from page_object.iGHA.gha_partner_notifications_page import GHAPartnerNotificationsPage
 from page_object.iGHA.gha_privacy_guidelines_page import GHAPrivacyGuidelinesPage
 from page_object.iGHA.gha_setting_page import GHASettingsPage
 from page_object.iGHA.gha_setup_device_page import GHASetUpDevicePage
@@ -1054,11 +1055,29 @@ class GHASession:
             skipped_familiar_face = (
                 GHAFamiliarFaceDetectionPage.handle_familiar_face_detection_if_present(self)
             )
+            step = "Notifications from partner app"
+            handled_partner_notifications = (
+                GHAPartnerNotificationsPage.handle_partner_notifications_if_present(self)
+            )
+            if handled_partner_notifications and not skipped_familiar_face:
+                step = "Familiar face detection"
+                skipped_familiar_face = (
+                    GHAFamiliarFaceDetectionPage.handle_familiar_face_detection_if_present(
+                        self, timeout=5.0
+                    )
+                )
             step = "Stay in the know"
             GHAStayInTheKnowPage.handle_stay_in_the_know_page_process(self)
             if not skipped_familiar_face:
                 step = "Familiar face detection"
-                GHAFamiliarFaceDetectionPage.handle_familiar_face_detection_if_present(
+                skipped_familiar_face = (
+                    GHAFamiliarFaceDetectionPage.handle_familiar_face_detection_if_present(
+                        self, timeout=3.0
+                    )
+                )
+            if not handled_partner_notifications:
+                step = "Notifications from partner app"
+                GHAPartnerNotificationsPage.handle_partner_notifications_if_present(
                     self, timeout=3.0
                 )
             step = "Your camera device is ready"

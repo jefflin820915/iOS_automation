@@ -84,8 +84,11 @@ class GHAFamiliarFaceDetectionPage(BasePage):
     FFD_DOWNSTREAM_LOCATORS: Tuple[Locator, ...] = (
         (
             IOS_PREDICATE_BY,
-            'type == "XCUIElementTypeStaticText" AND ('
-            'label CONTAINS[c] "Stay in the know" OR name CONTAINS[c] "Stay in the know" '
+            'type IN {"XCUIElementTypeStaticText", "XCUIElementTypeTextView"} AND ('
+            'label BEGINSWITH[c] "Notifications from the" OR name BEGINSWITH[c] "Notifications from the" '
+            'OR label CONTAINS[c] "notifications from the Google Home app" '
+            'OR value CONTAINS[c] "notifications from the Google Home app" '
+            'OR label CONTAINS[c] "Stay in the know" OR name CONTAINS[c] "Stay in the know" '
             'OR label CONTAINS[c] "Keep up to date" OR name CONTAINS[c] "Keep up to date" '
             'OR label BEGINSWITH "Your camera device is ready" '
             'OR name BEGINSWITH "Your camera device is ready")',
