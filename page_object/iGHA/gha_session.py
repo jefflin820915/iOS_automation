@@ -23,6 +23,7 @@ from page_object.iGHA.gha_commission_flow import GHACommissioningPageObject
 from page_object.iGHA.gha_connect_device_to_google_account_page import \
     GHAConnectDeviceToGoogleAccountPage
 from page_object.iGHA.gha_device_page import GHADevicePage
+from page_object.iGHA.gha_familiar_face_detection_page import GHAFamiliarFaceDetectionPage
 from page_object.iGHA.gha_device_setting_page import GHADeviceSettingPage
 from page_object.iGHA.gha_enter_pairing_code_page import GHAEnterPairingCodePage
 from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
@@ -1049,8 +1050,17 @@ class GHASession:
             step = "Adjust your mic settings"
             GHAAdjustYourMicSettingsPage.enable_all_mic_settings_and_proceed(self)
             time.sleep(5)
+            step = "Familiar face detection"
+            skipped_familiar_face = (
+                GHAFamiliarFaceDetectionPage.handle_familiar_face_detection_if_present(self)
+            )
             step = "Stay in the know"
             GHAStayInTheKnowPage.handle_stay_in_the_know_page_process(self)
+            if not skipped_familiar_face:
+                step = "Familiar face detection"
+                GHAFamiliarFaceDetectionPage.handle_familiar_face_detection_if_present(
+                    self, timeout=3.0
+                )
             step = "Your camera device is ready"
             GHAYourCameraDeviceIsReadyPage.click_done_btn(self)
             return True
