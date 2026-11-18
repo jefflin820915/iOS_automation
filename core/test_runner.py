@@ -25,12 +25,23 @@ from core.device_log_collector import DeviceLogCollector
 from core.syslog_collector import SyslogCollector
 from page_object.iGHA.gha_session import GHASession
 from page_object.iGHP.ghp_session import GHPSession
+
+try:
+    from page_object.Partner.ATT.att_common import resolve_att_bundle_id
+    from page_object.Partner.ATT.att_session import ATTSession
+except ImportError:  # pragma: no cover - fallback when ATT package is absent
+    ATTSession = None  # type: ignore[assignment]
+    resolve_att_bundle_id = None  # type: ignore[assignment]
 from testcase.iGHA.test_home import TestGHAHome
 
 try:
     from testcase.iGHP.test_home import TestGHPHome
 except ImportError:  # pragma: no cover - fallback when testcase is partially mocked
     TestGHPHome = None  # type: ignore[assignment]
+try:
+    from testcase.Partner.ATT.test_home import TestATTHome
+except ImportError:  # pragma: no cover - fallback when testcase is partially mocked
+    TestATTHome = None  # type: ignore[assignment]
 from utils import logging_utils
 from utils.drive_uploader import DriveUploader
 from utils.environment_utils import log_all_version_information, get_wifi_information
@@ -67,21 +78,21 @@ class MultiProjectTestRunner:
         "Ref2 Battery Camera": {
             "adb_serial": "S1B1D22607000063",
             "shell_command": "catch_log",
-            "file_suffix": "camera",
+            "file_suffix": "camera",  # -> Main log/LOG_<ts>_camera.log
             "stop_shell_command": "pkill -f catch_log",
             "reconnect_timeout_s": 300,
         },
         "HD Wired Indoor Camera": {
             "adb_serial": "S1W1D22605000105",
             "shell_command": "catch_log",
-            "file_suffix": "camera",
+            "file_suffix": "camera",  # -> Main log/LOG_<ts>_camera.log
             "stop_shell_command": "pkill -f catch_log",
             "reconnect_timeout_s": 300,
         },
         "2K Battery Doorbell Camera": {
             "adb_serial": "S1D1D32607000176",
             "shell_command": "catch_log",
-            "file_suffix": "camera",
+            "file_suffix": "camera",  # -> Main log/LOG_<ts>_camera.log
             "stop_shell_command": "pkill -f catch_log",
             "reconnect_timeout_s": 300,
         },
@@ -114,7 +125,6 @@ class MultiProjectTestRunner:
         self.pairing_codes: List[str] = self._normalize_str_list(pairing_code)
         self.adb_serials: List[str] = self._normalize_str_list(adb_serial)
         self.plug_names: List[str] = self._normalize_str_list(plug_name)
-
         self._multi_session_requested: bool = any(
             v is not None for v in (udid, wda_port, mjpeg_port, ios_version, appium_url)
         )
@@ -134,18 +144,18 @@ class MultiProjectTestRunner:
             self._sync_adb_reset_target(initial_dev, self.get_iteration_adb_serial(1))
         if self.plug_names:
             self._apply_plug_filter(self.plug_names)
-
         self.driver: Optional[webdriver.Remote] = None
         self.syslog_collector: Optional[SyslogCollector] = None
         self.syslog_file_paths: List[str] = []
-        self.device_log_collector: Optional[DeviceLogCollector] = None
-        self.device_log_file_paths: List[str] = []
+        self.device_log_collector: Optional[DeviceLogCollector] = None  # [DEVICE LOG]
+        self.device_log_file_paths: List[str] = []  # [DEVICE LOG]
         self.failure_screenshots: List[str] = []
         self.screen_recordings: List[str] = []
         self.last_error_message: Optional[str] = None
         self.component_id = component_id
         self.gemini_reporter = GeminiReporter(api_key=gemini_api_key)
-        self.gha_version: str = "N/A" if self.project_name == "ighp" else "4.29.25"
+        self.gha_version: str = "N/A" if self.project_name in ("ighp", "att") else "4.29.25"
+        self.att_version: str = "UNKNOWN" if self.project_name == "att" else "N/A"
         self.sample_app_version: str = "UNKNOWN" if self.project_name == "ighp" else "N/A"
         self.sdk_version: str = "UNKNOWN" if self.project_name == "ighp" else "N/A"
         self.ios_version: str = str(
@@ -242,7 +252,6 @@ class MultiProjectTestRunner:
         """Isolate constants.IOS_CAPABILITIES and constants.APPIUM_SERVER_URL inside this OS process."""
         caps = dict(getattr(constants, "IOS_CAPABILITIES", {}) or {})
         orig_udid = str(caps.get("appium:udid", "") or "").strip()
-
         if udid and udid.strip():
             clean_udid = udid.strip()
             caps["appium:udid"] = clean_udid
@@ -253,24 +262,21 @@ class MultiProjectTestRunner:
                 if meta.get("ProductVersion"):
                     caps["appium:platformVersion"] = meta["ProductVersion"]
                 else:
+                    # Let Appium XCUITest query the real iPhone directly rather than sending another phone's iOS version.
                     caps.pop("appium:platformVersion", None)
                 if meta.get("DeviceName"):
                     caps["appium:deviceName"] = meta["DeviceName"]
         elif ios_version and ios_version.strip():
             caps["appium:platformVersion"] = ios_version.strip()
-
         if wda_port is not None:
             port_int = int(wda_port)
             caps["appium:wdaLocalPort"] = port_int
             if mjpeg_port is None:
                 caps["appium:mjpegServerPort"] = (
-                            9100 + (port_int - 8100)) if port_int >= 8000 else (port_int + 1000)
-
+                        9100 + (port_int - 8100)) if port_int >= 8000 else (port_int + 1000)
         if mjpeg_port is not None:
             caps["appium:mjpegServerPort"] = int(mjpeg_port)
-
         constants.IOS_CAPABILITIES = caps
-
         if appium_url and appium_url.strip():
             constants.APPIUM_SERVER_URL = appium_url.strip()
 
@@ -342,7 +348,6 @@ class MultiProjectTestRunner:
         )
         if not self._multi_session_requested and not claimed_by_other:
             return
-
         logs_root = os.path.dirname(current_dir)
         ts_part = getattr(constants, "TIMESTAMP", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
         udid_tag = self._short_udid_tag(self.udid, self.wda_local_port)
@@ -350,7 +355,6 @@ class MultiProjectTestRunner:
         if os.path.isdir(candidate) and self._is_session_dir_active(candidate,
                                                                     ignore_current_pid=True):
             candidate = f"{candidate}_{os.getpid()}"
-
         constants.SESSION_LOG_DIR = candidate
         constants.MAIN_LOG_DIR = os.path.join(candidate, "Main log")
         constants.ADDITIONAL_LOG_DIR = os.path.join(candidate, "Additional log")
@@ -468,10 +472,8 @@ class MultiProjectTestRunner:
         except Exception as e:
             logger.debug(f"[DISK GUARD] Unable to query disk usage: {e}")
             return
-
         if free_gb >= threshold_gb:
             return
-
         logger.warning(
             f"[DISK GUARD] Low disk space detected: {free_gb:.2f} GB free "
             f"(< {threshold_gb:.1f} GB threshold). Pruning old local logs/artifacts..."
@@ -506,7 +508,6 @@ class MultiProjectTestRunner:
             except Exception as scan_err:
                 logger.warning(
                     f"[DISK GUARD] Error scanning sibling session directories: {scan_err}")
-
         if self._get_free_disk_gb(session_dir) < threshold_gb and len(
                 self._completed_case_dirs) > 1:
             if self.drive_uploader:
@@ -527,7 +528,6 @@ class MultiProjectTestRunner:
                     except Exception as rm_err:
                         logger.warning(
                             f"[DISK GUARD] Failed to remove case dir {oldest_case}: {rm_err}")
-
         new_free_gb = self._get_free_disk_gb(session_dir)
         logger.info(f"[DISK GUARD] Disk space after cleanup: {new_free_gb:.2f} GB free.")
 
@@ -782,7 +782,7 @@ class MultiProjectTestRunner:
         ]
         if device_log_targets:
             logger.info(f"       Device Log Capture : {', '.join(device_log_targets)}")
-        if not self.adb_serials:
+        if not self.adb_serials and self.project_name != "att":
             online_adb = self._list_online_adb_serials()
             if len(online_adb) > 1:
                 logger.warning(
@@ -792,17 +792,23 @@ class MultiProjectTestRunner:
                 )
         logger.info("=" * 65)
         logger.info(f"Connecting to Appium Server at: {constants.APPIUM_SERVER_URL}")
-        active_bundle = (
-            getattr(constants, "iGHP_SAMPLE_APP_BUNDLE_ID",
-                    "com.google.homeplatform.sampleapp.gomezandres")
-            if self.project_name == "ighp"
-            else getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
-        )
+        if self.project_name == "ighp":
+            active_bundle = getattr(
+                constants, "iGHP_SAMPLE_APP_BUNDLE_ID",
+                "com.google.homeplatform.sampleapp.gomezandres"
+            )
+        elif self.project_name == "att":
+            active_bundle = getattr(constants, "ATT_BUNDLE_ID", "com.att.connectedlife")
+        else:
+            active_bundle = getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
         constants.ACTIVE_APP_BUNDLE_ID = active_bundle
         options = AppiumOptions()
         options.load_capabilities(constants.IOS_CAPABILITIES)
         with self._interprocess_lock("ios_automation_wda_init.lock"):
             self.driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
+        if self.project_name == "att" and resolve_att_bundle_id is not None:
+            active_bundle = resolve_att_bundle_id(self.driver)
+            constants.ACTIVE_APP_BUNDLE_ID = active_bundle
         try:
             setattr(self.driver, "_active_app_bundle_id", active_bundle)
         except Exception:
@@ -820,9 +826,20 @@ class MultiProjectTestRunner:
         logger.info("=" * 65)
         self._ensure_sufficient_disk_space()
         if self.driver:
-            target_bundle = (
-                constants.iGHP_SAMPLE_APP_BUNDLE_ID if self.project_name == "ighp" else constants.GHA_BUNDLE_ID
-            )
+            if self.project_name == "ighp":
+                target_bundle = getattr(
+                    constants, "iGHP_SAMPLE_APP_BUNDLE_ID",
+                    "com.google.homeplatform.sampleapp.gomezandres"
+                )
+            elif self.project_name == "att":
+                target_bundle = (
+                        getattr(self.driver, "_att_bundle_id", None)
+                        or getattr(self.driver, "_active_app_bundle_id", None)
+                        or getattr(constants, "ATT_BUNDLE_ID", "com.att.connectedlife")
+                )
+            else:
+                target_bundle = getattr(constants, "GHA_BUNDLE_ID",
+                                        "com.google.Chromecast.enterprise")
             try:
                 dest = logging_utils._current_main_log_dir or constants.SESSION_LOG_DIR
                 before = set(os.listdir(dest)) if os.path.isdir(dest) else set()
@@ -860,6 +877,17 @@ class MultiProjectTestRunner:
                 from testcase.iGHP.test_home import TestGHPHome as _TestGHPHome
                 ghp_test_cls = _TestGHPHome
             test_classes = [ghp_test_cls]
+        elif self.project_name == "att":
+            att_sess_cls = ATTSession
+            if att_sess_cls is None:
+                from page_object.Partner.ATT.att_session import ATTSession as _ATTSession
+                att_sess_cls = _ATTSession
+            att_test_cls = TestATTHome
+            if att_test_cls is None:
+                from testcase.Partner.ATT.test_home import TestATTHome as _TestATTHome
+                att_test_cls = _TestATTHome
+            session_instance = att_sess_cls(self.driver)
+            test_classes = [att_test_cls]
         else:
             session_instance = GHASession(self.driver)
             test_classes = [TestGHAHome]
@@ -890,11 +918,15 @@ class MultiProjectTestRunner:
                     self._sync_adb_reset_target(current_device, current_adb_serial)
                 session_instance.device_name = current_device
                 session_instance.pairing_code = current_pairing_code
+                session_instance.iteration = iteration
                 iter_label = f"{iteration}/{self.count}" if self.count else f"{iteration} (Infinite)"
                 logger.info("\n" + "=" * 65)
                 logger.info(f"               STARTING ITERATION #{iter_label}")
                 logger.info(f"               TARGET DEVICE : {current_device}")
-                logger.info(f"               PAIRING CODE  : {current_pairing_code}")
+                if self.project_name == "att":
+                    logger.info(f"               TARGET ROOM   : {self.room_name}")
+                else:
+                    logger.info(f"               PAIRING CODE  : {current_pairing_code}")
                 if current_adb_serial:
                     logger.info(f"               ADB SERIAL    : {current_adb_serial}")
                 logger.info("=" * 65)
@@ -903,8 +935,12 @@ class MultiProjectTestRunner:
                         session=session_instance,
                         device_name=current_device,
                         pairing_code=current_pairing_code,
-                        room_name=self.room_name
+                        room_name=self.room_name,
                     )
+                    try:
+                        test_instance.iteration = iteration
+                    except Exception:
+                        pass
                     class_name = test_cls.__name__
                     test_methods = [
                         getattr(test_instance, name)
@@ -1055,7 +1091,6 @@ class MultiProjectTestRunner:
                                         and self.sdk_version.upper() in ("", "UNKNOWN")
                                 ):
                                     self.sdk_version = sess_k_ver
-
                             if not self.env_info_collected and self.driver:
                                 try:
                                     logger.info(
@@ -1076,6 +1111,14 @@ class MultiProjectTestRunner:
                                             if env_sdk and env_sdk.upper() not in ("UNKNOWN",
                                                                                    "UNKNOWN / NOT INSTALLED"):
                                                 self.sdk_version = env_sdk
+                                        elif self.project_name == "att":
+                                            self.gha_version = "N/A"
+                                            self.sample_app_version = "N/A"
+                                            self.sdk_version = "N/A"
+                                            env_att = str(env_info.get("att_version") or "").strip()
+                                            if env_att and env_att.upper() not in ("UNKNOWN",
+                                                                                   "UNKNOWN / NOT INSTALLED"):
+                                                self.att_version = env_att
                                         else:
                                             if "gha_version" in env_info:
                                                 self.gha_version = str(env_info["gha_version"])
@@ -1107,6 +1150,11 @@ class MultiProjectTestRunner:
                                         logger.info(
                                             f"[ENV INFO] Initialized: Sample App {self.sample_app_version} | "
                                             f"SDK {self.sdk_version} | iOS {self.ios_version} | "
+                                            f"SSID {self.wifi_ssid} | Phone IP {self.phone_ip} | Gateway {self.router_gateway}"
+                                        )
+                                    elif self.project_name == "att":
+                                        logger.info(
+                                            f"[ENV INFO] Initialized: AT&T Connected Life {self.att_version} | iOS {self.ios_version} | "
                                             f"SSID {self.wifi_ssid} | Phone IP {self.phone_ip} | Gateway {self.router_gateway}"
                                         )
                                     else:
@@ -1212,6 +1260,8 @@ class MultiProjectTestRunner:
                                 csv_kwargs["sample_app_version"] = self.sample_app_version
                             if self._csv_accepts_param("sdk_version") or accepts_var_kw:
                                 csv_kwargs["sdk_version"] = self.sdk_version
+                            if self._csv_accepts_param("att_version") or accepts_var_kw:
+                                csv_kwargs["att_version"] = self.att_version
                             if self._csv_accepts_drive_url:
                                 csv_kwargs["drive_url"] = drive_url
                             try:
