@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import tempfile
 import urllib.request
-
 from common import constants
 from utils import logging_utils
 
@@ -27,10 +26,8 @@ def _get_project_root() -> Path:
 PROJECT_ROOT = _get_project_root()
 LOG_DIR = PROJECT_ROOT / "log"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-
 # Dynamic CSV file path (portable across any machine and user)
 CSV_FILE_PATH = str(LOG_DIR / "test_results.csv")
-
 # Local unified CSV headers (23 columns: includes GHA Version + Sample App Version + SDK Version)
 CSV_HEADERS = [
     "Timestamp", "Iteration", "Test Name", "Status", "Duration (s)",
@@ -40,7 +37,6 @@ CSV_HEADERS = [
     "Phone IP Address", "Router Gateway", "Subnet Mask",
     "Device ID", "Serial Number", "Software Version", "Device IP",
 ]
-
 # Sheet 1 (GHA) headers — preserves existing 21-column Google Sheet 1 layout so historical rows never shift
 GHA_SHEET_HEADERS = [
     "Timestamp", "Iteration", "Test Name", "Status", "Duration (s)",
@@ -49,11 +45,18 @@ GHA_SHEET_HEADERS = [
     "Phone IP Address", "Router Gateway", "Subnet Mask",
     "Device ID", "Serial Number", "Software Version", "Device IP",
 ]
-
 # Sheet 2 (GHP) headers — 22-column Google Sheet 2 layout dedicated to GHP Sample App + SDK Version
 GHP_SHEET_HEADERS = [
     "Timestamp", "Iteration", "Test Name", "Status", "Duration (s)",
     "Sample App Version", "SDK Version", "iOS Version", "Device Name", "Wi-Fi SSID",
+    "Failure Stage", "Error Message", "Log Directory", "Video File", "Host Machine",
+    "Phone IP Address", "Router Gateway", "Subnet Mask",
+    "Device ID", "Serial Number", "Software Version", "Device IP",
+]
+# Sheet 3 (ATT) headers — 21-column Google Sheet 3 layout dedicated to AT&T Connected Life
+ATT_SHEET_HEADERS = [
+    "Timestamp", "Iteration", "Test Name", "Status", "Duration (s)",
+    "AT&T App Version", "iOS Version", "Device Name", "Wi-Fi SSID",
     "Failure Stage", "Error Message", "Log Directory", "Video File", "Host Machine",
     "Phone IP Address", "Router Gateway", "Subnet Mask",
     "Device ID", "Serial Number", "Software Version", "Device IP",
@@ -74,7 +77,6 @@ def _upgrade_legacy_csv_if_needed(csv_path: str) -> None:
             return
         if "GHA Version" not in header:
             return
-
         gha_idx = header.index("GHA Version")
         upgraded_rows = [CSV_HEADERS]
         for old_row in rows[1:]:
@@ -84,7 +86,6 @@ def _upgrade_legacy_csv_if_needed(csv_path: str) -> None:
                 )
             else:
                 upgraded_rows.append(old_row)
-
         parent_dir = os.path.dirname(os.path.abspath(csv_path))
         fd, tmp_path = tempfile.mkstemp(prefix=".csv_upgrade_", suffix=".csv", dir=parent_dir)
         try:
@@ -128,35 +129,45 @@ def append_test_result_to_csv(
         app: str = "igha",
         sample_app_version: str = "N/A",
         sdk_version: str = "N/A",
+        att_version: str = "N/A",
 ) -> None:
     """Record testcase telemetry to local CSV and upload payload to Google Sheet Webhook.
-
     - Local CSV (`log/test_results.csv`): always writes all 23 unified columns.
     - Google Sheet Webhook:
       * `app == "igha"` -> routes to `Sheet 1` (21 columns, keeping existing GHA sheet intact).
       * `app == "ighp"` -> routes to `Sheet 2` (22 columns, with Sample App Version & SDK Version).
+      * `app == "att"`  -> routes to `Sheet 3` (21 columns, with AT&T App Version).
     """
     os.makedirs(os.path.dirname(os.path.abspath(CSV_FILE_PATH)), exist_ok=True)
     _upgrade_legacy_csv_if_needed(CSV_FILE_PATH)
     file_exists = os.path.isfile(CSV_FILE_PATH) and os.path.getsize(CSV_FILE_PATH) > 0
-
     app_norm = (app or "igha").strip().lower()
     is_ghp = app_norm == "ighp"
-
+    is_att = app_norm == "att"
     if is_ghp:
         csv_gha_version = gha_version if (
-                gha_version and gha_version not in ("4.29.25", "")) else "N/A"
+                    gha_version and gha_version not in ("4.29.25", "")) else "N/A"
         csv_sample_version = sample_app_version or "UNKNOWN"
         csv_sdk_version = sdk_version or "UNKNOWN"
+        csv_att_version = "N/A"
+    elif is_att:
+        csv_att_version = att_version or "UNKNOWN"
+        csv_gha_version = "N/A"
+        if sample_app_version and sample_app_version != "N/A":
+            csv_sample_version = sample_app_version
+        elif csv_att_version.upper() not in ("", "N/A", "UNKNOWN", "UNKNOWN / NOT INSTALLED"):
+            csv_sample_version = f"AT&T {csv_att_version}"
+        else:
+            csv_sample_version = csv_att_version
+        csv_sdk_version = "N/A"
     else:
         csv_gha_version = gha_version or "UNKNOWN"
         csv_sample_version = sample_app_version if sample_app_version else "N/A"
         csv_sdk_version = sdk_version if sdk_version else "N/A"
-
+        csv_att_version = "N/A"
     duration_s = round((end_time - start_time).total_seconds(), 2)
     timestamp_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
     iteration_str = f"Iter {iteration}"
-
     csv_row = [
         timestamp_str,
         iteration_str,
@@ -182,7 +193,6 @@ def append_test_result_to_csv(
         software_version,
         device_ip,
     ]
-
     try:
         with open(CSV_FILE_PATH, mode="a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
@@ -193,7 +203,6 @@ def append_test_result_to_csv(
             f"[CSV] Appended telemetry row for '{test_name}' ({app_norm}) to {CSV_FILE_PATH}")
     except Exception as e:
         logger.error(f"[CSV] Failed to append row to CSV: {e}")
-
     if is_ghp:
         target_sheet_name = "Sheet 2"
         target_sheet_index = 2
@@ -206,6 +215,33 @@ def append_test_result_to_csv(
             duration_s,
             csv_sample_version,
             csv_sdk_version,
+            ios_version,
+            device_name,
+            wifi_ssid,
+            failure_stage,
+            error_msg,
+            log_dir,
+            video_file,
+            host_machine,
+            phone_ip,
+            router_gateway,
+            subnet_mask,
+            device_id,
+            serial_number,
+            software_version,
+            device_ip,
+        ]
+    elif is_att:
+        target_sheet_name = "Sheet 3"
+        target_sheet_index = 3
+        sheet_headers = ATT_SHEET_HEADERS
+        sheet_row = [
+            timestamp_str,
+            iteration_str,
+            test_name,
+            status,
+            duration_s,
+            csv_att_version,
             ios_version,
             device_name,
             wifi_ssid,
@@ -249,7 +285,6 @@ def append_test_result_to_csv(
             software_version,
             device_ip,
         ]
-
     payload_data = {
         "app": app_norm,
         "sheet_name": target_sheet_name,
@@ -261,6 +296,7 @@ def append_test_result_to_csv(
         "status": status,
         "duration_s": duration_s,
         "gha_version": csv_gha_version,
+        "att_version": csv_att_version,
         "sample_app_version": csv_sample_version,
         "sdk_version": csv_sdk_version,
         "ios_version": ios_version,
@@ -282,13 +318,11 @@ def append_test_result_to_csv(
         "values": sheet_row,
         "csv_row": csv_row,
     }
-
     webhook_url = getattr(constants, "GOOGLE_SHEET_WEBHOOK_URL", "")
     if not webhook_url:
         logger.warning(
             "[WEBHOOK] GOOGLE_SHEET_WEBHOOK_URL is not defined in constants. Skipping sync.")
         return
-
     try:
         logger.info(
             f"[WEBHOOK] Uploading telemetry for '{test_name}' (app={app_norm} -> {target_sheet_name}) to Google Sheet..."

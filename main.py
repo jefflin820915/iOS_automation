@@ -28,8 +28,8 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="iOS Automation Multi-Project Test Runner")
     parser.add_argument(
         "-a", "--app",
-        choices=["igha", "ighp"],
-        help="Target project to test: 'igha' (Google Home App) or 'ighp' (Home Platform Sample App)"
+        choices=["igha", "ighp", "att"],
+        help="Target project to test: 'igha' (Google Home App), 'ighp' (Home Platform Sample App), or 'att' (AT&T Connected Life)"
     )
     parser.add_argument(
         "-d", "--device_name",

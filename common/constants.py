@@ -30,6 +30,12 @@ ADB_PATH = (
     else "/usr/local/bin/adb"
 )
 
+# ==================== AT&T Connected Life (`att`) ====================
+ATT_BUNDLE_ID = "com.att.connectedlife"
+ATT_RELAUNCH_INTERVAL = 10
+ATT_LIVE_WAIT_TIMEOUT_S = 30.0
+ATT_LIVE_VERIFY_SECONDS = 8.0
+
 # ==================== App Settings ====================
 GHA_BUNDLE_ID = "com.google.Chromecast"
 iGHP_SAMPLE_APP_BUNDLE_ID = "com.google.homeplatform.sampleapp.gomezandres"
@@ -46,26 +52,37 @@ GHA_IOS_GET_STARTED_URL = "https://developers.home.google.com/apis/ios/get-start
 APPIUM_SERVER_URL = "http://localhost:4723"
 
 # ==================== iOS Device Capabilities ====================
-# IOS_CAPABILITIES = {
-#     "platformName": "iOS",
-#     "appium:automationName": "XCUITest",
-#     "appium:deviceName": "Test’s iPhone",
-#     "appium:platformVersion": "26.5.2",
-#     "appium:udid": "00008030-00064DC43EEA802E",
-#     "appium:xcodeOrgId": "J8YMN73J2Y",
-#     "appium:newCommandTimeout": 3600,
-# }
 IOS_CAPABILITIES = {
     "platformName": "iOS",
     "appium:automationName": "XCUITest",
     "appium:deviceName": "Test’s iPhone",
     "appium:platformVersion": "26.5.2",
-    "appium:udid": "00008110-00191899267A201E",
+    "appium:udid": "00008030-00064DC43EEA802E",
     "appium:xcodeOrgId": "J8YMN73J2Y",
-    "appium:xcodeSigningId": "jeff820915@yahoo.com.tw",
-    "appium:newCommandTimeout": 600,
-
+    "appium:newCommandTimeout": 3600,
 }
+
+# IOS_CAPABILITIES = {
+#     "platformName": "iOS",
+#     "appium:automationName": "XCUITest",
+#     "appium:deviceName": "Test’s iPhone",
+#     "appium:platformVersion": "26.5.2",
+#     "appium:udid": "00008110-00191899267A201E",
+#     "appium:xcodeOrgId": "J8YMN73J2Y",
+#     "appium:newCommandTimeout": 600,
+#
+# }
+
+# IOS_CAPABILITIES = {
+#     "platformName": "iOS",
+#     "appium:automationName": "XCUITest",
+#     "appium:deviceName": "iPhone13 ls",
+#     "appium:platformVersion": "27.2",
+#     "appium:udid": "00008110-001939C21408401E",
+#     "appium:xcodeOrgId": "J8YMN73J2Y",
+#     "appium:newCommandTimeout": 600,
+#
+# }
 
 # ==================== Partner Device (iOS query_app_state) ====================
 REF2_BATTERY_CAMERA = "Ref2 Battery Camera"
@@ -179,8 +196,6 @@ UNCERTIFIED_ERROR_LIST = [
     "Uncertified device",
 
 ]
-
-
 
 class TAB(Enum):
     """Enumeration of GHA primary tabs."""
