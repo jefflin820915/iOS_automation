@@ -973,10 +973,10 @@ class MultiProjectTestRunner:
                         case_additional_log_dir = os.path.join(case_dir, "Additional log")
                         os.makedirs(case_main_log_dir, exist_ok=True)
                         os.makedirs(case_additional_log_dir, exist_ok=True)
-                        logging_utils.set_case_log_directories(
-                            case_main_log_dir,
-                            case_additional_log_dir,
-                            iteration=iteration,
+                        logging_utils.set_current_test_dirs(case_main_log_dir, case_additional_log_dir)
+                        logger.info(
+                            f"\n>>> [RUNNING] [Iter #{iteration}] {class_name}.{test_name} "
+                            f"(Device: '{current_device}', Code: '{current_pairing_code}')"
                         )
                         logger.info(f">>> [TARGET DIR] {case_dir}")
                         current_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
