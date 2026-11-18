@@ -54,7 +54,12 @@ logger = logging_utils.get_logger(__name__, "runner")
 
 def extract_failure_stage(exc: Exception) -> str:
     """Automatically extract failing method name from exception traceback without manual tagging."""
-    if not exc or not hasattr(exc, "__traceback__"):
+    if not exc:
+        return "UNKNOWN"
+    explicit_stage = str(getattr(exc, "failure_stage", "") or "").strip()
+    if explicit_stage:
+        return explicit_stage
+    if not hasattr(exc, "__traceback__"):
         return "UNKNOWN"
     tb_frames = traceback.extract_tb(exc.__traceback__)
     for frame in reversed(tb_frames):
@@ -125,6 +130,7 @@ class MultiProjectTestRunner:
         self.pairing_codes: List[str] = self._normalize_str_list(pairing_code)
         self.adb_serials: List[str] = self._normalize_str_list(adb_serial)
         self.plug_names: List[str] = self._normalize_str_list(plug_name)
+
         self._multi_session_requested: bool = any(
             v is not None for v in (udid, wda_port, mjpeg_port, ios_version, appium_url)
         )
@@ -144,6 +150,7 @@ class MultiProjectTestRunner:
             self._sync_adb_reset_target(initial_dev, self.get_iteration_adb_serial(1))
         if self.plug_names:
             self._apply_plug_filter(self.plug_names)
+
         self.driver: Optional[webdriver.Remote] = None
         self.syslog_collector: Optional[SyslogCollector] = None
         self.syslog_file_paths: List[str] = []
@@ -252,6 +259,7 @@ class MultiProjectTestRunner:
         """Isolate constants.IOS_CAPABILITIES and constants.APPIUM_SERVER_URL inside this OS process."""
         caps = dict(getattr(constants, "IOS_CAPABILITIES", {}) or {})
         orig_udid = str(caps.get("appium:udid", "") or "").strip()
+
         if udid and udid.strip():
             clean_udid = udid.strip()
             caps["appium:udid"] = clean_udid
@@ -268,15 +276,19 @@ class MultiProjectTestRunner:
                     caps["appium:deviceName"] = meta["DeviceName"]
         elif ios_version and ios_version.strip():
             caps["appium:platformVersion"] = ios_version.strip()
+
         if wda_port is not None:
             port_int = int(wda_port)
             caps["appium:wdaLocalPort"] = port_int
             if mjpeg_port is None:
                 caps["appium:mjpegServerPort"] = (
-                        9100 + (port_int - 8100)) if port_int >= 8000 else (port_int + 1000)
+                            9100 + (port_int - 8100)) if port_int >= 8000 else (port_int + 1000)
+
         if mjpeg_port is not None:
             caps["appium:mjpegServerPort"] = int(mjpeg_port)
+
         constants.IOS_CAPABILITIES = caps
+
         if appium_url and appium_url.strip():
             constants.APPIUM_SERVER_URL = appium_url.strip()
 
@@ -348,6 +360,7 @@ class MultiProjectTestRunner:
         )
         if not self._multi_session_requested and not claimed_by_other:
             return
+
         logs_root = os.path.dirname(current_dir)
         ts_part = getattr(constants, "TIMESTAMP", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
         udid_tag = self._short_udid_tag(self.udid, self.wda_local_port)
@@ -355,6 +368,7 @@ class MultiProjectTestRunner:
         if os.path.isdir(candidate) and self._is_session_dir_active(candidate,
                                                                     ignore_current_pid=True):
             candidate = f"{candidate}_{os.getpid()}"
+
         constants.SESSION_LOG_DIR = candidate
         constants.MAIN_LOG_DIR = os.path.join(candidate, "Main log")
         constants.ADDITIONAL_LOG_DIR = os.path.join(candidate, "Additional log")
@@ -472,8 +486,10 @@ class MultiProjectTestRunner:
         except Exception as e:
             logger.debug(f"[DISK GUARD] Unable to query disk usage: {e}")
             return
+
         if free_gb >= threshold_gb:
             return
+
         logger.warning(
             f"[DISK GUARD] Low disk space detected: {free_gb:.2f} GB free "
             f"(< {threshold_gb:.1f} GB threshold). Pruning old local logs/artifacts..."
@@ -508,6 +524,7 @@ class MultiProjectTestRunner:
             except Exception as scan_err:
                 logger.warning(
                     f"[DISK GUARD] Error scanning sibling session directories: {scan_err}")
+
         if self._get_free_disk_gb(session_dir) < threshold_gb and len(
                 self._completed_case_dirs) > 1:
             if self.drive_uploader:
@@ -528,6 +545,7 @@ class MultiProjectTestRunner:
                     except Exception as rm_err:
                         logger.warning(
                             f"[DISK GUARD] Failed to remove case dir {oldest_case}: {rm_err}")
+
         new_free_gb = self._get_free_disk_gb(session_dir)
         logger.info(f"[DISK GUARD] Disk space after cleanup: {new_free_gb:.2f} GB free.")
 
@@ -780,9 +798,7 @@ class MultiProjectTestRunner:
         device_log_targets = [
             d for d in targets if self._device_log_config_for(d, adb_serial_override=first_adb)
         ]
-        if device_log_targets:
-            logger.info(f"       Device Log Capture : {', '.join(device_log_targets)}")
-        if not self.adb_serials and self.project_name != "att":
+        if device_log_targets and not self.adb_serials:
             online_adb = self._list_online_adb_serials()
             if len(online_adb) > 1:
                 logger.warning(
@@ -957,11 +973,10 @@ class MultiProjectTestRunner:
                         case_additional_log_dir = os.path.join(case_dir, "Additional log")
                         os.makedirs(case_main_log_dir, exist_ok=True)
                         os.makedirs(case_additional_log_dir, exist_ok=True)
-                        logging_utils.set_current_test_dirs(case_main_log_dir,
-                                                            case_additional_log_dir)
-                        logger.info(
-                            f"\n>>> [RUNNING] [Iter #{iteration}] {class_name}.{test_name} "
-                            f"(Device: '{current_device}', Code: '{current_pairing_code}')"
+                        logging_utils.set_case_log_directories(
+                            case_main_log_dir,
+                            case_additional_log_dir,
+                            iteration=iteration,
                         )
                         logger.info(f">>> [TARGET DIR] {case_dir}")
                         current_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1091,6 +1106,7 @@ class MultiProjectTestRunner:
                                         and self.sdk_version.upper() in ("", "UNKNOWN")
                                 ):
                                     self.sdk_version = sess_k_ver
+
                             if not self.env_info_collected and self.driver:
                                 try:
                                     logger.info(
