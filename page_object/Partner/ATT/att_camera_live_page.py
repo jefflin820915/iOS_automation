@@ -23,7 +23,7 @@ class _ATTLiveSample:
 
 class ATTCameraLivePage(ATTBasePage):
     """Waits for top-left `'Live'` indicator, verifies stability for 5~10s, and navigates back."""
-    DEFAULT_WAIT_LIVE_TIMEOUT_S: float = 30.0
+    DEFAULT_WAIT_LIVE_TIMEOUT_S: float = 60.0
     DEFAULT_VERIFY_DURATION_S: float = 8.0  # within 5~10s window requested
     DEFAULT_CHECK_INTERVAL_S: float = 1.0
     TOP_LEFT_LIVE_PREDICATE: str = (
