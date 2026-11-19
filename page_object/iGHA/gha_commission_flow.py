@@ -1309,13 +1309,12 @@ class GHACommissioningPageObject(BasePage):
         elem = self._cm_find_displayed(*self.HEADLINE_LOCATOR)
         return self._cm_read_text(elem) if elem is not None else ""
 
-        def _cm_read_ota_progress_percent(self) -> Tuple[Optional[int], str]:
-            """Read OTA download/install percentage (e.g. '35% downloaded' -> (35, '35% downloaded')) from visible UI.
-            Ignores iOS top status-bar battery elements and full-screen containers. Prioritizes text elements
-            (StaticText/TextView) with OTA keywords over bare ProgressIndicator/Other '0%' values, and picks
-            the highest percentage within the winning tier so stale '0%' widgets never shadow >0% progress.
-            """
-
+    def _cm_read_ota_progress_percent(self) -> Tuple[Optional[int], str]:
+        """Read OTA download/install percentage (e.g. '35% downloaded' -> (35, '35% downloaded')) from visible UI.
+        Ignores iOS top status-bar battery elements and full-screen containers. Prioritizes text elements
+        (StaticText/TextView) with OTA keywords over bare ProgressIndicator/Other '0%' values, and picks
+        the highest percentage within the winning tier so stale '0%' widgets never shadow >0% progress.
+        """
         kw_text: List[Tuple[int, str]] = []
         bare_text: List[Tuple[int, str]] = []
         other_preferred: List[Tuple[int, str]] = []
