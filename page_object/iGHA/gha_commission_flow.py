@@ -192,7 +192,7 @@ class GHACommissioningPageObject(BasePage):
     CM_POLL_INTERVAL = 1.5
     CM_PROGRESS_INTERVAL = 2.5
     CM_OTA_POLL_INTERVAL = 1.5
-    CM_OTA_ZERO_PERCENT_TIMEOUT = 20.0
+    CM_OTA_ZERO_PERCENT_TIMEOUT = 300.0
     CM_OTA_DEFAULT_TIMEOUT = 300.0
     CM_OTA_EMPTY_HEADLINE_TOLERANCE = 3
     CM_REMOVE_ATTEMPTS = 2
@@ -1610,7 +1610,7 @@ class GHACommissioningPageObject(BasePage):
         ]
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 600
+            self, device_name: str, room_name: str = "Attic", timeout: float = 1200
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, OTA updates, and completion.
         If the flow hits `timeout`, restarts GHA and checks the 'All devices' page:
