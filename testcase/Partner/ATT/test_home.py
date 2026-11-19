@@ -53,7 +53,7 @@ class TestATTHome(BaseTestCase):
                 self, device_name=self.device_name, room_name=self.room_name
             )
             att_session.ATTCameraLivePage.wait_and_verify_live_stream(self,
-                                                                      device_name=self.device_name)
+                                                                      device_name=self.device_name, wait_live_timeout_s=60.0)
         except Exception as exc:
             live_exc = exc
             live_stage = _extract_att_page_stage(exc)
