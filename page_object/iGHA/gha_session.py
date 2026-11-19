@@ -23,10 +23,10 @@ from page_object.iGHA.gha_commission_flow import GHACommissioningPageObject
 from page_object.iGHA.gha_connect_device_to_google_account_page import \
     GHAConnectDeviceToGoogleAccountPage
 from page_object.iGHA.gha_device_page import GHADevicePage
-from page_object.iGHA.gha_familiar_face_detection_page import GHAFamiliarFaceDetectionPage
 from page_object.iGHA.gha_device_setting_page import GHADeviceSettingPage
 from page_object.iGHA.gha_enter_pairing_code_page import GHAEnterPairingCodePage
 from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
+from page_object.iGHA.gha_familiar_face_detection_page import GHAFamiliarFaceDetectionPage
 from page_object.iGHA.gha_help_improve_camera_device_page import GHAHelpImproveCameraDevicePage
 from page_object.iGHA.gha_home_page import GHAHomePage
 from page_object.iGHA.gha_partner_notifications_page import GHAPartnerNotificationsPage
@@ -217,6 +217,8 @@ class GHASession:
             GHAYouShouldNowSeeLiveVideoPage,
             GHAChooseWhetherYouWantToTurnOnVideoPage,
             GHAAdjustYourMicSettingsPage,
+            GHAFamiliarFaceDetectionPage,
+            GHAPartnerNotificationsPage,
             GHAStayInTheKnowPage,
             GHAYourCameraDeviceIsReadyPage,
             GHASettingsPage,
@@ -639,8 +641,15 @@ class GHASession:
                 self.start_gha()
                 time.sleep(5.0)
                 self._logger.info("[Emergency Teardown] Navigating to Settings to remove device...")
-                GHATabPage.enter_home_settings_page(self)
-                GHASettingsPage.open_device_settings(self, device_name=self.device_name)
+                if GHATabPage.enter_home_settings_page(self) is False:
+                    raise RuntimeError(
+                        "Failed to enter Home settings page during emergency teardown.")
+                if GHASettingsPage.open_device_settings(self,
+                                                        device_name=self.device_name) is False:
+                    raise RuntimeError(
+                        f"Failed to open device settings for '{self.device_name}' in Home settings; "
+                        "skipping handle_remove_device() to avoid scrolling Home Settings."
+                    )
                 self.handle_remove_device()
                 removed = True
                 self._device_removed_in_emergency = True
@@ -985,6 +994,8 @@ class GHASession:
         max_attempts = max(1, int(getattr(constants, "DEVICE_SELECTION_MAX_ATTEMPTS", 2)))
         for attempt in range(1, max_attempts + 1):
             is_last = attempt == max_attempts
+            if attempt > 1 and hasattr(BasePage, "reset_failure_screenshot_state"):
+                BasePage.reset_failure_screenshot_state(self.driver, remove_existing=True)
             self._logger.info(
                 f"[Device Selection] Attempt {attempt}/{max_attempts} for '{target_name}'...")
             if self._try_select_target_device_once(target_name, swallow_errors=not is_last):
@@ -1003,6 +1014,8 @@ class GHASession:
             f"[Device Selection] '{target_name}' not discovered after {max_attempts} attempt(s)."
         )
         self._logger.error(message)
+        if hasattr(BasePage, "capture_failure_screenshot"):
+            BasePage.capture_failure_screenshot(self.driver, reason=message, force=False, lock=True)
         raise AssertionError(message)
 
     def pair_device_with_pairing_code(self) -> None:
@@ -1086,6 +1099,11 @@ class GHASession:
         except OOBEInternalErrorException as e:
             self._logger.error(
                 f"[OOBE Failure] Internal error at '{step}' (OK already clicked): {e}")
+            if hasattr(BasePage, "capture_failure_screenshot"):
+                BasePage.capture_failure_screenshot(
+                    self.driver, reason=f"OOBE internal error at '{step}': {e}", force=False,
+                    lock=True
+                )
             removed = self._emergency_recover_and_remove_device()
             raise AssertionError(
                 f"Commissioning OOBE failed at '{step}' due to internal error: {e} "
@@ -1094,6 +1112,10 @@ class GHASession:
         except Exception as e:
             self._logger.error(
                 f"[OOBE Failure] Unexpected error at '{step}': {e}. Removing commissioned device...")
+            if hasattr(BasePage, "capture_failure_screenshot"):
+                BasePage.capture_failure_screenshot(
+                    self.driver, reason=f"OOBE failure at '{step}': {e}", force=True, lock=True
+                )
             self._emergency_recover_and_remove_device()
             raise
 
@@ -1106,11 +1128,16 @@ class GHASession:
         session_obj._device_removed_in_emergency = False
         main_error: Optional[Exception] = None
         try:
+            self.refresh_gha_devices()
             GHADevicePage.is_device_exist_device_page(self, device_name=self.device_name)
             GHADevicePage.enter_device_page(self, device_name=self.device_name)
             GHACameraLivePage.verify_camera_live_stream(self)
         except Exception as exc:
             main_error = exc
+            if hasattr(BasePage, "capture_failure_screenshot"):
+                BasePage.capture_failure_screenshot(
+                    self.driver, reason=f"Verification failure: {exc}", force=True, lock=True
+                )
             raise
         finally:
             remove_error: Optional[Exception] = None
@@ -1126,6 +1153,11 @@ class GHASession:
                         self.handle_remove_device()
                     except Exception as rem_exc:
                         remove_error = rem_exc
+                        if main_error is None and hasattr(BasePage, "capture_failure_screenshot"):
+                            BasePage.capture_failure_screenshot(
+                                self.driver, reason=f"Remove device failure: {rem_exc}", force=True,
+                                lock=True
+                            )
                         self._logger.error(
                             f"[Post-Test Cleanup] Failed to remove device via GHA UI ({rem_exc}). "
                             "Proceeding to mandatory Smart plug + ADB factory reset..."

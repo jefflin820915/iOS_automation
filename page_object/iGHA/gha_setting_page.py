@@ -33,6 +33,10 @@ class GHASettingsPage(BasePage):
         AppiumBy.IOS_PREDICATE,
         'label CONTAINS "Devices, groups & rooms" OR name CONTAINS "preferenceDisplayingCell"'
     )
+    HOME_SETTINGS_MARKER_LOCATOR = (
+        AppiumBy.IOS_PREDICATE,
+        'label CONTAINS "Devices, groups & rooms"'
+    )
     SERVICES_SECTION_LOCATOR = (
         AppiumBy.IOS_PREDICATE,
         'name == "Services" OR label == "Services"'
@@ -267,6 +271,7 @@ class GHASettingsPage(BasePage):
                 except Exception:
                     valid.append((cand, rect))
             if valid:
+                # Top-most horizontal carousel belongs to 'Devices, groups & rooms' (above 'Services').
                 valid.sort(key=lambda item: item[1]["y"])
                 best_elem, best_rect = valid[0]
                 break
@@ -282,37 +287,51 @@ class GHASettingsPage(BasePage):
             y_bounds: Optional[Tuple[float, float]] = None,
     ) -> List[Tuple[WebElement, str, Optional[Dict[str, float]]]]:
         """Collect all Devices horizontal categoryCard elements currently in the viewport in left-to-right order."""
-        window_width, _ = GHASettingsPage._get_window_size_safe(self)
+        window_width, window_height = GHASettingsPage._get_window_size_safe(self)
         if y_bounds is None:
             _, y_bounds = GHASettingsPage._get_devices_carousel_element_and_y_bounds(self)
-        elems = GHASettingsPage._dispatch_find_elements(
+
+        def _filter_elems(raw_elems: List[WebElement]) -> List[
+            Tuple[WebElement, str, Optional[Dict[str, float]]]]:
+            items: List[Tuple[WebElement, str, Optional[Dict[str, float]]]] = []
+            for elem in raw_elems:
+                rect = GHASettingsPage._get_safe_rect(elem)
+                try:
+                    displayed = bool(elem.is_displayed())
+                except Exception:
+                    displayed = False
+                if rect is None and not displayed:
+                    continue
+                if rect is not None:
+                    if not (0.0 <= float(rect["y"]) < window_height):
+                        continue
+                    if y_bounds:
+                        mid_y = float(rect["y"]) + float(rect["height"]) / 2.0
+                        if not (y_bounds[0] <= mid_y <= y_bounds[1]):
+                            continue
+                    elif not displayed:
+                        continue
+                    if not GHASettingsPage._is_card_in_viewport(rect, window_width):
+                        continue
+                label = GHASettingsPage._get_card_label(elem)
+                if label:
+                    items.append((elem, label, rect))
+            return items
+
+        elems_visible = GHASettingsPage._dispatch_find_elements(
             self,
             AppiumBy.IOS_CLASS_CHAIN,
             '**/XCUIElementTypeButton[`name == "categoryCard" AND visible == 1`]',
         )
-        if not elems:
-            elems = GHASettingsPage._dispatch_find_elements(
+        collected = _filter_elems(elems_visible)
+        if not collected:
+            # Some iOS horizontal UICollectionViews mark device cards visible=0 even when Services cards are visible=1.
+            elems_all = GHASettingsPage._dispatch_find_elements(
                 self,
                 AppiumBy.IOS_CLASS_CHAIN,
                 '**/XCUIElementTypeButton[`name == "categoryCard"`]',
             )
-        collected: List[Tuple[WebElement, str, Optional[Dict[str, float]]]] = []
-        for elem in elems:
-            try:
-                if not elem.is_displayed():
-                    continue
-            except Exception:
-                continue
-            rect = GHASettingsPage._get_safe_rect(elem)
-            if y_bounds and rect:
-                mid_y = float(rect["y"]) + float(rect["height"]) / 2.0
-                if not (y_bounds[0] <= mid_y <= y_bounds[1]):
-                    continue
-            if rect and not GHASettingsPage._is_card_in_viewport(rect, window_width):
-                continue
-            label = GHASettingsPage._get_card_label(elem)
-            if label:
-                collected.append((elem, label, rect))
+            collected = _filter_elems(elems_all)
         collected.sort(key=lambda item: float(item[2]["x"]) if item[2] else 0.0)
         return collected
 
@@ -329,6 +348,7 @@ class GHASettingsPage(BasePage):
                     return elem
             elif GHASettingsPage._matches_primary_card_name(label, device_name):
                 return elem
+        # Fallback to direct targeted locators (supports legacy Cell/StaticText UIs and mocked _find_elements tests)
         locators = [
             f'**/XCUIElementTypeButton[`name == "categoryCard" AND label CONTAINS[c] "{device_name}" AND visible == 1`]',
             f'**/XCUIElementTypeButton[`name == "categoryCard" AND label CONTAINS[c] "{device_name}"`]',
@@ -427,9 +447,42 @@ class GHASettingsPage(BasePage):
                 except Exception as swipe_err:
                     self._logger.warning(f"mobile: swipe fallback failed: {swipe_err}")
 
+    def _wait_for_cards_ready(self, timeout: float = 12.0) -> None:
+        """Wait for Home Settings spinner to clear and Devices categoryCard items to finish rendering."""
+        if GHASettingsPage._collect_viewport_cards(self):
+            return
+        spinner_present = any(
+            getattr(e, "is_displayed", lambda: False)()
+            for e in GHASettingsPage._dispatch_find_elements(
+                self, AppiumBy.CLASS_NAME, "XCUIElementTypeActivityIndicator"
+            )
+        )
+        section_present = GHASettingsPage.has_devices_groups_rooms_page(self)
+        settings_nav_present = any(
+            getattr(e, "is_displayed", lambda: False)()
+            for e in GHASettingsPage._dispatch_find_elements(self, *GHASettingsPage.PAGE_LOCATOR)
+        )
+        if not (spinner_present or section_present or settings_nav_present):
+            return
+        self._logger.info("[Settings] Waiting for Home Settings device cards to finish loading...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if GHASettingsPage._collect_viewport_cards(self):
+                return
+            time.sleep(0.4)
+
     def find_target_device(self, device_name: str, max_swipes: int = 12) -> Optional[WebElement]:
-        """Search for a target device card by scanning and swiping horizontally across the Devices cards list."""
+        """Search for a target device card by scanning and swiping horizontally across the Devices cards list.
+        Supports fallback to default hardware names ('Doorbell' / 'Camera') if GHA failed
+        to sync the custom device name during commissioning.
+        Args:
+            device_name (str): Visible name of the target device (e.g. '2K Battery Doorbell Camera').
+            max_swipes (int): Maximum number of swipe attempts per direction. Defaults to 12.
+        Returns:
+            Optional[WebElement]: The matching card WebElement if found, else None.
+        """
         self._logger.info(f"Start searching for device card: '{device_name}' in Settings...")
+        GHASettingsPage._wait_for_cards_ready(self)
         resolved_name = GHASettingsPage._get_resolved_device_name(self)
         has_pre_resolved_fallback = bool(
             resolved_name and resolved_name.strip().lower() != device_name.strip().lower()
@@ -472,6 +525,7 @@ class GHASettingsPage(BasePage):
             if current_labels and current_labels == last_seen_labels and swipe_idx > 0:
                 self._logger.info("Reached the end of horizontal card list.")
                 break
+            # Early stop if last visible card already shows 'N of N' (end of list reached).
             if current_labels and swipe_idx > 0:
                 last_pos = GHASettingsPage._extract_card_position(current_labels[-1])
                 if last_pos and last_pos[0] >= last_pos[1]:
@@ -482,6 +536,7 @@ class GHASettingsPage(BasePage):
             last_seen_labels = current_labels
             GHASettingsPage._swipe_horizontal(self, direction="left")
             swipes_done += 1
+        # Check fallback names at the current position before swiping right back
         for fb_name in fallback_names:
             if fb_card := GHASettingsPage._get_visible_device_card(self, fb_name,
                                                                    exact_card_match=True):
@@ -520,42 +575,87 @@ class GHASettingsPage(BasePage):
         return None
 
     def open_device_settings(self, device_name: str) -> bool:
-        """Find and click on the target device card to open its settings page."""
+        """Find and click on the target device card to open its settings page.
+        Args:
+            device_name (str): Visible name of the device.
+        Returns:
+            bool: True if clicked and navigated away from Home Settings, False otherwise.
+        """
         target_card = GHASettingsPage.find_target_device(self, device_name)
         if not target_card:
             self._logger.error(f"Cannot open device settings: '{device_name}' not found.")
             return False
         matched_label = GHASettingsPage._get_card_label(target_card) or device_name
+
+        def _tap_card_coords() -> bool:
+            rect = GHASettingsPage._get_safe_rect(target_card)
+            w, _ = GHASettingsPage._get_window_size_safe(self)
+            if rect:
+                vis_left = max(0.0, float(rect["x"]))
+                vis_right = min(w, float(rect["x"]) + float(rect["width"]))
+                if vis_right > vis_left:
+                    tap_x = int((vis_left + vis_right) / 2.0)
+                    tap_y = int(float(rect["y"]) + float(rect["height"]) / 2.0)
+                    try:
+                        self._logger.info(
+                            f"Coordinate tapping device card '{matched_label}' at ({tap_x}, {tap_y})..."
+                        )
+                        self.driver.execute_script("mobile: tap", {"x": tap_x, "y": tap_y})
+                        return True
+                    except Exception as coord_err:
+                        self._logger.error(f"Coordinate tap fallback failed: {coord_err}")
+            return False
+
+        def _is_on_home_settings() -> bool:
+            elems = GHASettingsPage._dispatch_find_elements(
+                self, *GHASettingsPage.HOME_SETTINGS_MARKER_LOCATOR
+            )
+            return any(getattr(e, "is_displayed", lambda: False)() for e in elems)
+
+        def _left_home_settings(wait_s: float = 1.5) -> bool:
+            # Wait briefly only when the Home Settings 'Devices, groups & rooms' marker is actually visible.
+            if not _is_on_home_settings():
+                return True
+            deadline = time.time() + wait_s
+            while time.time() < deadline:
+                time.sleep(0.3)
+                if not _is_on_home_settings():
+                    return True
+            return False
+
+        clicked = False
         try:
             self._logger.info(f"Clicking device card: '{matched_label}'...")
             target_card.click()
-            return True
+            clicked = True
         except WebDriverException as e:
             self._logger.warning(f"Direct click failed: {e}. Trying tap fallback...")
             try:
                 self.driver.execute_script("mobile: tap", {"elementId": target_card.id})
-                return True
+                clicked = True
             except Exception as tap_err:
-                rect = GHASettingsPage._get_safe_rect(target_card)
-                w, _ = GHASettingsPage._get_window_size_safe(self)
-                if rect:
-                    vis_left = max(0.0, float(rect["x"]))
-                    vis_right = min(w, float(rect["x"]) + float(rect["width"]))
-                    if vis_right > vis_left:
-                        tap_x = int((vis_left + vis_right) / 2.0)
-                        tap_y = int(float(rect["y"]) + float(rect["height"]) / 2.0)
-                        try:
-                            self.driver.execute_script("mobile: tap", {"x": tap_x, "y": tap_y})
-                            return True
-                        except Exception as coord_err:
-                            self._logger.error(f"Coordinate tap fallback failed: {coord_err}")
-                self._logger.error(f"Tap fallback failed: {tap_err}")
-                return False
+                if _tap_card_coords():
+                    clicked = True
+                else:
+                    self._logger.error(f"Tap fallback failed: {tap_err}")
+                    return False
+        if clicked and not _left_home_settings(wait_s=1.5):
+            self._logger.warning(
+                f"Clicked '{matched_label}' but still on Home Settings page; retrying coordinate tap..."
+            )
+            if _tap_card_coords():
+                if not _left_home_settings(wait_s=2.0):
+                    self._logger.error(
+                        f"Still on Home Settings page after tapping '{matched_label}'."
+                    )
+                    return False
+        return True
 
     def has_devices_groups_rooms_page(self) -> bool:
         """Check if 'Devices, groups & rooms' section exists on the Settings page."""
         try:
-            elems = GHASettingsPage._find_elements(self, *self.DEVICES_SECTION_LOCATOR)
+            elems = GHASettingsPage._dispatch_find_elements(self,
+                                                            *GHASettingsPage.DEVICES_SECTION_LOCATOR)
             return any(e.is_displayed() for e in elems)
         except Exception:
             return False
