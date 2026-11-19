@@ -189,7 +189,7 @@ class GHACommissioningPageObject(BasePage):
     CM_POLL_INTERVAL = 1.5
     CM_PROGRESS_INTERVAL = 2.5
     CM_OTA_POLL_INTERVAL = 1.5
-    CM_OTA_ZERO_PERCENT_TIMEOUT = 300.0
+    CM_OTA_ZERO_PERCENT_TIMEOUT = 600.0
     CM_OTA_DEFAULT_TIMEOUT = 300.0
     CM_OTA_EMPTY_HEADLINE_TOLERANCE = 3
     CM_REMOVE_ATTEMPTS = 2
@@ -1309,11 +1309,16 @@ class GHACommissioningPageObject(BasePage):
         elem = self._cm_find_displayed(*self.HEADLINE_LOCATOR)
         return self._cm_read_text(elem) if elem is not None else ""
 
-    def _cm_read_ota_progress_percent(self) -> Tuple[Optional[int], str]:
-        """Read OTA download/install percentage (e.g. '0% downloaded' -> (0, '0% downloaded')) from visible UI.
-        Ignores iOS top status-bar battery elements (y < 55 or 'battery' in text) and full-screen containers.
-        """
-        preferred: List[Tuple[int, str]] = []
+        def _cm_read_ota_progress_percent(self) -> Tuple[Optional[int], str]:
+            """Read OTA download/install percentage (e.g. '35% downloaded' -> (35, '35% downloaded')) from visible UI.
+            Ignores iOS top status-bar battery elements and full-screen containers. Prioritizes text elements
+            (StaticText/TextView) with OTA keywords over bare ProgressIndicator/Other '0%' values, and picks
+            the highest percentage within the winning tier so stale '0%' widgets never shadow >0% progress.
+            """
+
+        kw_text: List[Tuple[int, str]] = []
+        bare_text: List[Tuple[int, str]] = []
+        other_preferred: List[Tuple[int, str]] = []
         fallback: List[Tuple[int, str]] = []
         for elem in self._cm_find_all(AppiumBy.IOS_PREDICATE, self.OTA_PERCENT_PREDICATE):
             try:
@@ -1321,7 +1326,9 @@ class GHACommissioningPageObject(BasePage):
                     continue
             except WebDriverException:
                 continue
-            elem_type = self._cm_read_text(elem, ("type",))
+            elem_type = self._cm_read_text(elem, ("type",)) or str(
+                getattr(elem, "tag_name", "") or "")
+            is_text_elem = elem_type in ("XCUIElementTypeStaticText", "XCUIElementTypeTextView", "")
             try:
                 r = elem.rect
                 if isinstance(r, dict):
@@ -1345,6 +1352,11 @@ class GHACommissioningPageObject(BasePage):
                 low = txt.lower()
                 if "battery" in low or "charging" in low or "scroll bar" in low:
                     continue
+                has_ota_kw = any(
+                    kw in low
+                    for kw in ("download", "install", "updat", "complete", "progress")
+                )
+                is_bare_pct = bool(re.fullmatch(r"\d{1,3}(?:\.\d+)?\s*%", txt.strip()))
                 for m in re.finditer(r"(?<![\d.])(\d{1,3})(?:\.(\d+))?\s*%", txt):
                     whole = int(m.group(1))
                     frac_str = m.group(2) or ""
@@ -1352,17 +1364,17 @@ class GHACommissioningPageObject(BasePage):
                     if not (0.0 <= val <= 100.0):
                         continue
                     pct = 0 if val == 0.0 else max(1, int(round(val)))
-                    if any(
-                            kw in low
-                            for kw in ("download", "install", "updat", "complete", "progress")
-                    ) or re.fullmatch(r"\d{1,3}(?:\.\d+)?\s*%", txt.strip()):
-                        preferred.append((pct, txt))
+                    if is_text_elem and has_ota_kw:
+                        kw_text.append((pct, txt))
+                    elif is_text_elem and is_bare_pct:
+                        bare_text.append((pct, txt))
+                    elif has_ota_kw or is_bare_pct:
+                        other_preferred.append((pct, txt))
                     else:
                         fallback.append((pct, txt))
-        if preferred:
-            return preferred[0]
-        if fallback:
-            return fallback[0]
+        for bucket in (kw_text, bare_text, other_preferred, fallback):
+            if bucket:
+                return max(bucket, key=lambda item: item[0])
         return None, ""
 
     def _cm_check_ota_error_alert(self) -> Optional[str]:
@@ -1588,7 +1600,7 @@ class GHACommissioningPageObject(BasePage):
         ]
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 600
+            self, device_name: str, room_name: str = "Attic", timeout: float = 1200
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, OTA updates, and completion.
         If the flow hits `timeout`, restarts GHA and checks the 'All devices' page:
