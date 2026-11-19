@@ -145,6 +145,7 @@ class GHACommissioningPageObject(BasePage):
         "Preparing update",
         "Downloading update",
         "Installing update",
+        "Installing",
         "Applying update",
         "Update finished",
     )
@@ -174,6 +175,8 @@ class GHACommissioningPageObject(BasePage):
         "Setting up", "Activating camera",
     )
     DEFAULT_PLUG_KEYWORDS = (
+        "Plug",
+        "Outlet",
         "Eve",
         "Eve Energy Plug",
         "Eve Energy",
@@ -189,7 +192,7 @@ class GHACommissioningPageObject(BasePage):
     CM_POLL_INTERVAL = 1.5
     CM_PROGRESS_INTERVAL = 2.5
     CM_OTA_POLL_INTERVAL = 1.5
-    CM_OTA_ZERO_PERCENT_TIMEOUT = 600.0
+    CM_OTA_ZERO_PERCENT_TIMEOUT = 20.0
     CM_OTA_DEFAULT_TIMEOUT = 300.0
     CM_OTA_EMPTY_HEADLINE_TOLERANCE = 3
     CM_REMOVE_ATTEMPTS = 2
@@ -1430,6 +1433,7 @@ class GHACommissioningPageObject(BasePage):
         zero_pct_since: Optional[float] = None
         last_zero_text: str = "0%"
         consecutive_empty_headlines = 0
+
         while time.time() < ota_deadline:
             alert_text = self._cm_check_ota_error_alert()
             if alert_text:
@@ -1439,6 +1443,7 @@ class GHACommissioningPageObject(BasePage):
                         remove_paired_device=True,
                     )
                 )
+
             headline = self._cm_get_headline()
             if not headline:
                 consecutive_empty_headlines += 1
@@ -1450,6 +1455,7 @@ class GHACommissioningPageObject(BasePage):
                 time.sleep(self.CM_OTA_POLL_INTERVAL)
                 continue
             consecutive_empty_headlines = 0
+
             if _contains_any(headline, self.FAILURE_KEYWORDS) or _contains_any(
                     headline, self.OTA_FAILURE_KEYWORDS
             ):
@@ -1460,16 +1466,19 @@ class GHACommissioningPageObject(BasePage):
                         remove_paired_device=True,
                     )
                 )
+
             if not _contains_any(headline, self.OTA_KEYWORDS):
                 self._logger.info(
                     f"[OTA] OTA update step completed; transitioned to '{headline}'."
                 )
                 return True
+
             if _contains_any(headline, ("Update finished",)):
                 zero_pct_since = None
                 self._logger.info(f"[OTA] Waiting for GHA post-OTA transition: '{headline}'...")
                 time.sleep(self.CM_OTA_POLL_INTERVAL)
                 continue
+
             pct, pct_text = self._cm_read_ota_progress_percent()
             now = time.time()
             if pct is not None and pct > 0:
@@ -1497,7 +1506,9 @@ class GHACommissioningPageObject(BasePage):
                     )
             else:
                 self._logger.info(f"[OTA] Waiting for OTA progress: '{headline}'...")
+
             time.sleep(self.CM_OTA_POLL_INTERVAL)
+
         last_headline = self._cm_get_headline() or start_label
         timeout_reason = f"OTA update timed out on '{last_headline}'"
         self._logger.error(f"[OTA] {timeout_reason}!")
@@ -1599,7 +1610,7 @@ class GHACommissioningPageObject(BasePage):
         ]
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 1200
+            self, device_name: str, room_name: str = "Attic", timeout: float = 600
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, OTA updates, and completion.
         If the flow hits `timeout`, restarts GHA and checks the 'All devices' page:
@@ -1624,9 +1635,10 @@ class GHACommissioningPageObject(BasePage):
             pass
         handlers = self._cm_build_headline_handlers(room_name)
         start_time = time.time()
+        ota_total_paused = 0.0
         apple_sheet_active = False
         try:
-            while time.time() - start_time < timeout:
+            while time.time() - start_time - ota_total_paused < timeout:
                 if self.handle_apple_commissioning_sheet(device_name):
                     apple_sheet_active = True
                     continue
@@ -1639,7 +1651,8 @@ class GHACommissioningPageObject(BasePage):
                 if not headline:
                     time.sleep(self.CM_POLL_INTERVAL)
                     continue
-                self._logger.info(f"[{int(time.time() - start_time)}s] GHA Headline: '{headline}'")
+                active_elapsed = time.time() - start_time - ota_total_paused
+                self._logger.info(f"[{int(active_elapsed)}s] GHA Headline: '{headline}'")
                 if _contains_any(headline, self.FAILURE_KEYWORDS):
                     self._logger.error(f"[Commissioning] Failure headline detected: '{headline}'")
                     is_paired_offline = _contains_any(headline,
@@ -1657,10 +1670,29 @@ class GHACommissioningPageObject(BasePage):
                         )
                     )
                 if _contains_any(headline, self.OTA_KEYWORDS):
+                    ota_timeout_budget = float(
+                        getattr(
+                            constants,
+                            "OTA_TIMEOUT_SECONDS",
+                            max(float(self.CM_OTA_DEFAULT_TIMEOUT), float(timeout)),
+                        )
+                    )
+                    self._logger.info(
+                        f"[Commissioning] Entering OTA step ('{headline}'); pausing commissioning timeout "
+                        f"(elapsed={active_elapsed:.1f}s / {int(timeout)}s, OTA timeout={int(ota_timeout_budget)}s)..."
+                    )
+                    ota_start = time.time()
                     self.handle_ota_update(
                         device_name=device_name,
                         initial_headline=headline,
-                        deadline=start_time + timeout,
+                        deadline=ota_start + ota_timeout_budget,
+                    )
+                    ota_elapsed = max(0.0, time.time() - ota_start)
+                    ota_total_paused += ota_elapsed
+                    resumed_elapsed = max(0.0, time.time() - start_time - ota_total_paused)
+                    self._logger.info(
+                        f"[Commissioning] Resuming commissioning timeout after OTA "
+                        f"({ota_elapsed:.1f}s paused; commissioning elapsed={resumed_elapsed:.1f}s / {int(timeout)}s)."
                     )
                     if getattr(self.driver, "_commissioned_via_timeout_online", False):
                         return True
