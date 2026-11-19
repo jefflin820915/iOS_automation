@@ -46,10 +46,11 @@ class GHASettingsPage(BasePage):
 
     @staticmethod
     def _normalize_text(text: str) -> str:
-        """Collapse newlines and multiple spaces into a single space."""
-        if not text:
+        """Collapse newlines, directional marks, and multiple spaces into a single space."""
+        if not text or not isinstance(text, str):
             return ""
-        return " ".join(text.replace("\n", " ").replace("\r", " ").split()).strip()
+        cleaned = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2066-\u2069]", "", text)
+        return " ".join(cleaned.replace("\n", " ").replace("\r", " ").split()).strip()
 
     @classmethod
     def _extract_card_title(cls, raw_text: str) -> str:
@@ -119,15 +120,15 @@ class GHASettingsPage(BasePage):
 
     def _get_resolved_device_name(self) -> Optional[str]:
         """Return previously resolved fallback/actual device name from self or session, if any."""
-        resolved = getattr(self, "_resolved_device_name", None)
-        if resolved:
-            return resolved
-        session = getattr(self, "session", None)
-        if session is not None:
-            return getattr(session, "_resolved_device_name", None)
-        set_page = getattr(self, "ghasettingspage", None)
-        if set_page is not None:
-            return getattr(set_page, "_resolved_device_name", None)
+        for obj in (
+                self,
+                getattr(self, "session", None),
+                getattr(self, "ghasettingspage", None),
+        ):
+            if obj is not None:
+                resolved = getattr(obj, "_resolved_device_name", None)
+                if isinstance(resolved, str) and resolved.strip():
+                    return resolved
         return None
 
     @contextlib.contextmanager
@@ -243,17 +244,47 @@ class GHASettingsPage(BasePage):
                                                                                                 value)
         return GHASettingsPage._find_elements(self, by, value, timeout=timeout)
 
-    def _get_devices_carousel_element_and_y_bounds(
-            self,
-    ) -> Tuple[Optional[WebElement], Optional[Tuple[float, float]]]:
-        """Locate the Devices horizontal UICollectionView (above Services) and its vertical (y_min, y_max) band."""
+    def _get_section_y_bounds_markers(self) -> Tuple[Optional[float], Optional[float]]:
+        """Return (devices_header_y, services_header_y) for the Home Settings sections, or (None, None)."""
+        _, window_height = GHASettingsPage._get_window_size_safe(self)
+        devices_y: Optional[float] = None
+        for elem in GHASettingsPage._dispatch_find_elements(self,
+                                                            *GHASettingsPage.HOME_SETTINGS_MARKER_LOCATOR):
+            rect = GHASettingsPage._get_safe_rect(elem)
+            if not rect or not (60.0 <= float(rect["y"]) < window_height):
+                continue
+            try:
+                if not elem.is_displayed():
+                    continue
+            except Exception:
+                pass
+            devices_y = float(rect["y"])
+            break
+
         services_y: Optional[float] = None
         for elem in GHASettingsPage._dispatch_find_elements(self,
                                                             *GHASettingsPage.SERVICES_SECTION_LOCATOR):
             rect = GHASettingsPage._get_safe_rect(elem)
-            if rect and rect["y"] > 100:
-                services_y = float(rect["y"])
-                break
+            if not rect or not (100.0 < float(rect["y"]) < window_height):
+                continue
+            try:
+                if not elem.is_displayed():
+                    continue
+            except Exception:
+                pass
+            if devices_y is not None and float(rect["y"]) <= devices_y + 20.0:
+                continue
+            services_y = float(rect["y"])
+            break
+        return devices_y, services_y
+
+    def _get_devices_carousel_element_and_y_bounds(
+            self,
+    ) -> Tuple[Optional[WebElement], Optional[Tuple[float, float]]]:
+        """Locate the Devices horizontal UICollectionView (above Services) and its vertical (y_min, y_max) band."""
+        _, window_height = GHASettingsPage._get_window_size_safe(self)
+        devices_y, services_y = GHASettingsPage._get_section_y_bounds_markers(self)
+
         best_elem: Optional[WebElement] = None
         best_rect: Optional[Dict[str, float]] = None
         for by, loc in GHASettingsPage.DEVICES_CARDS_CONTAINER_LOCATORS:
@@ -263,23 +294,26 @@ class GHASettingsPage(BasePage):
                 rect = GHASettingsPage._get_safe_rect(cand)
                 if not rect:
                     continue
-                if services_y is not None and rect["y"] >= services_y:
+                if rect["height"] < 55.0 or rect["width"] < 100.0:
                     continue
-                try:
-                    if cand.is_displayed():
-                        valid.append((cand, rect))
-                except Exception:
-                    valid.append((cand, rect))
+                if not (0.0 <= float(rect["y"]) < window_height):
+                    continue
+                if services_y is not None and float(rect["y"]) >= services_y:
+                    continue
+                if devices_y is not None and float(rect["y"]) + float(rect["height"]) <= devices_y:
+                    continue
+                valid.append((cand, rect))
             if valid:
                 # Top-most horizontal carousel belongs to 'Devices, groups & rooms' (above 'Services').
                 valid.sort(key=lambda item: item[1]["y"])
                 best_elem, best_rect = valid[0]
                 break
+
         if best_rect:
             return best_elem, (float(best_rect["y"]) - 12.0,
                                float(best_rect["y"] + best_rect["height"]) + 12.0)
         if services_y is not None:
-            return best_elem, (0.0, services_y)
+            return best_elem, (float(devices_y) if devices_y is not None else 0.0, services_y)
         return best_elem, None
 
     def _collect_viewport_cards(
@@ -290,9 +324,13 @@ class GHASettingsPage(BasePage):
         window_width, window_height = GHASettingsPage._get_window_size_safe(self)
         if y_bounds is None:
             _, y_bounds = GHASettingsPage._get_devices_carousel_element_and_y_bounds(self)
+        _, services_y = GHASettingsPage._get_section_y_bounds_markers(self)
 
-        def _filter_elems(raw_elems: List[WebElement]) -> List[
-            Tuple[WebElement, str, Optional[Dict[str, float]]]]:
+        def _filter_elems(
+                raw_elems: List[WebElement],
+                active_y_bounds: Optional[Tuple[float, float]],
+                require_displayed_when_no_bounds: bool = True,
+        ) -> List[Tuple[WebElement, str, Optional[Dict[str, float]]]]:
             items: List[Tuple[WebElement, str, Optional[Dict[str, float]]]] = []
             for elem in raw_elems:
                 rect = GHASettingsPage._get_safe_rect(elem)
@@ -305,12 +343,15 @@ class GHASettingsPage(BasePage):
                 if rect is not None:
                     if not (0.0 <= float(rect["y"]) < window_height):
                         continue
-                    if y_bounds:
-                        mid_y = float(rect["y"]) + float(rect["height"]) / 2.0
-                        if not (y_bounds[0] <= mid_y <= y_bounds[1]):
+                    mid_y = float(rect["y"]) + float(rect["height"]) / 2.0
+                    if active_y_bounds:
+                        if not (active_y_bounds[0] <= mid_y <= active_y_bounds[1]):
                             continue
-                    elif not displayed:
-                        continue
+                    else:
+                        if services_y is not None and mid_y >= services_y:
+                            continue
+                        if require_displayed_when_no_bounds and not displayed:
+                            continue
                     if not GHASettingsPage._is_card_in_viewport(rect, window_width):
                         continue
                 label = GHASettingsPage._get_card_label(elem)
@@ -318,12 +359,25 @@ class GHASettingsPage(BasePage):
                     items.append((elem, label, rect))
             return items
 
+        def _pick_top_row(
+                items: List[Tuple[WebElement, str, Optional[Dict[str, float]]]],
+        ) -> List[Tuple[WebElement, str, Optional[Dict[str, float]]]]:
+            with_rect = [item for item in items if item[2] is not None]
+            if not with_rect:
+                return items
+            top_y = min(float(item[2]["y"]) for item in with_rect)
+            return [
+                item for item in items
+                if item[2] is None or abs(float(item[2]["y"]) - top_y) <= 40.0
+            ]
+
         elems_visible = GHASettingsPage._dispatch_find_elements(
             self,
             AppiumBy.IOS_CLASS_CHAIN,
             '**/XCUIElementTypeButton[`name == "categoryCard" AND visible == 1`]',
         )
-        collected = _filter_elems(elems_visible)
+        collected = _filter_elems(elems_visible, y_bounds)
+        elems_all: List[WebElement] = []
         if not collected:
             # Some iOS horizontal UICollectionViews mark device cards visible=0 even when Services cards are visible=1.
             elems_all = GHASettingsPage._dispatch_find_elements(
@@ -331,7 +385,17 @@ class GHASettingsPage(BasePage):
                 AppiumBy.IOS_CLASS_CHAIN,
                 '**/XCUIElementTypeButton[`name == "categoryCard"`]',
             )
-            collected = _filter_elems(elems_all)
+            collected = _filter_elems(elems_all, y_bounds)
+
+        if not collected and y_bounds is not None:
+            # If y_bounds rejected all visible/present categoryCards (e.g. shifted cell indices or container rect),
+            # rescue the top-most horizontal row above Services instead of returning [].
+            rescued = _filter_elems(elems_visible, None, require_displayed_when_no_bounds=True)
+            if not rescued and elems_all:
+                rescued = _filter_elems(elems_all, None, require_displayed_when_no_bounds=False)
+            if rescued:
+                collected = _pick_top_row(rescued)
+
         collected.sort(key=lambda item: float(item[2]["x"]) if item[2] else 0.0)
         return collected
 
@@ -348,6 +412,11 @@ class GHASettingsPage(BasePage):
                     return elem
             elif GHASettingsPage._matches_primary_card_name(label, device_name):
                 return elem
+
+        # Skip redundant slow IOS_CLASS_CHAIN probes when visible categoryCards were already scanned.
+        if cards:
+            return None
+
         # Fallback to direct targeted locators (supports legacy Cell/StaticText UIs and mocked _find_elements tests)
         locators = [
             f'**/XCUIElementTypeButton[`name == "categoryCard" AND label CONTAINS[c] "{device_name}" AND visible == 1`]',
@@ -403,7 +472,7 @@ class GHASettingsPage(BasePage):
             pass
         return labels
 
-    def _swipe_horizontal(self, direction: str = "left") -> None:
+    def _swipe_horizontal(self, direction: str = "left", force_mobile_swipe: bool = False) -> None:
         """Perform a controlled horizontal drag across the Devices cards collection view.
         Uses bounded dragFromToForDuration (~62% carousel width) rather than inertial mobile: swipe
         so adjacent cards overlap by >= 1 card and no device card is skipped over.
@@ -412,18 +481,41 @@ class GHASettingsPage(BasePage):
         w, h = GHASettingsPage._get_window_size_safe(self)
         carousel, _ = GHASettingsPage._get_devices_carousel_element_and_y_bounds(self)
         carousel_rect = GHASettingsPage._get_safe_rect(carousel) if carousel is not None else None
-        if carousel_rect:
+        cards = GHASettingsPage._collect_viewport_cards(self)
+        card_rect = next((c[2] for c in cards if c[2]), None)
+
+        if force_mobile_swipe and carousel is not None:
+            try:
+                self.driver.execute_script(
+                    "mobile: swipe",
+                    {"direction": direction, "elementId": carousel.id},
+                )
+                time.sleep(0.35)
+                return
+            except Exception as swipe_err:
+                self._logger.warning(
+                    f"Forced mobile: swipe failed ({swipe_err}); falling back to drag...")
+
+        use_carousel_rect = carousel_rect is not None and (
+                card_rect is None
+                or abs(
+            (float(carousel_rect["y"]) + float(carousel_rect["height"]) / 2.0)
+            - (float(card_rect["y"]) + float(card_rect["height"]) / 2.0)
+        ) <= 50.0
+        )
+
+        if use_carousel_rect and carousel_rect is not None:
             y_pos = int(carousel_rect["y"] + carousel_rect["height"] / 2.0)
             x_left = int(max(16.0, carousel_rect["x"] + carousel_rect["width"] * 0.18))
             x_right = int(min(w - 16.0, carousel_rect["x"] + carousel_rect["width"] * 0.80))
         else:
-            cards = GHASettingsPage._collect_viewport_cards(self)
-            card_rect = cards[0][2] if cards and cards[0][2] else None
             y_pos = int(card_rect["y"] + card_rect["height"] / 2.0) if card_rect else int(h * 0.58)
             x_left = int(w * 0.18)
             x_right = int(w * 0.80)
+
         if x_right <= x_left + 40:
             x_left, x_right = int(w * 0.18), int(w * 0.80)
+
         start_x = x_right if direction == "left" else x_left
         end_x = x_left if direction == "left" else x_right
         try:
@@ -515,16 +607,29 @@ class GHASettingsPage(BasePage):
 
         last_seen_labels: List[str] = []
         swipes_done = 0
+        retried_stuck_left = False
         for swipe_idx in range(max_swipes):
             if found := _check_primary_or_resolved():
                 return found
             current_labels = GHASettingsPage._get_visible_card_labels(self)
-            if current_labels:
-                self._logger.debug(
-                    f"[SettingsScan left#{swipe_idx}] Visible cards: {current_labels}")
+            if current_labels and (swipe_idx == 0 or current_labels != last_seen_labels):
+                pretty = [GHASettingsPage._normalize_text(lbl) for lbl in current_labels]
+                self._logger.info(f"[SettingsScan left#{swipe_idx}] Visible cards: {pretty}")
             if current_labels and current_labels == last_seen_labels and swipe_idx > 0:
+                last_pos = GHASettingsPage._extract_card_position(current_labels[-1])
+                if last_pos and last_pos[0] < last_pos[1] and not retried_stuck_left:
+                    self._logger.warning(
+                        f"[SettingsScan left#{swipe_idx}] Carousel did not advance past "
+                        f"{last_pos[0]} of {last_pos[1]}; retrying with mobile: swipe..."
+                    )
+                    retried_stuck_left = True
+                    GHASettingsPage._swipe_horizontal(self, direction="left",
+                                                      force_mobile_swipe=True)
+                    swipes_done += 1
+                    continue
                 self._logger.info("Reached the end of horizontal card list.")
                 break
+            retried_stuck_left = False
             # Early stop if last visible card already shows 'N of N' (end of list reached).
             if current_labels and swipe_idx > 0:
                 last_pos = GHASettingsPage._extract_card_position(current_labels[-1])
@@ -536,6 +641,7 @@ class GHASettingsPage(BasePage):
             last_seen_labels = current_labels
             GHASettingsPage._swipe_horizontal(self, direction="left")
             swipes_done += 1
+
         # Check fallback names at the current position before swiping right back
         for fb_name in fallback_names:
             if fb_card := GHASettingsPage._get_visible_device_card(self, fb_name,
@@ -545,6 +651,7 @@ class GHASettingsPage(BasePage):
                     f"but default hardware card '{fb_name}' is VISIBLE! Selecting '{fb_name}'."
                 )
                 return fb_card
+
         self._logger.info(f"Device '{device_name}' not found swiping left. Swiping right back...")
         last_right_labels: List[str] = list(last_seen_labels)
         for right_idx in range(max(3, swipes_done + 1)):
@@ -571,6 +678,7 @@ class GHASettingsPage(BasePage):
                     )
                     break
                 last_right_labels = cur_right
+
         self._logger.warning(f"Could not find device card '{device_name}' in Settings.")
         return None
 
@@ -639,6 +747,7 @@ class GHASettingsPage(BasePage):
                 else:
                     self._logger.error(f"Tap fallback failed: {tap_err}")
                     return False
+
         if clicked and not _left_home_settings(wait_s=1.5):
             self._logger.warning(
                 f"Clicked '{matched_label}' but still on Home Settings page; retrying coordinate tap..."
