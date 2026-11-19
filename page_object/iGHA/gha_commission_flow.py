@@ -158,7 +158,9 @@ class GHACommissioningPageObject(BasePage):
     OTA_PERCENT_PREDICATE = (
         'type IN {"XCUIElementTypeStaticText", "XCUIElementTypeTextView", '
         '"XCUIElementTypeOther", "XCUIElementTypeProgressIndicator"} '
-        'AND (label CONTAINS "%" OR value CONTAINS "%" OR name CONTAINS "%")'
+        'AND (label CONTAINS "%" OR value CONTAINS "%" OR name CONTAINS "%") '
+        'AND NOT (label CONTAINS[c] "scroll bar" OR name CONTAINS[c] "scroll bar" '
+        'OR label CONTAINS[c] "battery" OR name CONTAINS[c] "battery")'
     )
     OTA_ERROR_ALERT_PREDICATE = (
         'label CONTAINS[c] "Internal error encountered" OR name CONTAINS[c] "Internal error encountered" '
@@ -1314,9 +1316,9 @@ class GHACommissioningPageObject(BasePage):
 
     def _cm_read_ota_progress_percent(self) -> Tuple[Optional[int], str]:
         """Read OTA download/install percentage (e.g. '35% downloaded' -> (35, '35% downloaded')) from visible UI.
-        Ignores iOS top status-bar battery elements and full-screen containers. Prioritizes text elements
-        (StaticText/TextView) with OTA keywords over bare ProgressIndicator/Other '0%' values, and picks
-        the highest percentage within the winning tier so stale '0%' widgets never shadow >0% progress.
+        Ignores iOS top status-bar battery elements, scroll bars (whose value is '0%'), and full-screen containers.
+        Stale elements (StaleElementReferenceException / WebDriverException) are safely skipped so UI refreshes
+        on HeaderView_secondaryLabel never crash OTA monitoring.
         """
         kw_text: List[Tuple[int, str]] = []
         bare_text: List[Tuple[int, str]] = []
@@ -1326,12 +1328,21 @@ class GHACommissioningPageObject(BasePage):
             try:
                 if not elem.is_displayed():
                     continue
-            except WebDriverException:
-                continue
-            elem_type = self._cm_read_text(elem, ("type",)) or str(
-                getattr(elem, "tag_name", "") or "")
-            is_text_elem = elem_type in ("XCUIElementTypeStaticText", "XCUIElementTypeTextView", "")
-            try:
+                elem_type = ""
+                try:
+                    raw_type = elem.get_attribute("type")
+                    if isinstance(raw_type, str) and raw_type.strip():
+                        elem_type = raw_type.strip()
+                except WebDriverException:
+                    raise
+                except Exception:
+                    pass
+                if not elem_type:
+                    raw_tag = getattr(elem, "tag_name", "")
+                    if isinstance(raw_tag, str) and raw_tag.strip():
+                        elem_type = raw_tag.strip()
+                is_text_elem = elem_type in ("XCUIElementTypeStaticText", "XCUIElementTypeTextView",
+                                             "")
                 r = elem.rect
                 if isinstance(r, dict):
                     y = r.get("y")
@@ -1343,17 +1354,32 @@ class GHACommissioningPageObject(BasePage):
                     if isinstance(h, (int, float)) and h > 150 and elem_type in ("",
                                                                                  "XCUIElementTypeOther"):
                         continue
+                texts: List[str] = []
+                for attr in ("label", "value", "name"):
+                    raw_attr = elem.get_attribute(attr)
+                    if isinstance(raw_attr,
+                                  str) and raw_attr.strip() and raw_attr.strip() not in texts:
+                        texts.append(raw_attr.strip())
+                if not texts:
+                    raw_txt = getattr(elem, "text", "")
+                    if isinstance(raw_txt, str) and raw_txt.strip():
+                        texts.append(raw_txt.strip())
+            except WebDriverException:
+                # Skip stale/disappearing elements (e.g. HeaderView_secondaryLabel refreshing mid-poll)
+                continue
             except Exception:
-                pass
-            texts: List[str] = []
-            for attr in ("label", "value", "name"):
-                t = self._cm_read_text(elem, (attr,))
-                if t and t not in texts:
-                    texts.append(t)
+                continue
+
+            # Reject the ENTIRE element if any attribute identifies a scroll bar or battery indicator
+            # (scroll bars have label='Vertical/Horizontal scroll bar, 1 page' and value='0%').
+            if any(
+                    "battery" in t.lower() or "charging" in t.lower() or "scroll bar" in t.lower()
+                    for t in texts
+            ):
+                continue
+
             for txt in texts:
                 low = txt.lower()
-                if "battery" in low or "charging" in low or "scroll bar" in low:
-                    continue
                 has_ota_kw = any(
                     kw in low
                     for kw in ("download", "install", "updat", "complete", "progress")
