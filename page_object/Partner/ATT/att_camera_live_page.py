@@ -160,7 +160,7 @@ class ATTCameraLivePage(ATTBasePage):
             time.sleep(0.5)
         if not reached_live:
             msg = (
-                f"[NEVER_LIVE] AT&T Camera '{target_dev}' (room_status='{dev_status}') "
+                f"[NEVER_LIVE] AT&T Camera '{target_dev}' (device_status='{dev_status}') "
                 f"did not show top-left 'Live' within {wait_timeout:.0f}s (last_state={last_wait_detail})."
             )
             page._logger.error(msg)
