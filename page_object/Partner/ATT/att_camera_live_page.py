@@ -513,7 +513,7 @@ class ATTCameraLivePage(ATTBasePage):
             )
             video_str = page._format_video_label(has_video, video_detail)
             msg = (
-                f"[NEVER_LIVE] AT&T Camera '{target_dev}' (room_status='{dev_status}') "
+                f"[NEVER_LIVE] AT&T Camera '{target_dev}' (device_status='{dev_status}') "
                 f"did not show top-left 'Live' within {wait_timeout:.0f}s | "
                 f"Player Video: {video_str} | "
                 f"Last Top-Left Live Status: '{last_top_left_status}'."
