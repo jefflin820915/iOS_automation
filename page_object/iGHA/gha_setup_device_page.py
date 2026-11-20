@@ -15,7 +15,6 @@ class GHASetUpDevicePage(BasePage):
     """Class for handling Google Home device setup ('Set up nearby devices') page on iOS."""
     EXPECTED_DEVICE_IDENTIFIERS: Dict[str, str] = {
         "Onn Wired Indoor Camera": "5502:4233:1658",
-        "Ref2 Battery Camera": "4738:21505:2329",
         "2K Battery Indoor&Outdoor Camera": "4738:21505:2329",
         "HD Wired Indoor Camera": "4738:20482:2447",
         "2K Battery Doorbell Camera": "4738:21009:1573",
