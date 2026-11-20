@@ -77,6 +77,7 @@ def extract_failure_stage(exc: Exception) -> str:
 
 class MultiProjectTestRunner:
     """Class managing complete test execution lifecycle, multi-iteration runs, and automated reporting."""
+    VALID_APPS: Tuple[str, ...] = ("igha", "ighp", "att")
     MIN_FREE_DISK_GB: float = 5.0
     ACTIVE_SESSION_LOCK_FILE: str = ".session_active.lock"
     DEFAULT_DEVICE_LOG_CAPTURE: Dict[str, Dict[str, Any]] = {
@@ -105,7 +106,7 @@ class MultiProjectTestRunner:
 
     def __init__(
             self,
-            app: Optional[str] = "igha",
+            app: Optional[Union[str, List[str]]] = "igha",
             device_name: Optional[Union[str, List[str]]] = None,
             pairing_code: Optional[Union[str, List[str]]] = None,
             count: Optional[int] = None,
@@ -121,7 +122,17 @@ class MultiProjectTestRunner:
             plug_name: Optional[Union[str, List[str]]] = None,
             **kwargs: Any
     ) -> None:
-        self.project_name = (app or "igha").lower()
+        raw_apps = [item.lower() for item in self._normalize_str_list(app)]
+        if not raw_apps:
+            raw_apps = ["igha"]
+        invalid_apps = [item for item in raw_apps if item not in self.VALID_APPS]
+        if invalid_apps:
+            raise ValueError(
+                f"Unsupported app(s): {invalid_apps}. Valid choices: {list(self.VALID_APPS)}"
+            )
+        self.app_names: List[str] = list(dict.fromkeys(raw_apps))
+        self.project_name: str = self.app_names[0]
+        self.project_tag: str = "_".join(self.app_names)
         self.device_name = device_name
         self.pairing_code = pairing_code
         self.count = count
@@ -161,10 +172,17 @@ class MultiProjectTestRunner:
         self.last_error_message: Optional[str] = None
         self.component_id = component_id
         self.gemini_reporter = GeminiReporter(api_key=gemini_api_key)
-        self.gha_version: str = "N/A" if self.project_name in ("ighp", "att") else "4.29.25"
-        self.att_version: str = "UNKNOWN" if self.project_name == "att" else "N/A"
-        self.sample_app_version: str = "UNKNOWN" if self.project_name == "ighp" else "N/A"
-        self.sdk_version: str = "UNKNOWN" if self.project_name == "ighp" else "N/A"
+        self._app_versions: Dict[str, Dict[str, str]] = {
+            app_item: self._default_versions_for_app(app_item)
+            for app_item in self.app_names
+        }
+        self._env_collected_by_app: Dict[str, bool] = {app_item: False for app_item in
+                                                       self.app_names}
+        self._app_stats: Dict[str, Dict[str, int]] = {
+            app_item: {"runs": 0, "passed": 0, "failed": 0}
+            for app_item in self.app_names
+        }
+        self._apply_app_version_fields(self.project_name)
         self.ios_version: str = str(
             constants.IOS_CAPABILITIES.get("appium:platformVersion") or "iOS 17+")
         self.wifi_ssid: str = "Atelier320482024g"
@@ -180,9 +198,9 @@ class MultiProjectTestRunner:
         host_short = socket.gethostname().split(".")[0]
         if self._multi_session_requested:
             udid_tag = self._short_udid_tag(self.udid, self.wda_local_port)
-            self.drive_run_folder_name = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_name}_{udid_tag}_{host_short}"
+            self.drive_run_folder_name = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_tag}_{udid_tag}_{host_short}"
         else:
-            self.drive_run_folder_name = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_name}_{host_short}"
+            self.drive_run_folder_name = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_tag}_{host_short}"
         self._drive_last_case_folder_id: Optional[str] = None
         self._container_paths: List[str] = []
         self._completed_case_dirs: List[str] = []
@@ -192,6 +210,23 @@ class MultiProjectTestRunner:
                 "[DRIVE] csv_report.append_test_result_to_csv() has no 'drive_url' parameter; "
                 "Drive links will be logged but not written to CSV / Google Sheet."
             )
+
+    @staticmethod
+    def _default_versions_for_app(app_name: str) -> Dict[str, str]:
+        app_key = (app_name or "igha").lower()
+        return {
+            "gha_version": "N/A" if app_key in ("ighp", "att") else "4.29.25",
+            "att_version": "UNKNOWN" if app_key == "att" else "N/A",
+            "sample_app_version": "UNKNOWN" if app_key == "ighp" else "N/A",
+            "sdk_version": "UNKNOWN" if app_key == "ighp" else "N/A",
+        }
+
+    def _apply_app_version_fields(self, app_name: str) -> None:
+        versions = self._app_versions.setdefault(app_name, self._default_versions_for_app(app_name))
+        self.gha_version = versions.get("gha_version", "N/A")
+        self.att_version = versions.get("att_version", "N/A")
+        self.sample_app_version = versions.get("sample_app_version", "N/A")
+        self.sdk_version = versions.get("sdk_version", "N/A")
 
     @staticmethod
     def _normalize_str_list(raw_value: Optional[Union[str, List[str]]]) -> List[str]:
@@ -364,7 +399,7 @@ class MultiProjectTestRunner:
         logs_root = os.path.dirname(current_dir)
         ts_part = getattr(constants, "TIMESTAMP", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
         udid_tag = self._short_udid_tag(self.udid, self.wda_local_port)
-        candidate = os.path.join(logs_root, f"LOG_{ts_part}_{self.project_name}_{udid_tag}")
+        candidate = os.path.join(logs_root, f"LOG_{ts_part}_{self.project_tag}_{udid_tag}")
         if os.path.isdir(candidate) and self._is_session_dir_active(candidate,
                                                                     ignore_current_pid=True):
             candidate = f"{candidate}_{os.getpid()}"
@@ -686,6 +721,48 @@ class MultiProjectTestRunner:
         finally:
             self.device_log_collector = None
 
+    def get_iteration_app(self, iteration: int) -> str:
+        """Resolve the target project/app for the given 1-based iteration.
+
+        Each app runs through all target devices (`len(self.device_names)`) before cycling
+        to the next app in `self.app_names`, then loops back to the first app.
+        """
+        if not self.app_names:
+            return self.project_name or "igha"
+        if len(self.app_names) == 1:
+            return self.app_names[0]
+        devices_per_cycle = max(1, len(self.device_names))
+        app_idx = ((max(1, iteration) - 1) // devices_per_cycle) % len(self.app_names)
+        return self.app_names[app_idx]
+
+    def _bundle_id_for_app(self, app_name: str, resolve_att: bool = True) -> str:
+        """Return the iOS bundle identifier for the specified project name."""
+        app_key = (app_name or "igha").lower()
+        if app_key == "ighp":
+            return getattr(
+                constants, "iGHP_SAMPLE_APP_BUNDLE_ID",
+                "com.google.homeplatform.sampleapp.gomezandres"
+            )
+        if app_key == "att":
+            if resolve_att and self.driver is not None and resolve_att_bundle_id is not None:
+                return resolve_att_bundle_id(self.driver)
+            return getattr(constants, "ATT_BUNDLE_ID", "com.att.connectedlife")
+        return getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
+
+    def _activate_app_context(self, app_name: str) -> str:
+        """Update active project, bundle ID markers, and version fields for `app_name`."""
+        app_key = (app_name or "igha").lower()
+        self.project_name = app_key
+        active_bundle = self._bundle_id_for_app(app_key, resolve_att=True)
+        constants.ACTIVE_APP_BUNDLE_ID = active_bundle
+        if self.driver is not None:
+            try:
+                setattr(self.driver, "_active_app_bundle_id", active_bundle)
+            except Exception:
+                pass
+        self._apply_app_version_fields(app_key)
+        return active_bundle
+
     def get_iteration_targets(self, iteration: int) -> Tuple[Optional[str], Optional[str]]:
         """Resolve target device and its corresponding pairing code for the given iteration.
         Guarantees strict 1-to-1 mapping between device_names[idx] and pairing_codes[idx].
@@ -750,7 +827,12 @@ class MultiProjectTestRunner:
         self._ensure_sufficient_disk_space()
         mode_str = f"{self.count} times" if self.count else "INFINITE LOOP (Press Ctrl+C to stop)"
         logger.info("=" * 65)
-        logger.info(f"       STARTING TEST SESSION FOR APP: {self.project_name}        ")
+        apps_banner = " -> ".join(self.app_names)
+        if len(self.app_names) > 1:
+            logger.info(
+                f"       STARTING MULTI-APP TEST SESSION : {apps_banner} (loop per full device cycle)")
+        else:
+            logger.info(f"       STARTING TEST SESSION FOR APP: {self.project_name}        ")
         logger.info(f"       Execution Mode     : {mode_str}")
         logger.info(f"       Target iPhone UDID : {self.udid or '<auto>'}")
         logger.info(f"       WDA Local Port     : {self.wda_local_port}")
@@ -798,7 +880,9 @@ class MultiProjectTestRunner:
         device_log_targets = [
             d for d in targets if self._device_log_config_for(d, adb_serial_override=first_adb)
         ]
-        if device_log_targets and not self.adb_serials:
+        if device_log_targets:
+            logger.info(f"       Device Log Capture : {', '.join(device_log_targets)}")
+        if not self.adb_serials and any(a != "att" for a in self.app_names):
             online_adb = self._list_online_adb_serials()
             if len(online_adb) > 1:
                 logger.warning(
@@ -808,27 +892,13 @@ class MultiProjectTestRunner:
                 )
         logger.info("=" * 65)
         logger.info(f"Connecting to Appium Server at: {constants.APPIUM_SERVER_URL}")
-        if self.project_name == "ighp":
-            active_bundle = getattr(
-                constants, "iGHP_SAMPLE_APP_BUNDLE_ID",
-                "com.google.homeplatform.sampleapp.gomezandres"
-            )
-        elif self.project_name == "att":
-            active_bundle = getattr(constants, "ATT_BUNDLE_ID", "com.att.connectedlife")
-        else:
-            active_bundle = getattr(constants, "GHA_BUNDLE_ID", "com.google.Chromecast.enterprise")
+        active_bundle = self._bundle_id_for_app(self.project_name, resolve_att=False)
         constants.ACTIVE_APP_BUNDLE_ID = active_bundle
         options = AppiumOptions()
         options.load_capabilities(constants.IOS_CAPABILITIES)
         with self._interprocess_lock("ios_automation_wda_init.lock"):
             self.driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
-        if self.project_name == "att" and resolve_att_bundle_id is not None:
-            active_bundle = resolve_att_bundle_id(self.driver)
-            constants.ACTIVE_APP_BUNDLE_ID = active_bundle
-        try:
-            setattr(self.driver, "_active_app_bundle_id", active_bundle)
-        except Exception:
-            pass
+        self._activate_app_context(self.project_name)
         implicit_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
         self.driver.implicitly_wait(implicit_wait)
         logger.info(f"Global driver implicit wait configured to: {implicit_wait}s")
@@ -842,32 +912,29 @@ class MultiProjectTestRunner:
         logger.info("=" * 65)
         self._ensure_sufficient_disk_space()
         if self.driver:
-            if self.project_name == "ighp":
-                target_bundle = getattr(
-                    constants, "iGHP_SAMPLE_APP_BUNDLE_ID",
-                    "com.google.homeplatform.sampleapp.gomezandres"
-                )
-            elif self.project_name == "att":
-                target_bundle = (
-                        getattr(self.driver, "_att_bundle_id", None)
-                        or getattr(self.driver, "_active_app_bundle_id", None)
-                        or getattr(constants, "ATT_BUNDLE_ID", "com.att.connectedlife")
-                )
-            else:
-                target_bundle = getattr(constants, "GHA_BUNDLE_ID",
-                                        "com.google.Chromecast.enterprise")
-            try:
-                dest = logging_utils._current_main_log_dir or constants.SESSION_LOG_DIR
-                before = set(os.listdir(dest)) if os.path.isdir(dest) else set()
-                logging_utils.pull_ios_app_container(self.driver, target_bundle, dest)
-                after = set(os.listdir(dest)) if os.path.isdir(dest) else set()
-                self._container_paths = [os.path.join(dest, name) for name in
-                                         sorted(after - before)]
-                if self._container_paths:
-                    logger.info(
-                        f"[DRIVE] App container artifacts queued for upload: {self._container_paths}")
-            except Exception as e:
-                logger.error(f"Failed to pull {target_bundle} container: {e}")
+            bundles_to_pull: List[str] = []
+            for app_item in self.app_names:
+                if app_item == "att":
+                    target_bundle = (
+                            getattr(self.driver, "_att_bundle_id", None)
+                            or getattr(constants, "ATT_BUNDLE_ID", "com.att.connectedlife")
+                    )
+                else:
+                    target_bundle = self._bundle_id_for_app(app_item, resolve_att=False)
+                if target_bundle and target_bundle not in bundles_to_pull:
+                    bundles_to_pull.append(target_bundle)
+            dest = logging_utils._current_main_log_dir or constants.SESSION_LOG_DIR
+            before = set(os.listdir(dest)) if os.path.isdir(dest) else set()
+            for target_bundle in bundles_to_pull:
+                try:
+                    logging_utils.pull_ios_app_container(self.driver, target_bundle, dest)
+                except Exception as e:
+                    logger.error(f"Failed to pull {target_bundle} container: {e}")
+            after = set(os.listdir(dest)) if os.path.isdir(dest) else set()
+            self._container_paths = [os.path.join(dest, name) for name in sorted(after - before)]
+            if self._container_paths:
+                logger.info(
+                    f"[DRIVE] App container artifacts queued for upload: {self._container_paths}")
             logger.info("Quitting Appium WebDriver...")
             self.driver.quit()
         if self.syslog_collector:
@@ -884,16 +951,17 @@ class MultiProjectTestRunner:
         logger.info(f"Artifacts and Logs stored in: {constants.SESSION_LOG_DIR}")
         logger.info("=" * 65)
 
-    def _get_project_suite(self) -> Tuple[Any, List[Type]]:
+    def _get_project_suite(self, app_name: Optional[str] = None) -> Tuple[Any, List[Type]]:
         """Resolve session instance and test classes for the target project."""
-        if self.project_name == "ighp":
+        target_app = (app_name or self.project_name or "igha").lower()
+        if target_app == "ighp":
             session_instance = GHPSession(self.driver)
             ghp_test_cls = TestGHPHome
             if ghp_test_cls is None:
                 from testcase.iGHP.test_home import TestGHPHome as _TestGHPHome
                 ghp_test_cls = _TestGHPHome
             test_classes = [ghp_test_cls]
-        elif self.project_name == "att":
+        elif target_app == "att":
             att_sess_cls = ATTSession
             if att_sess_cls is None:
                 from page_object.Partner.ATT.att_session import ATTSession as _ATTSession
@@ -922,24 +990,49 @@ class MultiProjectTestRunner:
         session_start_time = time.time()
         try:
             self.setup()
-            session_instance, test_classes = self._get_project_suite()
+            app_suites: Dict[str, Tuple[Any, List[Type]]] = {}
+            prev_app: Optional[str] = None
             while True:
                 iteration += 1
                 if self.count is not None and iteration > self.count:
                     break
                 self._ensure_sufficient_disk_space()
+                current_app = self.get_iteration_app(iteration)
                 current_device, current_pairing_code = self.get_iteration_targets(iteration)
                 current_adb_serial = self.get_iteration_adb_serial(iteration)
                 if current_adb_serial:
                     self._sync_adb_reset_target(current_device, current_adb_serial)
+
+                if prev_app != current_app:
+                    if prev_app is not None and self.driver is not None:
+                        prev_bundle = self._bundle_id_for_app(prev_app, resolve_att=False)
+                        if hasattr(self.driver, "terminate_app"):
+                            try:
+                                self.driver.terminate_app(prev_bundle)
+                            except Exception:
+                                pass
+                        devices_per_cycle = max(1, len(self.device_names))
+                        cycle_num = ((iteration - 1) // devices_per_cycle) + 1
+                        logger.info(
+                            f"\n[MULTI-APP] Completed all devices for '{prev_app}'. "
+                            f"Switching to next app '{current_app}' (Cycle #{cycle_num})..."
+                        )
+                    self._activate_app_context(current_app)
+                    prev_app = current_app
+
+                if current_app not in app_suites:
+                    app_suites[current_app] = self._get_project_suite(current_app)
+                session_instance, test_classes = app_suites[current_app]
+
                 session_instance.device_name = current_device
                 session_instance.pairing_code = current_pairing_code
                 session_instance.iteration = iteration
                 iter_label = f"{iteration}/{self.count}" if self.count else f"{iteration} (Infinite)"
                 logger.info("\n" + "=" * 65)
                 logger.info(f"               STARTING ITERATION #{iter_label}")
+                logger.info(f"               TARGET APP    : {current_app}")
                 logger.info(f"               TARGET DEVICE : {current_device}")
-                if self.project_name == "att":
+                if current_app == "att":
                     logger.info(f"               TARGET ROOM   : {self.room_name}")
                 else:
                     logger.info(f"               PAIRING CODE  : {current_pairing_code}")
@@ -973,7 +1066,8 @@ class MultiProjectTestRunner:
                         case_additional_log_dir = os.path.join(case_dir, "Additional log")
                         os.makedirs(case_main_log_dir, exist_ok=True)
                         os.makedirs(case_additional_log_dir, exist_ok=True)
-                        logging_utils.set_current_test_dirs(case_main_log_dir, case_additional_log_dir)
+                        logging_utils.set_current_test_dirs(case_main_log_dir,
+                                                            case_additional_log_dir)
                         logger.info(
                             f"\n>>> [RUNNING] [Iter #{iteration}] {class_name}.{test_name} "
                             f"(Device: '{current_device}', Code: '{current_pairing_code}')"
@@ -1019,6 +1113,10 @@ class MultiProjectTestRunner:
                         test_status = "PASS"
                         test_error = ""
                         caught_exception = None
+                        self._app_stats.setdefault(current_app,
+                                                   {"runs": 0, "passed": 0, "failed": 0})[
+                            "runs"
+                        ] += 1
                         try:
                             test_method()
                             elapsed = time.time() - start_time
@@ -1027,6 +1125,7 @@ class MultiProjectTestRunner:
                             logger.info(
                                 f">>> [PASS] [Iter #{iteration}] {class_name}.{test_name} ({elapsed:.2f}s)")
                             total_passed += 1
+                            self._app_stats[current_app]["passed"] += 1
                         except Exception as e:
                             elapsed = time.time() - start_time
                             caught_exception = e
@@ -1037,6 +1136,7 @@ class MultiProjectTestRunner:
                                 f">>> [FAIL] [Iter #{iteration}] {class_name}.{test_name} ({elapsed:.2f}s) - Error: {e}"
                             )
                             total_failed += 1
+                            self._app_stats[current_app]["failed"] += 1
                             if self.driver:
                                 captured_shot = getattr(self.driver, "_failure_screenshot_captured",
                                                         None)
@@ -1076,7 +1176,11 @@ class MultiProjectTestRunner:
                                     self.syslog_file_paths.append(case_syslog_path)
                                 self.syslog_collector = None
                             self._stop_device_log()  # [DEVICE LOG]
-                            if self.project_name == "ighp":
+                            app_ver_map = self._app_versions.setdefault(
+                                current_app, self._default_versions_for_app(current_app)
+                            )
+                            self._apply_app_version_fields(current_app)
+                            if current_app == "ighp":
                                 drv_ver = getattr(self.driver, "_ghp_version_info",
                                                   None) if self.driver else None
                                 if isinstance(drv_ver, dict):
@@ -1084,10 +1188,10 @@ class MultiProjectTestRunner:
                                     k_ver = str(drv_ver.get("sdk_version") or "").strip()
                                     if s_ver and s_ver.upper() not in ("UNKNOWN",
                                                                        "UNKNOWN / NOT INSTALLED"):
-                                        self.sample_app_version = s_ver
+                                        app_ver_map["sample_app_version"] = s_ver
                                     if k_ver and k_ver.upper() not in ("UNKNOWN",
                                                                        "UNKNOWN / NOT INSTALLED"):
-                                        self.sdk_version = k_ver
+                                        app_ver_map["sdk_version"] = k_ver
                                 sess_s_ver = str(getattr(session_instance, "sample_app_version",
                                                          "") or "").strip()
                                 sess_k_ver = str(
@@ -1096,25 +1200,30 @@ class MultiProjectTestRunner:
                                         sess_s_ver
                                         and sess_s_ver.upper() not in ("UNKNOWN",
                                                                        "UNKNOWN / NOT INSTALLED")
-                                        and self.sample_app_version.upper() in ("", "UNKNOWN")
+                                        and app_ver_map.get("sample_app_version", "").upper() in (
+                                        "", "UNKNOWN")
                                 ):
-                                    self.sample_app_version = sess_s_ver
+                                    app_ver_map["sample_app_version"] = sess_s_ver
                                 if (
                                         sess_k_ver
                                         and sess_k_ver.upper() not in ("UNKNOWN",
                                                                        "UNKNOWN / NOT INSTALLED")
-                                        and self.sdk_version.upper() in ("", "UNKNOWN")
+                                        and app_ver_map.get("sdk_version", "").upper() in ("",
+                                                                                           "UNKNOWN")
                                 ):
-                                    self.sdk_version = sess_k_ver
+                                    app_ver_map["sdk_version"] = sess_k_ver
+                                self._apply_app_version_fields(current_app)
 
-                            if not self.env_info_collected and self.driver:
+                            if not self._env_collected_by_app.get(current_app,
+                                                                  False) and self.driver:
                                 try:
                                     logger.info(
-                                        "[ENV INFO] First testcase completed, collecting full environment info...")
+                                        f"[ENV INFO] First '{current_app}' testcase completed, collecting full environment info..."
+                                    )
                                     env_info = log_all_version_information(self.driver)
                                     if isinstance(env_info, dict):
-                                        if self.project_name == "ighp":
-                                            self.gha_version = "N/A"
+                                        if current_app == "ighp":
+                                            app_ver_map["gha_version"] = "N/A"
                                             env_sample = str(
                                                 env_info.get("sample_app_version")
                                                 or env_info.get("sample_version")
@@ -1123,23 +1232,24 @@ class MultiProjectTestRunner:
                                             env_sdk = str(env_info.get("sdk_version") or "").strip()
                                             if env_sample and env_sample.upper() not in ("UNKNOWN",
                                                                                          "UNKNOWN / NOT INSTALLED"):
-                                                self.sample_app_version = env_sample
+                                                app_ver_map["sample_app_version"] = env_sample
                                             if env_sdk and env_sdk.upper() not in ("UNKNOWN",
                                                                                    "UNKNOWN / NOT INSTALLED"):
-                                                self.sdk_version = env_sdk
-                                        elif self.project_name == "att":
-                                            self.gha_version = "N/A"
-                                            self.sample_app_version = "N/A"
-                                            self.sdk_version = "N/A"
+                                                app_ver_map["sdk_version"] = env_sdk
+                                        elif current_app == "att":
+                                            app_ver_map["gha_version"] = "N/A"
+                                            app_ver_map["sample_app_version"] = "N/A"
+                                            app_ver_map["sdk_version"] = "N/A"
                                             env_att = str(env_info.get("att_version") or "").strip()
                                             if env_att and env_att.upper() not in ("UNKNOWN",
                                                                                    "UNKNOWN / NOT INSTALLED"):
-                                                self.att_version = env_att
+                                                app_ver_map["att_version"] = env_att
                                         else:
                                             if "gha_version" in env_info:
-                                                self.gha_version = str(env_info["gha_version"])
-                                            self.sample_app_version = "N/A"
-                                            self.sdk_version = "N/A"
+                                                app_ver_map["gha_version"] = str(
+                                                    env_info["gha_version"])
+                                            app_ver_map["sample_app_version"] = "N/A"
+                                            app_ver_map["sdk_version"] = "N/A"
                                         if "device_info" in env_info and "platform_version" in \
                                                 env_info["device_info"]:
                                             self.ios_version = str(
@@ -1154,21 +1264,27 @@ class MultiProjectTestRunner:
                                                 w_info.get("router_gateway", self.router_gateway))
                                             self.subnet_mask = str(
                                                 w_info.get("subnet_mask", self.subnet_mask))
-                                    if self.project_name == "ighp" and self.sdk_version.upper() in (
+                                    if current_app == "ighp" and app_ver_map.get("sdk_version",
+                                                                                 "").upper() in (
                                             "", "UNKNOWN", "UNKNOWN / NOT INSTALLED"
                                     ):
                                         syslog_sdk = self._extract_sdk_version_from_syslog(
                                             case_syslog_path)
                                         if syslog_sdk:
-                                            self.sdk_version = syslog_sdk
-                                    self.env_info_collected = True
-                                    if self.project_name == "ighp":
+                                            app_ver_map["sdk_version"] = syslog_sdk
+                                    self._env_collected_by_app[current_app] = True
+                                    self.env_info_collected = all(
+                                        self._env_collected_by_app.get(a, False) for a in
+                                        self.app_names
+                                    )
+                                    self._apply_app_version_fields(current_app)
+                                    if current_app == "ighp":
                                         logger.info(
                                             f"[ENV INFO] Initialized: Sample App {self.sample_app_version} | "
                                             f"SDK {self.sdk_version} | iOS {self.ios_version} | "
                                             f"SSID {self.wifi_ssid} | Phone IP {self.phone_ip} | Gateway {self.router_gateway}"
                                         )
-                                    elif self.project_name == "att":
+                                    elif current_app == "att":
                                         logger.info(
                                             f"[ENV INFO] Initialized: AT&T Connected Life {self.att_version} | iOS {self.ios_version} | "
                                             f"SSID {self.wifi_ssid} | Phone IP {self.phone_ip} | Gateway {self.router_gateway}"
@@ -1181,7 +1297,11 @@ class MultiProjectTestRunner:
                                 except Exception as env_err:
                                     logger.warning(
                                         f"Failed to collect version information: {env_err}")
-                                    self.env_info_collected = True
+                                    self._env_collected_by_app[current_app] = True
+                                    self.env_info_collected = all(
+                                        self._env_collected_by_app.get(a, False) for a in
+                                        self.app_names
+                                    )
                             elif self.driver:
                                 try:
                                     logger.info(
@@ -1271,7 +1391,7 @@ class MultiProjectTestRunner:
                             except (TypeError, ValueError):
                                 accepts_var_kw = False
                             if self._csv_accepts_param("app") or accepts_var_kw:
-                                csv_kwargs["app"] = self.project_name
+                                csv_kwargs["app"] = current_app
                             if self._csv_accepts_param("sample_app_version") or accepts_var_kw:
                                 csv_kwargs["sample_app_version"] = self.sample_app_version
                             if self._csv_accepts_param("sdk_version") or accepts_var_kw:
@@ -1302,6 +1422,12 @@ class MultiProjectTestRunner:
             logger.info(f"  Total Test Executions : {total_runs}")
             logger.info(f"  Total Passed          : {total_passed}")
             logger.info(f"  Total Failed          : {total_failed}")
+            if len(self.app_names) > 1:
+                for app_item in self.app_names:
+                    st = self._app_stats.get(app_item, {"runs": 0, "passed": 0, "failed": 0})
+                    logger.info(
+                        f"    - [{app_item}] Runs: {st['runs']} | Passed: {st['passed']} | Failed: {st['failed']}"
+                    )
             logger.info(f"  Total Duration        : {total_duration:.2f}s")
             logger.info("=" * 65)
             self._drive_finalize()

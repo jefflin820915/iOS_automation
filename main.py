@@ -3,6 +3,8 @@ import argparse
 from typing import Any, List, Optional
 from core.test_runner import MultiProjectTestRunner
 
+VALID_APPS = ("igha", "ighp", "att")
+
 
 def _parse_list_arg(raw_value: Any) -> Optional[List[str]]:
     """Parse command line list arguments supporting comma or space separation.
@@ -28,8 +30,14 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="iOS Automation Multi-Project Test Runner")
     parser.add_argument(
         "-a", "--app",
-        choices=["igha", "ighp", "att"],
-        help="Target project to test: 'igha' (Google Home App), 'ighp' (Home Platform Sample App), or 'att' (AT&T Connected Life)"
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Target project(s) to test: 'igha' (Google Home App), 'ighp' (Home Platform Sample App), "
+            "or 'att' (AT&T Connected Life). Supports multiple comma- or space-separated apps "
+            "(runs all devices for one app, then loops to the next app), e.g. --app igha, ighp"
+        ),
     )
     parser.add_argument(
         "-d", "--device_name",
@@ -107,6 +115,15 @@ def parse_arguments() -> argparse.Namespace:
         help='(Optional) Specific Smart Plug name(s) to power-cycle in this terminal, e.g. --plug_name="Plug A".'
     )
     args = parser.parse_args()
+    if args.app:
+        parsed_apps = [item.lower() for item in (_parse_list_arg(args.app) or [])]
+        invalid_apps = [item for item in parsed_apps if item not in VALID_APPS]
+        if invalid_apps:
+            parser.error(
+                f"argument -a/--app: invalid choice(s): {', '.join(invalid_apps)} "
+                f"(choose from {', '.join(VALID_APPS)})"
+            )
+        args.app = parsed_apps[0] if len(parsed_apps) == 1 else parsed_apps
     if args.device_name:
         args.device_name = _parse_list_arg(args.device_name)
     if args.pairing_code:
