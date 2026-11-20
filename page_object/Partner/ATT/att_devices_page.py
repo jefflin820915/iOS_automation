@@ -409,19 +409,20 @@ class ATTDevicesPage(ATTBasePage):
     def _find_top_left_setting_button(self) -> Optional[WebElement]:
         win_w, _ = self._att_window_size()
         with self._att_fast_probe():
+            fallback_btn: Optional[WebElement] = None
             for by, loc in self.SETTINGS_NAVBAR_BTN_LOCATORS:
                 try:
                     for btn in self.driver.find_elements(by, loc):
                         rect = getattr(btn, "rect", None) or {}
-                        if (
-                                self._att_is_element_on_screen(btn)
-                                and rect.get("y", 0) < 150
-                                and rect.get("x", 0) < int(win_w * 0.40)
-                        ):
+                        if rect.get("y", 0) >= 150 or rect.get("x", 0) >= int(win_w * 0.40):
+                            continue
+                        if self._att_is_element_on_screen(btn, require_visible_attr=True):
                             return btn
+                        if fallback_btn is None and self._att_is_element_on_screen(btn):
+                            fallback_btn = btn
                 except WebDriverException:
                     continue
-        return None
+        return fallback_btn
 
     def _is_home_settings_page_open_probe(self) -> bool:
         """Return True when the `Home settings` sheet (Screenshot A) is visible."""
@@ -515,10 +516,18 @@ class ATTDevicesPage(ATTBasePage):
             return True
 
         # Phase 1: Open `Home settings` if not already open
-        if not page._is_home_settings_page_open_probe():
+        home_settings_opened = page._is_home_settings_page_open_probe()
+        if not home_settings_opened:
             page.go_to_devices_tab()
             for attempt in range(1, 3):
                 page._wait_until_top_notification_disappears(force=True)
+                if page._is_account_page_open_probe():
+                    page._logger.info("[ATT Settings] Account page already open.")
+                    return True
+                if page._is_home_settings_page_open_probe():
+                    home_settings_opened = True
+                    page._logger.info("[ATT Settings] `Home settings` page is already open.")
+                    break
                 btn = page._find_top_left_setting_button()
                 if btn is None:
                     break
@@ -536,17 +545,22 @@ class ATTDevicesPage(ATTBasePage):
                         page._logger.info("[ATT Settings] Account page opened directly.")
                         return True
                     if page._is_home_settings_page_open_probe():
+                        home_settings_opened = True
                         page._logger.info("[ATT Settings] Opened `Home settings` page.")
                         break
+                    _cleared, notif_waited = page._wait_until_top_notification_disappears_timed()
+                    if notif_waited > 0:
+                        deadline += notif_waited
+                        continue
                     time.sleep(0.4)
-                if page._is_home_settings_page_open_probe():
+                if home_settings_opened:
                     break
 
         if page._is_account_page_open_probe():
             return True
 
         # Phase 2: Inside `Home settings`, click the Account button (`Account Ios Test, ...`)
-        if page._is_home_settings_page_open_probe():
+        if home_settings_opened or page._is_home_settings_page_open_probe():
             for attempt in range(1, 3):
                 page._wait_until_top_notification_disappears(force=True)
                 acct_btn: Optional[WebElement] = None
@@ -555,7 +569,9 @@ class ATTDevicesPage(ATTBasePage):
                     if page._is_account_page_open_probe():
                         page._logger.info("[ATT Settings] Account page opened.")
                         return True
-                    page._wait_until_top_notification_disappears()
+                    _cleared, notif_waited = page._wait_until_top_notification_disappears_timed()
+                    if notif_waited > 0:
+                        find_deadline += notif_waited
                     acct_btn = page._find_home_settings_account_button()
                     if acct_btn is not None:
                         break
