@@ -76,6 +76,16 @@ class ATTDevicesPage(ATTBasePage):
         'OR name BEGINSWITH "Account " OR label BEGINSWITH "Account "'
     )
 
+    SUBPAGE_OR_MODAL_PREDICATE: str = (
+        '(type == "XCUIElementTypeButton" AND name IN {"BackButton", "group_settings_navbar_button"}) '
+        'OR (type == "XCUIElementTypeNavigationBar" AND name IN {'
+        '"Dashboard", "Activity", "Automations", "Alarms", "Account", "Google account settings"}) '
+        'OR name IN {"Home settings", "System settings", "Smart home integrations", '
+        '"Google account settings", "Disconnect Google account", "Sign out of Google account"} '
+        'OR label IN {"Home settings", "System settings", "Smart home integrations", '
+        '"Google account settings", "Disconnect Google account", "Sign out of Google account"}'
+    )
+
     def __init__(self, driver: WebDriver, timeout: float = 10.0) -> None:
         super().__init__(driver, timeout=timeout)
         self._logger = logging_utils.get_logger(__name__, "att_devices_page")
@@ -95,22 +105,45 @@ class ATTDevicesPage(ATTBasePage):
             page.session = session
         return page
 
-    def is_on_devices_page(self) -> bool:
-        """Return True only when the AT&T `Devices` tab (NOT Dashboard) is the active screen."""
+    def _is_subpage_or_modal_open(self) -> bool:
+        """Return True when a pushed child page (Room / Live) or modal sheet (`Home settings` / `Account`) is open."""
         win_w, _ = self._att_window_size()
         with self._att_fast_probe():
             try:
-                # Dashboard / Activity / Automations / Alarms share `app_settings_navbar_button`; exclude them first.
-                for nav in self.driver.find_elements(
-                        IOS_PREDICATE_BY, self.NON_DEVICES_TAB_NAVBAR_PREDICATE
+                for el in self.driver.find_elements(
+                        IOS_PREDICATE_BY, self.SUBPAGE_OR_MODAL_PREDICATE
                 ):
-                    if self._att_is_element_on_screen(nav, require_visible_attr=True):
-                        return False
+                    if self._att_is_element_on_screen(el, require_visible_attr=True):
+                        return True
+                for btn in self.driver.find_elements(
+                        IOS_PREDICATE_BY,
+                        'type == "XCUIElementTypeButton" AND (name == "Settings" OR label == "Settings")',
+                ):
+                    rect = getattr(btn, "rect", None) or {}
+                    if (
+                            self._att_is_element_on_screen(btn, require_visible_attr=True)
+                            and rect.get("y", 0) < 140
+                            and rect.get("x", 0) >= int(win_w * 0.60)
+                    ):
+                        return True
+            except WebDriverException:
+                pass
+        return False
+
+    def is_on_devices_page(self) -> bool:
+        """Return True only when the AT&T `Devices` tab (NOT Dashboard, Room, Live, or modal) is active."""
+        win_w, _ = self._att_window_size()
+        with self._att_fast_probe():
+            try:
+                # Reject pushed sub-pages (Room / Live), modal sheets (Home settings / Account),
+                # and other tabs (Dashboard / Activity / Automations / Alarms) first.
+                if self._is_subpage_or_modal_open():
+                    return False
                 for dash_btn in self.driver.find_elements(
                         IOS_PREDICATE_BY,
                         'type == "XCUIElementTypeButton" AND name == "dashboard_tab_button" AND value == "1"',
                 ):
-                    if self._att_is_element_on_screen(dash_btn):
+                    if self._att_is_element_on_screen(dash_btn, require_visible_attr=True):
                         return False
 
                 for nav in self.driver.find_elements(IOS_PREDICATE_BY,
@@ -131,7 +164,7 @@ class ATTDevicesPage(ATTBasePage):
                 for marker in self.driver.find_elements(
                         IOS_PREDICATE_BY, self.DEVICES_PAGE_MARKER_PREDICATE
                 ):
-                    if self._att_is_element_on_screen(marker):
+                    if self._att_is_element_on_screen(marker, require_visible_attr=True):
                         return True
             except WebDriverException:
                 pass
@@ -161,34 +194,64 @@ class ATTDevicesPage(ATTBasePage):
                     continue
         return None
 
-    def _dismiss_transient_overlays_to_tabs(self, max_steps: int = 6) -> None:
+    def _dismiss_transient_overlays_to_tabs(self, max_steps: int = 8) -> None:
         """Step back out of Google account settings / Account / Home settings / Room / Live until Tabs appear."""
         win_w, win_h = self._att_window_size()
         for step in range(1, max_steps + 1):
-            if self.is_on_devices_page() or self._is_tab_bar_visible():
+            if self.is_on_devices_page():
+                return
+            subpage_or_modal = self._is_subpage_or_modal_open()
+            if not subpage_or_modal and self._is_tab_bar_visible():
                 return
             self._att_dismiss_system_alert_if_present()
             self._wait_until_top_notification_disappears(force=True)
             clicked = False
+            use_coords = step % 2 == 0
             with self._att_fast_probe():
-                # 1. Sheet / NavBar back or close buttons (e.g. Google account settings '<', Account '<', Home settings 'X')
+                # 0. Explicit BackButton (Room -> Devices, Live -> Room)
                 try:
-                    nav_btns = self.driver.find_elements(
-                        AppiumBy.XPATH,
-                        '//XCUIElementTypeNavigationBar//XCUIElementTypeButton',
-                    )
-                    for btn in nav_btns:
+                    for btn in self.driver.find_elements(
+                            IOS_PREDICATE_BY,
+                            'type == "XCUIElementTypeButton" AND name == "BackButton"',
+                    ):
                         rect = getattr(btn, "rect", None) or {}
                         if (
-                                self._att_is_element_on_screen(btn)
+                                self._att_is_element_on_screen(btn, require_visible_attr=True)
                                 and rect.get("y", 0) < 140
-                                and rect.get("x", 0) < int(win_w * 0.35)
+                                and rect.get("x", 0) < int(win_w * 0.40)
                         ):
-                            if self._att_tap_element_or_coords(btn, desc="NavBar Back/Close"):
+                            if self._att_tap_element_or_coords(
+                                    btn, desc="BackButton", prefer_coords=use_coords
+                            ):
                                 clicked = True
                                 break
                 except WebDriverException:
                     pass
+
+                # 1. Sheet / NavBar back or close buttons (e.g. Google account settings '<', Account '<', Home settings 'X')
+                if not clicked:
+                    try:
+                        nav_btns = self.driver.find_elements(
+                            AppiumBy.XPATH,
+                            '//XCUIElementTypeNavigationBar//XCUIElementTypeButton',
+                        )
+                        for btn in nav_btns:
+                            rect = getattr(btn, "rect", None) or {}
+                            b_name = self._att_read_attr(btn, ("name",))
+                            if b_name == "app_settings_navbar_button":
+                                continue
+                            if (
+                                    self._att_is_element_on_screen(btn, require_visible_attr=True)
+                                    and rect.get("y", 0) < 140
+                                    and rect.get("x", 0) < int(win_w * 0.35)
+                            ):
+                                if self._att_tap_element_or_coords(
+                                        btn, desc="NavBar Back/Close", prefer_coords=use_coords
+                                ):
+                                    clicked = True
+                                    break
+                    except WebDriverException:
+                        pass
 
                 # 2. Standalone top-left Back/Close button outside NavigationBar (e.g. modal 'X' / '<' circle)
                 if not clicked:
@@ -198,14 +261,19 @@ class ATTDevicesPage(ATTBasePage):
                         )
                         for btn in btns:
                             rect = getattr(btn, "rect", None) or {}
+                            b_name = self._att_read_attr(btn, ("name",))
+                            if b_name == "app_settings_navbar_button":
+                                continue
                             if (
-                                    self._att_is_element_on_screen(btn)
+                                    self._att_is_element_on_screen(btn, require_visible_attr=True)
                                     and rect.get("y", 0) < 140
                                     and rect.get("x", 0) < int(win_w * 0.30)
                                     and rect.get("width", 0) <= 90
                                     and rect.get("height", 0) <= 70
                             ):
-                                if self._att_tap_element_or_coords(btn, desc="Top-left Back/Close"):
+                                if self._att_tap_element_or_coords(
+                                        btn, desc="Top-left Back/Close", prefer_coords=use_coords
+                                ):
                                     clicked = True
                                     break
                     except WebDriverException:
@@ -265,6 +333,8 @@ class ATTDevicesPage(ATTBasePage):
 
     def _find_visible_room_element(self, room_name: str) -> Optional[WebElement]:
         """Locate the Room card (e.g. `group_attic_item` / `Attic`) in the Devices tab viewport."""
+        if self._is_subpage_or_modal_open():
+            return None
         target_norm = self._att_norm(room_name)
         target_slug = self._att_slug(room_name)
         expected_item_name = f"group_{target_slug}_item"
@@ -276,7 +346,9 @@ class ATTDevicesPage(ATTBasePage):
             try:
                 for elem in self.driver.find_elements(AppiumBy.ACCESSIBILITY_ID,
                                                       expected_item_name):
-                    if self._att_is_element_on_screen(elem, min_y=90, max_y_margin=85):
+                    if self._att_is_element_on_screen(
+                            elem, require_visible_attr=True, min_y=90, max_y_margin=85
+                    ):
                         return elem
             except WebDriverException:
                 pass
@@ -284,7 +356,9 @@ class ATTDevicesPage(ATTBasePage):
             # Layer 2: Any `group_*_item` element whose label/name matches `room_name`
             try:
                 for elem in self.driver.find_elements(IOS_PREDICATE_BY, self.ROOM_CARD_PREDICATE):
-                    if not self._att_is_element_on_screen(elem, min_y=90, max_y_margin=85):
+                    if not self._att_is_element_on_screen(
+                            elem, require_visible_attr=True, min_y=90, max_y_margin=85
+                    ):
                         continue
                     el_name = self._att_read_attr(elem, ("name",))
                     el_label = self._att_read_attr(elem, ("label", "value"))
@@ -414,6 +488,13 @@ class ATTDevicesPage(ATTBasePage):
                     page._logger.info(f"[ATT Room] Successfully entered room '{target_room}'.")
                     return True
                 time.sleep(0.4)
+            page._wait_until_top_notification_disappears(force=True)
+            if not page.is_on_devices_page():
+                page._logger.warning(
+                    f"[ATT Room] No longer on Devices page after clicking room '{target_room}'; "
+                    "unwinding back to Devices tab before retry..."
+                )
+                page.go_to_devices_tab()
             refreshed = page._find_visible_room_element(target_room)
             if refreshed is not None:
                 room_elem = refreshed

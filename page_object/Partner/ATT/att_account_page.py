@@ -514,9 +514,7 @@ class ATTAccountPage(ATTBasePage):
         for step in range(1, 7):
             sheet_before = page._current_settings_sheet_kind()
             if sheet_before is None:
-                if step > 1:
-                    page._logger.info("[ATT Account] Closed settings/account sheets cleanly.")
-                return True
+                break
 
             for attempt in range(1, 4):
                 page._wait_until_top_notification_disappears(force=True)
@@ -529,8 +527,11 @@ class ATTAccountPage(ATTBasePage):
                         )
                         for b in btns:
                             rect = getattr(b, "rect", None) or {}
+                            b_name = page._att_read_attr(b, ("name",))
+                            if b_name == "app_settings_navbar_button":
+                                continue
                             if (
-                                    page._att_is_element_on_screen(b)
+                                    page._att_is_element_on_screen(b, require_visible_attr=True)
                                     and rect.get("y", 0) < 140
                                     and rect.get("x", 0) < int(win_w * 0.35)
                             ):
@@ -546,8 +547,11 @@ class ATTAccountPage(ATTBasePage):
                             )
                             for b in all_btns:
                                 rect = getattr(b, "rect", None) or {}
+                                b_name = page._att_read_attr(b, ("name",))
+                                if b_name == "app_settings_navbar_button":
+                                    continue
                                 if (
-                                        page._att_is_element_on_screen(b)
+                                        page._att_is_element_on_screen(b, require_visible_attr=True)
                                         and rect.get("y", 0) < 140
                                         and rect.get("x", 0) < int(win_w * 0.30)
                                         and rect.get("width", 0) <= 90
@@ -593,7 +597,18 @@ class ATTAccountPage(ATTBasePage):
                 )
 
         if not page._is_in_settings_modal_stack():
-            page._logger.info("[ATT Account] Returned cleanly from settings/account sheets.")
+            # If tapping close overlapped a push notification that opened Live Stream / Room, unwind back to Devices.
+            devices_page = getattr(getattr(page, "session", None), "attdevicespage", None)
+            if devices_page is None:
+                from page_object.Partner.ATT.att_devices_page import ATTDevicesPage
+
+                devices_page = ATTDevicesPage(page.driver)
+            if not devices_page.is_on_devices_page():
+                page._logger.warning(
+                    "[ATT Account] Not on Devices tab after closing settings sheets; unwinding back to Devices..."
+                )
+                devices_page.go_to_devices_tab()
+            page._logger.info("[ATT Account] Closed settings/account sheets cleanly.")
             return True
 
         page._logger.warning(
