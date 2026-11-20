@@ -1,4 +1,5 @@
 """Shared AT&T Connected Life (`Connected Life`) bundle resolution and UI interaction helpers."""
+
 import contextlib
 import re
 import time
@@ -11,11 +12,13 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.actions import interaction
 from selenium.webdriver.common.actions.action_builder import ActionBuilder
 from selenium.webdriver.common.actions.pointer_input import PointerInput
+
 from common import constants
 from common.base_page import BasePage
 
 IOS_PREDICATE_BY = getattr(AppiumBy, "IOS_PREDICATE", "-ios predicate string")
 IOS_CLASS_CHAIN_BY = getattr(AppiumBy, "IOS_CLASS_CHAIN", "-ios class chain")
+
 DEFAULT_ATT_BUNDLE_ID = "com.att.connectedlife"
 ATT_CANDIDATE_BUNDLE_IDS: Tuple[str, ...] = (
     "com.att.connectedlife",
@@ -46,6 +49,7 @@ def _configured_att_bundle_candidates() -> List[str]:
 
 def resolve_att_bundle_id(driver: Optional[WebDriver] = None, force: bool = False) -> str:
     """Resolve the installed iOS bundle ID for AT&T Connected Life (`Connected Life`).
+
     Caches the discovered bundle ID on `driver._att_bundle_id` so subsequent calls
     do not repeatedly query `mobile: listApps`.
     """
@@ -53,8 +57,10 @@ def resolve_att_bundle_id(driver: Optional[WebDriver] = None, force: bool = Fals
         cached = getattr(driver, "_att_bundle_id", None)
         if cached and str(cached).strip():
             return str(cached).strip()
+
     candidates = _configured_att_bundle_candidates()
     resolved: Optional[str] = None
+
     if driver is not None:
         # 1. Inspect installed User apps via `mobile: listApps`
         try:
@@ -68,10 +74,12 @@ def resolve_att_bundle_id(driver: Optional[WebDriver] = None, force: bool = Fals
                 for item in apps:
                     if isinstance(item, dict) and item.get("CFBundleIdentifier"):
                         app_map[str(item["CFBundleIdentifier"])] = item
+
             for cand in candidates:
                 if cand in app_map:
                     resolved = cand
                     break
+
             if resolved is None:
                 for bid, meta in app_map.items():
                     display_name = str(
@@ -85,6 +93,7 @@ def resolve_att_bundle_id(driver: Optional[WebDriver] = None, force: bool = Fals
                         break
         except Exception:
             pass
+
         # 2. Fallback: probe known candidate bundle IDs via `query_app_state` (> 0 means installed)
         if resolved is None and hasattr(driver, "query_app_state"):
             for cand in candidates:
@@ -95,6 +104,7 @@ def resolve_att_bundle_id(driver: Optional[WebDriver] = None, force: bool = Fals
                         break
                 except Exception:
                     continue
+
     final_bundle = resolved or (candidates[0] if candidates else DEFAULT_ATT_BUNDLE_ID)
     if driver is not None:
         try:
@@ -106,6 +116,19 @@ def resolve_att_bundle_id(driver: Optional[WebDriver] = None, force: bool = Fals
 
 class ATTBasePage(BasePage):
     """Shared BasePage subclass for AT&T Connected Life screens (avoids helper duplication)."""
+
+    TOP_NOTIFICATION_BANNER_PREDICATE: str = (
+        'name == "NotificationShortLookView" '
+        'OR name == "NCNotificationShortLookView" '
+        'OR name == "BannerNotificationView" '
+        'OR name CONTAINS "NotificationShortLook" '
+        'OR name CONTAINS[c] "NotificationBanner" '
+        'OR name CONTAINS[c] "PLPlatterView" '
+        'OR label BEGINSWITH[c] "NOTIFICATION," '
+        'OR label BEGINSWITH[c] "NOTIFICATION:"'
+    )
+    DEFAULT_NOTIFICATION_WAIT_TIMEOUT_S: float = 15.0
+    NOTIFICATION_CHECK_THROTTLE_S: float = 0.5
 
     def __init__(self, driver: WebDriver, timeout: float = 10.0) -> None:
         self.APP_BUNDLE_ID = resolve_att_bundle_id(driver)
@@ -183,6 +206,7 @@ class ATTBasePage(BasePage):
             max_y_margin: int = 0,
     ) -> bool:
         """Check whether an element has valid on-screen geometry.
+
         AT&T Connected Life has some accessible container children (e.g. Room card StaticTexts)
         whose `visible` XCUITest flag is false even while rendered inside the viewport.
         """
@@ -216,11 +240,13 @@ class ATTBasePage(BasePage):
             x_ratio: float = 0.5,
             y_ratio: float = 0.5,
     ) -> bool:
+        self._wait_until_top_notification_disappears()
         rect = None
         try:
             rect = elem.rect
         except WebDriverException:
             rect = None
+
         if not prefer_coords:
             try:
                 elem.click()
@@ -228,6 +254,7 @@ class ATTBasePage(BasePage):
             except WebDriverException as err:
                 self._logger.debug(
                     f"[ATT Tap] Direct click failed on {desc} ({err}); trying tap...")
+
         if rect and rect.get("width", 0) > 0 and rect.get("height", 0) > 0:
             cx = int(rect["x"] + rect["width"] * x_ratio)
             cy = int(rect["y"] + rect["height"] * y_ratio)
@@ -237,6 +264,7 @@ class ATTBasePage(BasePage):
             except WebDriverException as tap_err:
                 self._logger.warning(
                     f"[ATT Tap] Coordinate tap failed on {desc} at ({cx}, {cy}): {tap_err}")
+
         if prefer_coords:
             try:
                 elem.click()
@@ -261,6 +289,7 @@ class ATTBasePage(BasePage):
             return
         except WebDriverException:
             pass
+
         actions = ActionChains(self.driver)
         actions.w3c_actions = ActionBuilder(
             self.driver, mouse=PointerInput(interaction.POINTER_TOUCH, "touch")
@@ -275,6 +304,7 @@ class ATTBasePage(BasePage):
         actions.perform()
 
     def _att_pull_down_to_refresh(self) -> None:
+        self._wait_until_top_notification_disappears()
         win_w, win_h = self._att_window_size()
         cx = win_w // 2
         from_y = max(130, int(win_h * 0.24))
@@ -282,6 +312,7 @@ class ATTBasePage(BasePage):
         self._att_drag(cx, from_y, cx, to_y, duration=0.3)
 
     def _att_scroll_vertical(self, direction: str = "down") -> None:
+        self._wait_until_top_notification_disappears()
         win_w, win_h = self._att_window_size()
         cx = win_w // 2
         if direction == "down":
@@ -290,6 +321,147 @@ class ATTBasePage(BasePage):
             from_y, to_y = int(win_h * 0.30), int(win_h * 0.68)
         self._att_drag(cx, from_y, cx, to_y, duration=0.25)
         time.sleep(0.8)
+
+    def _match_top_notification_in_active_context(self) -> Optional[str]:
+        """Inspect currently active Appium UI context for a visible iOS top notification banner."""
+        win_w, win_h = self._att_window_size()
+        max_y = int(win_h * 0.28)
+        max_h = int(win_h * 0.35)
+        min_w = int(win_w * 0.45)
+        try:
+            candidates = self.driver.find_elements(
+                IOS_PREDICATE_BY, self.TOP_NOTIFICATION_BANNER_PREDICATE
+            )
+        except WebDriverException:
+            return None
+
+        for el in candidates:
+            try:
+                if hasattr(el, "is_displayed") and el.is_displayed() is False:
+                    continue
+                rect = el.rect or {}
+            except WebDriverException:
+                continue
+            rw = float(rect.get("width", 0) or 0)
+            rh = float(rect.get("height", 0) or 0)
+            rx = float(rect.get("x", 0) or 0)
+            ry = float(rect.get("y", -999) or -999)
+            cx = rx + rw / 2.0
+            if (
+                    rw >= min_w
+                    and 32 <= rh <= max_h
+                    and -10 <= ry <= max_y
+                    and (ry + rh) > 20
+                    and 0 <= cx <= win_w
+            ):
+                txt = self._att_read_attr(el, ("label", "name", "value"))
+                return (txt or "NotificationShortLookView")[:80]
+        return None
+
+    def _find_top_notification_banner(self) -> Optional[str]:
+        """Detect a top notification banner either in AT&T's UI tree or in iOS SpringBoard."""
+        if self.driver is None:
+            return None
+
+        banner: Optional[str] = None
+        with self._att_fast_probe():
+            banner = self._match_top_notification_in_active_context()
+            if banner is None and callable(getattr(self.driver, "update_settings", None)):
+                try:
+                    self.driver.update_settings(
+                        {"defaultActiveApplication": "com.apple.springboard"})
+                    banner = self._match_top_notification_in_active_context()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        self.driver.update_settings({"defaultActiveApplication": "auto"})
+                    except Exception:
+                        pass
+
+        try:
+            setattr(self.driver, "_last_att_notif_check_ts", time.time())
+        except Exception:
+            pass
+        return banner
+
+    def _wait_until_top_notification_disappears_timed(
+            self,
+            timeout: Optional[float] = None,
+            poll_interval: float = 0.5,
+            force: bool = False,
+    ) -> Tuple[bool, float]:
+        """Wait until any iOS top notification banner blocking the UI disappears.
+
+        Returns:
+            (cleared, waited_seconds)
+        """
+        if self.driver is None:
+            return True, 0.0
+
+        wait_timeout = float(
+            timeout
+            if timeout is not None
+            else getattr(
+                constants, "ATT_NOTIFICATION_WAIT_TIMEOUT_S",
+                self.DEFAULT_NOTIFICATION_WAIT_TIMEOUT_S
+            )
+        )
+        if not force and not getattr(self.driver, "_att_notif_active", False):
+            last_ts = getattr(self.driver, "_last_att_notif_check_ts", 0.0)
+            if (time.time() - last_ts) < self.NOTIFICATION_CHECK_THROTTLE_S:
+                return True, 0.0
+
+        banner = self._find_top_notification_banner()
+        if banner is None:
+            try:
+                setattr(self.driver, "_att_notif_active", False)
+            except Exception:
+                pass
+            return True, 0.0
+
+        try:
+            setattr(self.driver, "_att_notif_active", True)
+        except Exception:
+            pass
+        start = time.time()
+        self._logger.info(
+            f"[ATT Notification] Top notification banner detected ('{banner}'); "
+            f"waiting up to {wait_timeout:.0f}s for it to disappear before continuing..."
+        )
+        while (time.time() - start) < wait_timeout:
+            time.sleep(poll_interval)
+            banner = self._find_top_notification_banner()
+            if banner is None:
+                waited = time.time() - start
+                try:
+                    setattr(self.driver, "_att_notif_active", False)
+                except Exception:
+                    pass
+                self._logger.info(
+                    f"[ATT Notification] Top notification banner disappeared after {waited:.1f}s; "
+                    "continuing test."
+                )
+                return True, waited
+
+        waited = time.time() - start
+        self._logger.warning(
+            f"[ATT Notification] Top notification banner ('{banner}') still visible after "
+            f"{wait_timeout:.0f}s; continuing anyway."
+        )
+        return False, waited
+
+    def _wait_until_top_notification_disappears(
+            self,
+            timeout: Optional[float] = None,
+            poll_interval: float = 0.5,
+            force: bool = False,
+    ) -> bool:
+        """Wait until any iOS top notification banner disappears before performing UI actions."""
+        cleared, _waited = self._wait_until_top_notification_disappears_timed(
+            timeout=timeout, poll_interval=poll_interval, force=force
+        )
+        return cleared
 
     def _att_dismiss_system_alert_if_present(self) -> bool:
         """Best-effort dismissal of iOS permission alerts if one appears after cold launch."""

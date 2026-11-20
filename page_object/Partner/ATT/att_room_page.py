@@ -338,6 +338,7 @@ class ATTRoomPage(ATTBasePage):
     ) -> bool:
         """Step 3a: Regardless of Online/Offline status, tap `device_name` cell to open Live Stream."""
         page = ATTRoomPage._resolve_page(self)
+        page._wait_until_top_notification_disappears()
         target_dev = str(device_name or getattr(self, "device_name", "") or "").strip()
         target_room = str(room_name or getattr(self, "room_name", "Attic") or "Attic").strip()
 
@@ -387,6 +388,7 @@ class ATTRoomPage(ATTBasePage):
         win_w, _ = page._att_window_size()
 
         for attempt in range(1, 3):
+            page._wait_until_top_notification_disappears(force=True)
             with page._att_fast_probe():
                 back_btn: Optional[WebElement] = None
                 try:
@@ -416,6 +418,7 @@ class ATTRoomPage(ATTBasePage):
                     prefer_coords=(attempt > 1),
                 )
             else:
+                page._wait_until_top_notification_disappears(force=True)
                 page._logger.info(
                     f"[ATT Room] BackButton not found via query; tapping top-left nav fallback (attempt {attempt}/2)..."
                 )

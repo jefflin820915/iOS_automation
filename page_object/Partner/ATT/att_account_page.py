@@ -488,6 +488,7 @@ class ATTAccountPage(ATTBasePage):
 
             clicked = False
             for attempt in range(1, 3):
+                page._wait_until_top_notification_disappears(force=True)
                 back_btn: Optional[WebElement] = None
                 with page._att_fast_probe():
                     try:

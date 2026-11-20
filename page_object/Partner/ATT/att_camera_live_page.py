@@ -321,9 +321,9 @@ class ATTCameraLivePage(ATTBasePage):
     ) -> Tuple[bool, str]:
         """Classify a sampled player RGB grid as real video (`True`) vs black/blank/spinner (`False`).
 
-        Evaluates luminance and color variation on the outer perimeter outside the center overlay box
-        so a white loading spinner or centered error text on a black/gray background still detects
-        as NO video image.
+        Evaluates luminance and color variation on the outer 72% perimeter outside the dead-center
+        overlay box so a white loading spinner or centered error text on a black/gray background
+        still detects as NO video image.
         """
         rows = len(grid)
         cols = len(grid[0]) if rows else 0
@@ -462,6 +462,9 @@ class ATTCameraLivePage(ATTBasePage):
             page.driver, "_att_device_status", "Unknown"
         )
 
+        # Wait for any blocking iOS top notification banner to disappear before inspecting Live UI
+        page._wait_until_top_notification_disappears(force=True)
+
         # Phase A: Wait up to wait_timeout for top-left 'Live' badge to appear
         page._logger.info(
             f"[ATT Live] Waiting up to {wait_timeout:.0f}s for top-left 'Live' indicator "
@@ -483,7 +486,24 @@ class ATTCameraLivePage(ATTBasePage):
                     f"Starting {duration:.0f}s live & player video image verification..."
                 )
                 break
+            t_notif_before = time.time()
+            _cleared, notif_waited = page._wait_until_top_notification_disappears_timed()
+            if notif_waited > 0:
+                wait_start += max(0.0, time.time() - t_notif_before)
+                continue
             time.sleep(0.5)
+
+        if not reached_live and page._is_app_in_foreground():
+            _cleared, notif_waited = page._wait_until_top_notification_disappears_timed(force=True)
+            if notif_waited > 0:
+                is_live, top_left_status, detail = page._probe_top_left_status()
+                last_top_left_status = top_left_status
+                if is_live:
+                    reached_live = True
+                    page._logger.info(
+                        f"[ATT Live] Top-left 'Live' visible after top notification cleared ({detail}). "
+                        f"Starting {duration:.0f}s live & player video image verification..."
+                    )
 
         if not reached_live:
             has_video, video_detail = (
@@ -522,6 +542,13 @@ class ATTCameraLivePage(ATTBasePage):
                 break
             is_live, top_left_status, detail = page._probe_top_left_status()
             has_video, video_detail = page._has_player_video_image()
+            if not is_live or has_video is False:
+                t_notif_before = time.time()
+                _cleared, notif_waited = page._wait_until_top_notification_disappears_timed()
+                if notif_waited > 0:
+                    verify_start += max(0.0, time.time() - t_notif_before)
+                    is_live, top_left_status, detail = page._probe_top_left_status()
+                    has_video, video_detail = page._has_player_video_image()
             samples.append(
                 _ATTLiveSample(
                     elapsed,
@@ -553,6 +580,10 @@ class ATTCameraLivePage(ATTBasePage):
                 time.sleep(sleep_for)
 
         if page._is_app_in_foreground():
+            t_notif_before = time.time()
+            _cleared, notif_waited = page._wait_until_top_notification_disappears_timed(force=True)
+            if notif_waited > 0:
+                verify_start += max(0.0, time.time() - t_notif_before)
             final_live, final_top_left, final_detail = page._probe_top_left_status()
             final_video, final_video_detail = page._has_player_video_image()
         else:
@@ -629,6 +660,7 @@ class ATTCameraLivePage(ATTBasePage):
         win_w, _ = page._att_window_size()
 
         for attempt in range(1, 3):
+            page._wait_until_top_notification_disappears(force=True)
             back_btn: Optional[WebElement] = None
             with page._att_fast_probe():
                 try:
@@ -656,6 +688,7 @@ class ATTCameraLivePage(ATTBasePage):
                     prefer_coords=(attempt > 1),
                 )
             else:
+                page._wait_until_top_notification_disappears(force=True)
                 page._logger.info(
                     f"[ATT Live] BackButton not found via query; tapping top-left nav fallback (attempt {attempt}/2)..."
                 )

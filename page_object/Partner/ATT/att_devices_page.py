@@ -216,6 +216,7 @@ class ATTDevicesPage(ATTBasePage):
     def go_to_devices_tab(self, timeout: float = 12.0) -> bool:
         """Ensure AT&T Connected Life is on the `Devices` main tab (Screenshot 1 -> Screenshot 2)."""
         page = ATTDevicesPage._resolve_page(self)
+        page._wait_until_top_notification_disappears()
         page._dismiss_transient_overlays_to_tabs()
         if page.is_on_devices_page():
             page._logger.info("[ATT Devices] Already on Devices page.")
@@ -369,6 +370,7 @@ class ATTDevicesPage(ATTBasePage):
         """Step 1: On `Devices` tab, click `room_name` (e.g. `Attic`) and verify Room page opens."""
         page = ATTDevicesPage._resolve_page(self)
         target_room = str(room_name or getattr(self, "room_name", "Attic") or "Attic").strip()
+        page._wait_until_top_notification_disappears()
         page.go_to_devices_tab()
 
         if page._is_room_opened(target_room):
@@ -507,6 +509,7 @@ class ATTDevicesPage(ATTBasePage):
     def click_top_left_setting_button(self, timeout: float = 12.0) -> bool:
         """Step 5: Click `app_settings_navbar_button` -> enter `Home settings` -> click `Account ...` -> `Account` page."""
         page = ATTDevicesPage._resolve_page(self)
+        page._wait_until_top_notification_disappears(force=True)
         if page._is_account_page_open_probe():
             page._logger.info("[ATT Settings] Already on Account page.")
             return True
@@ -515,6 +518,7 @@ class ATTDevicesPage(ATTBasePage):
         if not page._is_home_settings_page_open_probe():
             page.go_to_devices_tab()
             for attempt in range(1, 3):
+                page._wait_until_top_notification_disappears(force=True)
                 btn = page._find_top_left_setting_button()
                 if btn is None:
                     break
