@@ -61,6 +61,12 @@ class ATTAccountPage(ATTBasePage):
         'OR label IN {"Google account settings", "Disconnect Google account", "Sign out of Google account"}'
     )
 
+    HOME_SETTINGS_MARKER_PREDICATE: str = (
+        'name IN {"Home settings", "System settings", "Smart home integrations"} '
+        'OR label IN {"Home settings", "System settings", "Smart home integrations"} '
+        'OR name BEGINSWITH "Account " OR label BEGINSWITH "Account "'
+    )
+
     GOOGLE_ACCOUNT_ROW_PREDICATE: str = (
         'type IN {"XCUIElementTypeButton", "XCUIElementTypeCell"} AND ('
         'name CONTAINS[c] "Google account" OR label CONTAINS[c] "Google account" '
@@ -134,6 +140,31 @@ class ATTAccountPage(ATTBasePage):
             except WebDriverException:
                 pass
         return self.is_on_account_page()
+
+    def _current_settings_sheet_kind(self) -> Optional[str]:
+        """Identify which settings modal sheet is currently displayed, or None if closed."""
+        if self._is_on_google_account_settings_page():
+            return "google_settings"
+        if self.is_on_account_page():
+            return "account"
+        with self._att_fast_probe():
+            try:
+                for el in self.driver.find_elements(
+                        IOS_PREDICATE_BY, self.HOME_SETTINGS_MARKER_PREDICATE
+                ):
+                    if self._att_is_element_on_screen(el):
+                        return "home_settings"
+            except WebDriverException:
+                pass
+            try:
+                for el in self.driver.find_elements(
+                        IOS_PREDICATE_BY, self.SETTINGS_MODAL_STACK_PREDICATE
+                ):
+                    if self._att_is_element_on_screen(el):
+                        return "other_modal"
+            except WebDriverException:
+                pass
+        return None
 
     def _find_google_account_container(self) -> Optional[WebElement]:
         """Locate the Google Account button/cell on the Account sheet (excluding Disconnect/Sign out)."""
@@ -480,14 +511,14 @@ class ATTAccountPage(ATTBasePage):
         page = ATTAccountPage._resolve_page(self)
         win_w, win_h = page._att_window_size()
 
-        for step in range(1, 5):
-            if not page._is_in_settings_modal_stack():
+        for step in range(1, 7):
+            sheet_before = page._current_settings_sheet_kind()
+            if sheet_before is None:
                 if step > 1:
                     page._logger.info("[ATT Account] Closed settings/account sheets cleanly.")
                 return True
 
-            clicked = False
-            for attempt in range(1, 3):
+            for attempt in range(1, 4):
                 page._wait_until_top_notification_disappears(force=True)
                 back_btn: Optional[WebElement] = None
                 with page._att_fast_probe():
@@ -527,32 +558,39 @@ class ATTAccountPage(ATTBasePage):
                         except WebDriverException:
                             pass
 
-                if back_btn is not None:
+                if attempt <= 2 and back_btn is not None:
                     page._logger.info(
-                        f"[ATT Account] Closing modal sheet (step {step}, attempt {attempt}/2)..."
+                        f"[ATT Account] Closing `{sheet_before}` sheet (step {step}, attempt {attempt}/3)..."
                     )
-                    clicked = page._att_tap_element_or_coords(
+                    page._att_tap_element_or_coords(
                         back_btn,
                         desc=f"Settings modal back/close (step {step})",
                         prefer_coords=(attempt > 1),
                     )
-                elif attempt == 1:
+                elif attempt <= 2:
+                    page._wait_until_top_notification_disappears(force=True)
                     page._logger.info(
-                        f"[ATT Account] Tapping top-left modal close coordinate fallback (step {step})..."
+                        f"[ATT Account] Tapping top-left `{sheet_before}` close coordinate fallback (step {step}, attempt {attempt}/3)..."
                     )
                     try:
                         page.driver.execute_script("mobile: tap", {"x": 28, "y": 75})
-                        clicked = True
                     except WebDriverException:
                         pass
                 else:
-                    page._logger.info("[ATT Account] Swiping down modal sheet fallback...")
-                    page._att_drag(win_w // 2, int(win_h * 0.16), win_w // 2, int(win_h * 0.88))
-                    clicked = True
+                    page._wait_until_top_notification_disappears(force=True)
+                    page._logger.info(
+                        f"[ATT Account] Swiping down `{sheet_before}` modal sheet fallback..."
+                    )
+                    page._att_drag(win_w // 2, int(win_h * 0.28), win_w // 2, int(win_h * 0.88))
 
                 time.sleep(0.8)
-                if not page._is_in_settings_modal_stack() or clicked:
+                page._wait_until_top_notification_disappears()
+                sheet_after = page._current_settings_sheet_kind()
+                if sheet_after is None or sheet_after != sheet_before:
                     break
+                page._logger.warning(
+                    f"[ATT Account] Sheet `{sheet_before}` stayed open after step {step} attempt {attempt}/3; retrying after checking notifications..."
+                )
 
         if not page._is_in_settings_modal_stack():
             page._logger.info("[ATT Account] Returned cleanly from settings/account sheets.")

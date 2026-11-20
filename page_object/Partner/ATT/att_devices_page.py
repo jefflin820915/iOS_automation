@@ -161,13 +161,14 @@ class ATTDevicesPage(ATTBasePage):
                     continue
         return None
 
-    def _dismiss_transient_overlays_to_tabs(self, max_steps: int = 5) -> None:
+    def _dismiss_transient_overlays_to_tabs(self, max_steps: int = 6) -> None:
         """Step back out of Google account settings / Account / Home settings / Room / Live until Tabs appear."""
-        win_w, _ = self._att_window_size()
-        for _ in range(max_steps):
+        win_w, win_h = self._att_window_size()
+        for step in range(1, max_steps + 1):
             if self.is_on_devices_page() or self._is_tab_bar_visible():
                 return
             self._att_dismiss_system_alert_if_present()
+            self._wait_until_top_notification_disappears(force=True)
             clicked = False
             with self._att_fast_probe():
                 # 1. Sheet / NavBar back or close buttons (e.g. Google account settings '<', Account '<', Home settings 'X')
@@ -209,9 +210,25 @@ class ATTDevicesPage(ATTBasePage):
                                     break
                     except WebDriverException:
                         pass
-            if not clicked:
-                break
-            time.sleep(1.0)
+
+            if clicked:
+                time.sleep(0.8)
+            still_in_modal = (
+                    self._is_home_settings_page_open_probe() or self._is_account_page_open_probe()
+            )
+            if not clicked or (still_in_modal and step >= 2):
+                if still_in_modal:
+                    self._wait_until_top_notification_disappears(force=True)
+                    self._logger.info(
+                        "[ATT Devices] Settings modal still open; swiping down to dismiss..."
+                    )
+                    self._att_drag(
+                        win_w // 2, int(win_h * 0.28), win_w // 2, int(win_h * 0.88)
+                    )
+                    time.sleep(0.8)
+                    continue
+                if not clicked:
+                    break
 
     def go_to_devices_tab(self, timeout: float = 12.0) -> bool:
         """Ensure AT&T Connected Life is on the `Devices` main tab (Screenshot 1 -> Screenshot 2)."""

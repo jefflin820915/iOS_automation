@@ -257,12 +257,13 @@ class ATTBasePage(BasePage):
             x_ratio: float = 0.5,
             y_ratio: float = 0.5,
     ) -> bool:
-        self._wait_until_top_notification_disappears()
         rect = None
         try:
             rect = elem.rect
         except WebDriverException:
             rect = None
+        is_top_ui = bool(rect and rect.get("y", 999) < 160)
+        self._wait_until_top_notification_disappears(force=is_top_ui)
 
         if not prefer_coords:
             try:
