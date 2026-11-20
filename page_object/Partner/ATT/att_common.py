@@ -123,9 +123,26 @@ class ATTBasePage(BasePage):
         'OR name == "BannerNotificationView" '
         'OR name CONTAINS "NotificationShortLook" '
         'OR name CONTAINS[c] "NotificationBanner" '
+        'OR name CONTAINS[c] "NotificationCell" '
+        'OR name CONTAINS[c] "NotificationView" '
         'OR name CONTAINS[c] "PLPlatterView" '
+        'OR name CONTAINS[c] "snackbar" '
+        'OR name CONTAINS[c] "toast" '
         'OR label BEGINSWITH[c] "NOTIFICATION," '
         'OR label BEGINSWITH[c] "NOTIFICATION:"'
+    )
+    SPRINGBOARD_FALLBACK_BANNER_PREDICATE: str = (
+        'type IN {"XCUIElementTypeOther", "XCUIElementTypeCell", '
+        '"XCUIElementTypeButton", "XCUIElementTypeAlert"}'
+    )
+    SPRINGBOARD_IGNORED_PREFIXES: Tuple[str, ...] = (
+        "sb",
+        "status bar",
+        "statusbar",
+        "dynamic island",
+        "_ui",
+        "control center",
+        "home indicator",
     )
     DEFAULT_NOTIFICATION_WAIT_TIMEOUT_S: float = 15.0
     NOTIFICATION_CHECK_THROTTLE_S: float = 0.5
@@ -322,40 +339,79 @@ class ATTBasePage(BasePage):
         self._att_drag(cx, from_y, cx, to_y, duration=0.25)
         time.sleep(0.8)
 
-    def _match_top_notification_in_active_context(self) -> Optional[str]:
+    def _match_top_notification_in_active_context(self, in_springboard: bool = False) -> Optional[
+        str]:
         """Inspect currently active Appium UI context for a visible iOS top notification banner."""
         win_w, win_h = self._att_window_size()
         max_y = int(win_h * 0.28)
         max_h = int(win_h * 0.35)
         min_w = int(win_w * 0.45)
+
+        def _extract_matching_banner(
+                elements: List[WebElement],
+                *,
+                strict_banner: bool,
+        ) -> Optional[str]:
+            for el in elements:
+                try:
+                    if hasattr(el, "is_displayed"):
+                        displayed = el.is_displayed()
+                        if strict_banner:
+                            if displayed is not True:
+                                continue
+                        elif displayed is False:
+                            continue
+                    rect = el.rect or {}
+                except WebDriverException:
+                    continue
+                rw = float(rect.get("width", 0) or 0)
+                rh = float(rect.get("height", 0) or 0)
+                rx = float(rect.get("x", 0) or 0)
+                ry = float(rect.get("y", -999) or -999)
+                cx = rx + rw / 2.0
+                min_y = 4 if strict_banner else -10
+                top_limit = int(win_h * 0.22) if strict_banner else max_y
+                min_h = 48 if strict_banner else 32
+                height_limit = int(win_h * 0.30) if strict_banner else max_h
+                width_limit = int(win_w * 0.60) if strict_banner else min_w
+                if not (
+                        rw >= width_limit
+                        and min_h <= rh <= height_limit
+                        and min_y <= ry <= top_limit
+                        and (ry + rh) > 20
+                        and 0 <= cx <= win_w
+                ):
+                    continue
+                if strict_banner and (ry + rh) > int(win_h * 0.38):
+                    continue
+                txt = self._att_read_attr(el, ("label", "name", "value"))
+                if strict_banner:
+                    low_txt = txt.lower()
+                    if len(txt) < 3 or low_txt.startswith(self.SPRINGBOARD_IGNORED_PREFIXES):
+                        continue
+                return (txt or "NotificationShortLookView")[:80]
+            return None
+
         try:
             candidates = self.driver.find_elements(
                 IOS_PREDICATE_BY, self.TOP_NOTIFICATION_BANNER_PREDICATE
             )
+            hit = _extract_matching_banner(candidates, strict_banner=False)
+            if hit is not None:
+                return hit
         except WebDriverException:
-            return None
+            pass
 
-        for el in candidates:
+        # iOS 17/18/26 SpringBoard fallback: catch floating top notification platters even when
+        # AccessibilityIdentifier differs from 'NotificationShortLookView'.
+        if in_springboard:
             try:
-                if hasattr(el, "is_displayed") and el.is_displayed() is False:
-                    continue
-                rect = el.rect or {}
+                sb_candidates = self.driver.find_elements(
+                    IOS_PREDICATE_BY, self.SPRINGBOARD_FALLBACK_BANNER_PREDICATE
+                )
+                return _extract_matching_banner(sb_candidates, strict_banner=True)
             except WebDriverException:
-                continue
-            rw = float(rect.get("width", 0) or 0)
-            rh = float(rect.get("height", 0) or 0)
-            rx = float(rect.get("x", 0) or 0)
-            ry = float(rect.get("y", -999) or -999)
-            cx = rx + rw / 2.0
-            if (
-                    rw >= min_w
-                    and 32 <= rh <= max_h
-                    and -10 <= ry <= max_y
-                    and (ry + rh) > 20
-                    and 0 <= cx <= win_w
-            ):
-                txt = self._att_read_attr(el, ("label", "name", "value"))
-                return (txt or "NotificationShortLookView")[:80]
+                pass
         return None
 
     def _find_top_notification_banner(self) -> Optional[str]:
@@ -365,17 +421,41 @@ class ATTBasePage(BasePage):
 
         banner: Optional[str] = None
         with self._att_fast_probe():
-            banner = self._match_top_notification_in_active_context()
+            banner = self._match_top_notification_in_active_context(in_springboard=False)
             if banner is None and callable(getattr(self.driver, "update_settings", None)):
+                orig_depth = getattr(self.driver, "_att_orig_snapshot_max_depth", None)
+                if orig_depth is None:
+                    orig_depth = 50
+                    if callable(getattr(self.driver, "get_settings", None)):
+                        try:
+                            cur_settings = self.driver.get_settings() or {}
+                            if isinstance(cur_settings, dict) and cur_settings.get(
+                                    "snapshotMaxDepth"):
+                                orig_depth = int(cur_settings["snapshotMaxDepth"])
+                        except Exception:
+                            pass
+                    try:
+                        setattr(self.driver, "_att_orig_snapshot_max_depth", orig_depth)
+                    except Exception:
+                        pass
                 try:
                     self.driver.update_settings(
-                        {"defaultActiveApplication": "com.apple.springboard"})
-                    banner = self._match_top_notification_in_active_context()
+                        {
+                            "defaultActiveApplication": "com.apple.springboard",
+                            "snapshotMaxDepth": 12,
+                        }
+                    )
+                    banner = self._match_top_notification_in_active_context(in_springboard=True)
                 except Exception:
                     pass
                 finally:
                     try:
-                        self.driver.update_settings({"defaultActiveApplication": "auto"})
+                        self.driver.update_settings(
+                            {
+                                "defaultActiveApplication": "auto",
+                                "snapshotMaxDepth": orig_depth,
+                            }
+                        )
                     except Exception:
                         pass
 

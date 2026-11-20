@@ -446,7 +446,7 @@ class ATTDevicesPage(ATTBasePage):
                 for btn in self.driver.find_elements(
                         IOS_PREDICATE_BY, self.ACCOUNT_DRAWER_BTN_PREDICATE
                 ):
-                    if self._att_is_element_on_screen(btn, min_y=120):
+                    if self._att_is_element_on_screen(btn, min_y=95):
                         return btn
             except WebDriverException:
                 pass
@@ -457,7 +457,7 @@ class ATTDevicesPage(ATTBasePage):
                         AppiumBy.XPATH,
                         '//XCUIElementTypeButton[.//XCUIElementTypeImage[@name="icon48X48GenericAvatar"]]',
                 ):
-                    if self._att_is_element_on_screen(btn, min_y=120):
+                    if self._att_is_element_on_screen(btn, min_y=95):
                         return btn
             except WebDriverException:
                 pass
@@ -465,7 +465,7 @@ class ATTDevicesPage(ATTBasePage):
             # 3. Fallback: button showing AT&T email (`@`) on Home settings body
             try:
                 for btn in self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeButton"):
-                    if not self._att_is_element_on_screen(btn, min_y=140):
+                    if not self._att_is_element_on_screen(btn, min_y=95):
                         continue
                     txt = self._att_read_attr(btn, ("name", "label", "value"))
                     low = txt.lower()
@@ -548,10 +548,18 @@ class ATTDevicesPage(ATTBasePage):
         # Phase 2: Inside `Home settings`, click the Account button (`Account Ios Test, ...`)
         if page._is_home_settings_page_open_probe():
             for attempt in range(1, 3):
-                acct_btn = page._find_home_settings_account_button()
-                if acct_btn is None:
-                    time.sleep(0.5)
+                page._wait_until_top_notification_disappears(force=True)
+                acct_btn: Optional[WebElement] = None
+                find_deadline = time.time() + min(timeout, 6.0)
+                while time.time() < find_deadline:
+                    if page._is_account_page_open_probe():
+                        page._logger.info("[ATT Settings] Account page opened.")
+                        return True
+                    page._wait_until_top_notification_disappears()
                     acct_btn = page._find_home_settings_account_button()
+                    if acct_btn is not None:
+                        break
+                    time.sleep(0.5)
                 if acct_btn is None:
                     break
                 acct_label = page._att_read_attr(acct_btn, ("name", "label"))
