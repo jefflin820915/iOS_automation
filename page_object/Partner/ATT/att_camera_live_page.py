@@ -468,7 +468,7 @@ class ATTCameraLivePage(ATTBasePage):
         # Phase A: Wait up to wait_timeout for top-left 'Live' badge to appear
         page._logger.info(
             f"[ATT Live] Waiting up to {wait_timeout:.0f}s for top-left 'Live' indicator "
-            f"(device='{target_dev}', room_status='{dev_status}')..."
+            f"(device='{target_dev}', device_status='{dev_status}')..."
         )
         wait_start = time.time()
         last_top_left_status = "No top-left status badge"
