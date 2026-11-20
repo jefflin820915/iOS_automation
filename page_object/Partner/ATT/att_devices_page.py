@@ -71,19 +71,23 @@ class ATTDevicesPage(ATTBasePage):
     )
 
     HOME_SETTINGS_MARKER_PREDICATE: str = (
+        'type IN {"XCUIElementTypeStaticText", "XCUIElementTypeButton", "XCUIElementTypeNavigationBar"} AND ('
         'name IN {"Home settings", "System settings", "Smart home integrations", "Switch accounts"} '
         'OR label IN {"Home settings", "System settings", "Smart home integrations", "Switch accounts"} '
-        'OR name BEGINSWITH "Account " OR label BEGINSWITH "Account "'
+        'OR name BEGINSWITH "Account " OR label BEGINSWITH "Account ")'
     )
 
     SUBPAGE_OR_MODAL_PREDICATE: str = (
-        '(type == "XCUIElementTypeButton" AND name IN {"BackButton", "group_settings_navbar_button"}) '
-        'OR (type == "XCUIElementTypeNavigationBar" AND name IN {'
-        '"Dashboard", "Activity", "Automations", "Alarms", "Account", "Google account settings"}) '
-        'OR name IN {"Home settings", "System settings", "Smart home integrations", '
-        '"Google account settings", "Disconnect Google account", "Sign out of Google account"} '
-        'OR label IN {"Home settings", "System settings", "Smart home integrations", '
-        '"Google account settings", "Disconnect Google account", "Sign out of Google account"}'
+        '(type == "XCUIElementTypeButton" AND ('
+        'name IN {"BackButton", "group_settings_navbar_button", '
+        '"Disconnect Google account", "Sign out of Google account"} '
+        'OR label IN {"Disconnect Google account", "Sign out of Google account"})) '
+        'OR (type == "XCUIElementTypeNavigationBar" AND ('
+        'name IN {"Dashboard", "Activity", "Automations", "Alarms", "Account", "Google account settings"} '
+        'OR label IN {"Dashboard", "Activity", "Automations", "Alarms", "Account", "Google account settings"})) '
+        'OR (type == "XCUIElementTypeStaticText" AND ('
+        'name IN {"Home settings", "System settings", "Smart home integrations", "Google account settings"} '
+        'OR label IN {"Home settings", "System settings", "Smart home integrations", "Google account settings"}))'
     )
 
     def __init__(self, driver: WebDriver, timeout: float = 10.0) -> None:
@@ -194,15 +198,19 @@ class ATTDevicesPage(ATTBasePage):
                     continue
         return None
 
-    def _dismiss_transient_overlays_to_tabs(self, max_steps: int = 8) -> None:
-        """Step back out of Google account settings / Account / Home settings / Room / Live until Tabs appear."""
+    def _dismiss_transient_overlays_to_tabs(self, max_steps: int = 8) -> bool:
+        """Step back out of Google account settings / Account / Home settings / Room / Live until Tabs appear.
+
+        Returns True when `Devices` tab itself is confirmed active, False otherwise.
+        """
         win_w, win_h = self._att_window_size()
         for step in range(1, max_steps + 1):
+            self._ensure_att_foreground()
             if self.is_on_devices_page():
-                return
+                return True
             subpage_or_modal = self._is_subpage_or_modal_open()
             if not subpage_or_modal and self._is_tab_bar_visible():
-                return
+                return False
             self._att_dismiss_system_alert_if_present()
             self._wait_until_top_notification_disappears(force=True)
             clicked = False
@@ -297,18 +305,20 @@ class ATTDevicesPage(ATTBasePage):
                     continue
                 if not clicked:
                     break
+        return False
 
     def go_to_devices_tab(self, timeout: float = 12.0) -> bool:
         """Ensure AT&T Connected Life is on the `Devices` main tab (Screenshot 1 -> Screenshot 2)."""
         page = ATTDevicesPage._resolve_page(self)
+        page._ensure_att_foreground()
         page._wait_until_top_notification_disappears()
-        page._dismiss_transient_overlays_to_tabs()
-        if page.is_on_devices_page():
+        if page._dismiss_transient_overlays_to_tabs():
             page._logger.info("[ATT Devices] Already on Devices page.")
             return True
 
         deadline = time.time() + timeout
         while time.time() < deadline:
+            page._ensure_att_foreground()
             page._att_dismiss_system_alert_if_present()
             if page.is_on_devices_page():
                 page._logger.info("[ATT Devices] Devices page became visible.")

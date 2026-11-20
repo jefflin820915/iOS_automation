@@ -468,7 +468,7 @@ class ATTCameraLivePage(ATTBasePage):
         # Phase A: Wait up to wait_timeout for top-left 'Live' badge to appear
         page._logger.info(
             f"[ATT Live] Waiting up to {wait_timeout:.0f}s for top-left 'Live' indicator "
-            f"(device='{target_dev}', device_status='{dev_status}')..."
+            f"(device='{target_dev}', room_status='{dev_status}')..."
         )
         wait_start = time.time()
         last_top_left_status = "No top-left status badge"
@@ -513,7 +513,7 @@ class ATTCameraLivePage(ATTBasePage):
             )
             video_str = page._format_video_label(has_video, video_detail)
             msg = (
-                f"[NEVER_LIVE] AT&T Camera '{target_dev}' (device_status='{dev_status}') "
+                f"[NEVER_LIVE] AT&T Camera '{target_dev}' (room_status='{dev_status}') "
                 f"did not show top-left 'Live' within {wait_timeout:.0f}s | "
                 f"Player Video: {video_str} | "
                 f"Last Top-Left Live Status: '{last_top_left_status}'."
@@ -657,25 +657,72 @@ class ATTCameraLivePage(ATTBasePage):
         """Step 4 (1st Back): Click top-left BackButton (`label='<room_name>'`) -> return to Room page."""
         page = ATTCameraLivePage._resolve_page(self)
         target_room = str(room_name or getattr(self, "room_name", "Attic") or "Attic").strip()
-        win_w, _ = page._att_window_size()
+        escaped_room = page._att_escape_predicate(target_room)
+        win_w, win_h = page._att_window_size()
 
-        for attempt in range(1, 3):
-            page._wait_until_top_notification_disappears(force=True)
-            back_btn: Optional[WebElement] = None
+        def _find_visible_back_button() -> Optional[WebElement]:
             with page._att_fast_probe():
                 try:
-                    for b in page.driver.find_elements(IOS_PREDICATE_BY,
-                                                       page.BACK_TO_ROOM_BTN_PREDICATE):
+                    for b in page.driver.find_elements(
+                            IOS_PREDICATE_BY, page.BACK_TO_ROOM_BTN_PREDICATE
+                    ):
                         rect = getattr(b, "rect", None) or {}
                         if (
-                                page._att_is_element_on_screen(b)
+                                page._att_is_element_on_screen(b, require_visible_attr=True)
                                 and rect.get("y", 0) < 140
                                 and rect.get("x", 0) < int(win_w * 0.40)
                         ):
-                            back_btn = b
-                            break
+                            return b
                 except WebDriverException:
-                    back_btn = None
+                    pass
+            return None
+
+        def _is_in_room_view() -> bool:
+            with page._att_fast_probe():
+                try:
+                    room_query = 'name == "group_settings_navbar_button"'
+                    if escaped_room:
+                        room_query += (
+                            f' OR (type == "XCUIElementTypeNavigationBar" AND name ==[c] "{escaped_room}")'
+                        )
+                    if any(
+                            page._att_is_element_on_screen(e, require_visible_attr=True)
+                            for e in page.driver.find_elements(IOS_PREDICATE_BY, room_query)
+                    ):
+                        return True
+                    for b in page.driver.find_elements(
+                            IOS_PREDICATE_BY, page.BACK_TO_ROOM_BTN_PREDICATE
+                    ):
+                        if (
+                                page._att_is_element_on_screen(b, require_visible_attr=True)
+                                and page._att_norm(page._att_read_attr(b, ("label",))) == "devices"
+                        ):
+                            return True
+                except WebDriverException:
+                    pass
+            return False
+
+        for attempt in range(1, 3):
+            page._ensure_att_foreground()
+            if _is_in_room_view():
+                page._logger.info(f"[ATT Live] Already back in Room page '{target_room}'.")
+                return True
+            page._wait_until_top_notification_disappears(force=True)
+            back_btn = _find_visible_back_button()
+
+            if back_btn is None:
+                # Live player NavigationBar can auto-hide after idle playback; tap upper player area to reveal controls.
+                page._logger.info(
+                    "[ATT Live] BackButton hidden/not visible; tapping player area to reveal controls..."
+                )
+                try:
+                    page.driver.execute_script(
+                        "mobile: tap", {"x": win_w // 2, "y": int(win_h * 0.25)}
+                    )
+                    time.sleep(0.5)
+                except WebDriverException:
+                    pass
+                back_btn = _find_visible_back_button()
 
             if back_btn is not None:
                 page._logger.info(
@@ -699,22 +746,26 @@ class ATTCameraLivePage(ATTBasePage):
 
             deadline = time.time() + min(timeout, 5.0)
             while time.time() < deadline:
-                with page._att_fast_probe():
-                    try:
-                        in_room = any(
-                            page._att_is_element_on_screen(e)
-                            for e in page.driver.find_elements(
-                                IOS_PREDICATE_BY,
-                                'name == "group_settings_navbar_button" OR '
-                                '(name == "BackButton" AND label == "Devices")',
-                            )
-                        )
-                    except WebDriverException:
-                        in_room = False
-                if in_room:
+                if _is_in_room_view():
                     page._logger.info(f"[ATT Live] Returned to Room page '{target_room}'.")
                     return True
                 time.sleep(0.4)
+
+            page._ensure_att_foreground()
+            if _is_in_room_view():
+                page._logger.info(f"[ATT Live] Returned to Room page '{target_room}'.")
+                return True
+
+        # Last-resort interactive edge-swipe back (iOS NavigationController pop gesture)
+        page._ensure_att_foreground()
+        page._wait_until_top_notification_disappears(force=True)
+        page._logger.info(
+            "[ATT Live] Trying iOS left-edge swipe back gesture to return to Room page...")
+        page._att_drag(6, win_h // 2, int(win_w * 0.78), win_h // 2, duration=0.22)
+        time.sleep(0.8)
+        if _is_in_room_view():
+            page._logger.info(f"[ATT Live] Returned to Room page '{target_room}' via edge swipe.")
+            return True
 
         msg = f"Failed to navigate back from Live Stream to Room page '{target_room}'."
         page._logger.error(msg)

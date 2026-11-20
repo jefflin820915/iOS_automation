@@ -597,7 +597,9 @@ class ATTAccountPage(ATTBasePage):
                 )
 
         if not page._is_in_settings_modal_stack():
-            # If tapping close overlapped a push notification that opened Live Stream / Room, unwind back to Devices.
+            # If tapping close overlapped a notification (including Google Home switching apps or ATT opening Live),
+            # restore AT&T foreground and unwind back to Devices tab cleanly.
+            page._ensure_att_foreground()
             devices_page = getattr(getattr(page, "session", None), "attdevicespage", None)
             if devices_page is None:
                 from page_object.Partner.ATT.att_devices_page import ATTDevicesPage

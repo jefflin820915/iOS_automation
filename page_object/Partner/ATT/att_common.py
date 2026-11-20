@@ -544,6 +544,28 @@ class ATTBasePage(BasePage):
         )
         return cleared
 
+    def _ensure_att_foreground(self, wait_after_activate: float = 0.8) -> bool:
+        """Ensure AT&T Connected Life is in the foreground (recovers if a 3rd-party notification switched apps)."""
+        if self.driver is None or not hasattr(self.driver, "query_app_state"):
+            return True
+        bundle_id = self._att_bundle_id()
+        fg_state = getattr(constants, "APP_STATE_FOREGROUND", 4)
+        try:
+            state = self.driver.query_app_state(bundle_id)
+            if state == fg_state:
+                return True
+            self._logger.warning(
+                f"[ATT Lifecycle] AT&T app ('{bundle_id}') left foreground (state={state}); "
+                "reactivating AT&T Connected Life..."
+            )
+            self.driver.activate_app(bundle_id)
+            time.sleep(wait_after_activate)
+            return self.driver.query_app_state(bundle_id) == fg_state
+        except WebDriverException as err:
+            self._logger.warning(
+                f"[ATT Lifecycle] Failed checking/reactivating AT&T foreground: {err}")
+            return False
+
     def _att_dismiss_system_alert_if_present(self) -> bool:
         """Best-effort dismissal of iOS permission alerts if one appears after cold launch."""
         with self._att_fast_probe():

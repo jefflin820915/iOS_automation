@@ -388,6 +388,7 @@ class ATTRoomPage(ATTBasePage):
         win_w, _ = page._att_window_size()
 
         for attempt in range(1, 3):
+            page._ensure_att_foreground()
             page._wait_until_top_notification_disappears(force=True)
             with page._att_fast_probe():
                 back_btn: Optional[WebElement] = None
@@ -432,7 +433,7 @@ class ATTRoomPage(ATTBasePage):
                 with page._att_fast_probe():
                     try:
                         on_devices = any(
-                            page._att_is_element_on_screen(e)
+                            page._att_is_element_on_screen(e, require_visible_attr=True)
                             for e in page.driver.find_elements(
                                 IOS_PREDICATE_BY,
                                 '(type == "XCUIElementTypeNavigationBar" AND name == "Devices") '
