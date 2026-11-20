@@ -530,6 +530,24 @@ class ATTDevicesPage(ATTBasePage):
                             fallback_btn = btn
                 except WebDriverException:
                     continue
+            if fallback_btn is None:
+                try:
+                    for btn in self.driver.find_elements(
+                            AppiumBy.XPATH,
+                            '//XCUIElementTypeNavigationBar//XCUIElementTypeButton',
+                    ):
+                        rect = getattr(btn, "rect", None) or {}
+                        b_name = self._att_read_attr(btn, ("name",))
+                        if b_name == "BackButton":
+                            continue
+                        if (
+                                self._att_is_element_on_screen(btn, require_visible_attr=True)
+                                and rect.get("y", 0) < 150
+                                and rect.get("x", 0) < int(win_w * 0.35)
+                        ):
+                            return btn
+                except WebDriverException:
+                    pass
         return fallback_btn
 
     def _is_home_settings_page_open_probe(self) -> bool:
@@ -607,7 +625,8 @@ class ATTDevicesPage(ATTBasePage):
                         return True
                 google_rows = self.driver.find_elements(
                     IOS_PREDICATE_BY,
-                    'name CONTAINS[c] "Google account" OR label CONTAINS[c] "Google account"',
+                    'type IN {"XCUIElementTypeCell", "XCUIElementTypeStaticText"} AND ('
+                    'name CONTAINS[c] "Google account" OR label CONTAINS[c] "Google account")',
                 )
                 if any(self._att_is_element_on_screen(g) for g in google_rows):
                     return True
@@ -618,6 +637,7 @@ class ATTDevicesPage(ATTBasePage):
     def click_top_left_setting_button(self, timeout: float = 12.0) -> bool:
         """Step 5: Click `app_settings_navbar_button` -> enter `Home settings` -> click `Account ...` -> `Account` page."""
         page = ATTDevicesPage._resolve_page(self)
+        page._ensure_att_foreground()
         page._wait_until_top_notification_disappears(force=True)
         if page._is_account_page_open_probe():
             page._logger.info("[ATT Settings] Already on Account page.")
@@ -628,6 +648,7 @@ class ATTDevicesPage(ATTBasePage):
         if not home_settings_opened:
             page.go_to_devices_tab()
             for attempt in range(1, 3):
+                page._ensure_att_foreground()
                 page._wait_until_top_notification_disappears(force=True)
                 if page._is_account_page_open_probe():
                     page._logger.info("[ATT Settings] Account page already open.")
@@ -636,17 +657,45 @@ class ATTDevicesPage(ATTBasePage):
                     home_settings_opened = True
                     page._logger.info("[ATT Settings] `Home settings` page is already open.")
                     break
-                btn = page._find_top_left_setting_button()
-                if btn is None:
+                btn: Optional[WebElement] = None
+                btn_deadline = time.time() + min(timeout, 6.0)
+                while time.time() < btn_deadline:
+                    if page._is_account_page_open_probe():
+                        page._logger.info("[ATT Settings] Account page opened.")
+                        return True
+                    if page._is_home_settings_page_open_probe():
+                        home_settings_opened = True
+                        page._logger.info("[ATT Settings] `Home settings` page is already open.")
+                        break
+                    _cleared, notif_waited = page._wait_until_top_notification_disappears_timed(
+                        force=True)
+                    if notif_waited > 0:
+                        btn_deadline += notif_waited
+                    btn = page._find_top_left_setting_button()
+                    if btn is not None:
+                        break
+                    page._att_dismiss_system_alert_if_present()
+                    time.sleep(0.5)
+                if home_settings_opened:
                     break
-                page._logger.info(
-                    f"[ATT Settings] Clicking top-left Settings (`app_settings_navbar_button`, attempt {attempt}/2)..."
-                )
-                page._att_tap_element_or_coords(
-                    btn,
-                    desc="app_settings_navbar_button",
-                    prefer_coords=(attempt > 1),
-                )
+                if btn is not None:
+                    page._logger.info(
+                        f"[ATT Settings] Clicking top-left Settings (`app_settings_navbar_button`, attempt {attempt}/2)..."
+                    )
+                    page._att_tap_element_or_coords(
+                        btn,
+                        desc="app_settings_navbar_button",
+                        prefer_coords=(attempt > 1),
+                    )
+                else:
+                    page._wait_until_top_notification_disappears(force=True)
+                    page._logger.warning(
+                        f"[ATT Settings] `app_settings_navbar_button` not found via query; tapping top-left gear coordinate fallback (attempt {attempt}/2)..."
+                    )
+                    try:
+                        page.driver.execute_script("mobile: tap", {"x": 28, "y": 69})
+                    except WebDriverException:
+                        pass
                 deadline = time.time() + min(timeout, 6.0)
                 while time.time() < deadline:
                     if page._is_account_page_open_probe():
