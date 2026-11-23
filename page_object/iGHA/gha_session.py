@@ -199,6 +199,8 @@ class GHASession:
         self._logger = logging_utils.get_logger(__name__, "gha_session")
         self._gha_stopped_in_cleanup = False
         self._device_removed_in_emergency = False
+        self._last_device_selection_state: str = ""
+        self._last_device_selection_detail: str = ""
         page_classes = [
             GHAHomePage,
             GHAAccountPicker,
@@ -445,8 +447,14 @@ class GHASession:
                 return False
         return clicked_any
 
+    def _record_device_selection_failure(self, state: str, detail: str = "") -> None:
+        """Record the specific state inside device selection where the current attempt failed."""
+        self._last_device_selection_state = state
+        self._last_device_selection_detail = detail
+
     def _open_add_device_page(self, re_enter: bool, swallow_errors: bool) -> bool:
         """Navigate into the 'Add a device' page, clicking '+' first when re-entering from Home."""
+        step_stage = "OPEN_SETUP_DEVICE_PAGE"
         try:
             need_click_plus = re_enter
             if not need_click_plus and hasattr(self.driver, "find_elements"):
@@ -481,19 +489,32 @@ class GHASession:
                 if plus_btn_visible and not add_sheet_open:
                     need_click_plus = True
             if need_click_plus:
+                step_stage = "CLICK_ADD_PLUS_BUTTON"
                 self._logger.info(
                     "[Device Selection] Clicking '+' (Add devices) button to open 'Add a device'...")
                 GHAHomePage.click_add_devices_button(self)
+            step_stage = "OPEN_SETUP_DEVICE_PAGE"
             nav_result = GHAAddPage.navigate_to_setup_device_page(self)
             if nav_result is False:
-                self._logger.error("[Device Selection] Failed to open 'Set up device' page.")
+                detail = "Failed to open 'Set up device' / 'Add a device' page."
+                self._record_device_selection_failure(step_stage, detail)
+                self._logger.error(f"[Device Selection][{step_stage}] {detail}")
                 return False
             return True
         except Exception as nav_err:
+            self._record_device_selection_failure(step_stage, str(nav_err))
             if not swallow_errors:
+                try:
+                    setattr(
+                        nav_err,
+                        "failure_stage",
+                        f"HANDLE_DEVICE_SELECTION_STEPS:{step_stage}",
+                    )
+                except Exception:
+                    pass
                 raise
             self._logger.error(
-                f"[Device Selection] Navigation to 'Set up device' failed: {nav_err}")
+                f"[Device Selection][{step_stage}] Navigation to 'Set up device' failed: {nav_err}")
             return False
 
     @classmethod
@@ -905,6 +926,8 @@ class GHASession:
             swallow_errors: If True, navigation errors are logged and treated as 'not found'
                 (so the caller can retry). If False, they propagate with their original traceback.
         """
+        self._last_device_selection_state = ""
+        self._last_device_selection_detail = ""
         max_reentries = max(
             0, int(getattr(constants, "ADD_DEVICE_MAX_REENTRIES", self.ADD_DEVICE_MAX_REENTRIES))
         )
@@ -927,12 +950,15 @@ class GHASession:
                     )
                     self._close_add_device_page()
                     continue
-                self._logger.error(
-                    f"[Device Selection] Still on 'Add a device' page after {total_entries} entries "
+                detail = (
+                    f"Still stuck on 'Add a device' loading page after {total_entries} entries "
                     "(neither 'Single Device' nor 'Set up nearby devices' appeared)."
                 )
+                self._record_device_selection_failure("ADD_A_DEVICE_STUCK", detail)
+                self._logger.error(f"[Device Selection][ADD_A_DEVICE_STUCK] {detail}")
                 self._close_add_device_page()
                 return False
+            single_err = ""
             if page_state != "nearby_list":
                 self._logger.info("Checking for Single Device Found screen before checking list...")
                 try:
@@ -945,6 +971,7 @@ class GHASession:
                         time.sleep(2.0)
                         return True
                 except Exception as e:
+                    single_err = str(e)
                     self._logger.warning(f"Error checking Single Device screen: {e}")
                 # If SingleDeviceFoundPage detected a non-target device, it clicked Close/Back and
                 # re-entered 'Add a device'. Ensure that re-entered page also transitions out of 'Add a device'.
@@ -958,16 +985,56 @@ class GHASession:
                             )
                             self._close_add_device_page()
                             continue
+                        detail = "Still stuck on 'Add a device' page after Single Device mismatch recovery."
+                        self._record_device_selection_failure("SINGLE_DEVICE_MISMATCH_STUCK",
+                                                              detail)
                         self._logger.error(
-                            "[Device Selection] Still on 'Add a device' page after Single Device mismatch recovery."
-                        )
+                            f"[Device Selection][SINGLE_DEVICE_MISMATCH_STUCK] {detail}")
                         self._close_add_device_page()
                         return False
+                    page_state = post_state
             self._logger.info(
                 f"Single device not present or switched to list. Searching '{target_name}' in device list..."
             )
-            return GHASetUpDevicePage.is_device_exist_in_setup_device_page(self,
-                                                                           device_name=target_name)
+            found = False
+            try:
+                found = GHASetUpDevicePage.is_device_exist_in_setup_device_page(
+                    self, device_name=target_name
+                )
+            except Exception as list_err:
+                self._record_device_selection_failure("NEARBY_LIST_SEARCH_ERROR", str(list_err))
+                if not swallow_errors:
+                    try:
+                        setattr(
+                            list_err,
+                            "failure_stage",
+                            "HANDLE_DEVICE_SELECTION_STEPS:NEARBY_LIST_SEARCH_ERROR",
+                        )
+                    except Exception:
+                        pass
+                    raise
+                self._logger.error(
+                    f"[Device Selection][NEARBY_LIST_SEARCH_ERROR] List search failed: {list_err}"
+                )
+                return False
+            if found:
+                return True
+            if page_state == "nearby_list" or self._is_setup_nearby_devices_page_present():
+                self._record_device_selection_failure(
+                    "NEARBY_LIST_TARGET_NOT_FOUND",
+                    f"Target device '{target_name}' not found in 'Set up nearby devices' list.",
+                )
+            elif single_err:
+                self._record_device_selection_failure(
+                    "SINGLE_DEVICE_HANDLE_FAILED",
+                    f"Single Device screen handling failed: {single_err}",
+                )
+            else:
+                self._record_device_selection_failure(
+                    "DISCOVERY_SCREEN_NOT_DETECTED",
+                    f"Neither 'Single Device Found' nor 'Set up nearby devices' appeared while looking for '{target_name}'.",
+                )
+            return False
         return False
 
     def _recover_device_discovery(self) -> None:
@@ -988,9 +1055,13 @@ class GHASession:
         If the target is not discovered, restarts GHA, refreshes, and searches again
         (up to constants.DEVICE_SELECTION_MAX_ATTEMPTS total attempts).
         Raises:
-            AssertionError: If the target is still not discovered after all attempts.
+            AssertionError: If the target is still not discovered after all attempts,
+                with `failure_stage` set to `HANDLE_DEVICE_SELECTION_STEPS:<sub_state>`
+                when a specific failure state was observed.
         """
         target_name = str(getattr(self, "device_name", "") or "")
+        self._last_device_selection_state = ""
+        self._last_device_selection_detail = ""
         max_attempts = max(1, int(getattr(constants, "DEVICE_SELECTION_MAX_ATTEMPTS", 2)))
         for attempt in range(1, max_attempts + 1):
             is_last = attempt == max_attempts
@@ -1006,17 +1077,26 @@ class GHASession:
                 return True
             if not is_last:
                 self._logger.warning(
-                    f"[Device Selection] '{target_name}' not discovered on attempt {attempt}/{max_attempts}. "
+                    f"[Device Selection] '{target_name}' not discovered on attempt {attempt}/{max_attempts}"
+                    f"{f' (state={self._last_device_selection_state})' if self._last_device_selection_state else ''}. "
                     "Restarting GHA and retrying..."
                 )
                 self._recover_device_discovery()
+        fail_state = str(getattr(self, "_last_device_selection_state", "") or "").strip()
+        fail_detail = str(getattr(self, "_last_device_selection_detail", "") or "").strip()
+        state_tag = f"[{fail_state}] " if fail_state else ""
+        detail_suffix = f": {fail_detail}" if fail_detail else ""
         message = (
-            f"[Device Selection] '{target_name}' not discovered after {max_attempts} attempt(s)."
+            f"[Device Selection] {state_tag}'{target_name}' not discovered after "
+            f"{max_attempts} attempt(s){detail_suffix}"
         )
         self._logger.error(message)
         if hasattr(BasePage, "capture_failure_screenshot"):
             BasePage.capture_failure_screenshot(self.driver, reason=message, force=False, lock=True)
-        raise AssertionError(message)
+        err = AssertionError(message)
+        if fail_state:
+            err.failure_stage = f"HANDLE_DEVICE_SELECTION_STEPS:{fail_state}"
+        raise err
 
     def pair_device_with_pairing_code(self) -> None:
         """Open the Enter pairing code page and submit the manual pairing code.

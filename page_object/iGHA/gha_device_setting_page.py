@@ -176,7 +176,8 @@ class GHADeviceSettingPage(BasePage):
             elem.click()
             return True
         except (WebDriverException, StaleElementReferenceException) as err:
-            self._logger.warning(f"Standard click on {desc} failed ({err}), trying tap fallbacks...")
+            self._logger.warning(
+                f"Standard click on {desc} failed ({err}), trying tap fallbacks...")
         try:
             self.driver.execute_script("mobile: tap", {"elementId": elem.id})
             return True
@@ -433,7 +434,8 @@ class GHADeviceSettingPage(BasePage):
                 swipe_desc,
             )
             return False
-        self._logger.warning("Confirmation 'Remove' / 'Unlink all' dialog button did not appear within 6s, proceeding...")
+        self._logger.warning(
+            "Confirmation 'Remove' / 'Unlink all' dialog button did not appear within 6s, proceeding...")
         return True
 
     SETTINGS_CONTENT_READY_LOCATORS: List[Tuple[AppiumBy, str]] = [
@@ -452,7 +454,8 @@ class GHADeviceSettingPage(BasePage):
         """Return True if the screen is still on the Camera Live player view instead of Device Settings."""
         with self._devset_no_implicit_wait():
             try:
-                for elem in self.driver.find_elements(AppiumBy.ACCESSIBILITY_ID, "CamerazillaPlayerView"):
+                for elem in self.driver.find_elements(AppiumBy.ACCESSIBILITY_ID,
+                                                      "CamerazillaPlayerView"):
                     if elem.is_displayed():
                         return True
             except Exception:
@@ -463,7 +466,8 @@ class GHADeviceSettingPage(BasePage):
         """Return True if Device Settings is still displaying a loading spinner."""
         with self._devset_no_implicit_wait():
             try:
-                for elem in self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeActivityIndicator"):
+                for elem in self.driver.find_elements(AppiumBy.CLASS_NAME,
+                                                      "XCUIElementTypeActivityIndicator"):
                     if elem.is_displayed():
                         return True
             except Exception:
@@ -473,13 +477,16 @@ class GHADeviceSettingPage(BasePage):
     def _devset_has_settings_content(self) -> bool:
         """Return True if Device Settings rows/entries are rendered on screen."""
         if (
-                self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=False) is not None
-                or self._devset_find_first(self.REMOVE_DEVICE_LOCATORS, require_displayed=False) is not None
+                self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS,
+                                        require_displayed=False) is not None
+                or self._devset_find_first(self.REMOVE_DEVICE_LOCATORS,
+                                           require_displayed=False) is not None
         ):
             return True
         if self._devset_has_loading_spinner():
             return False
-        return self._devset_find_first(self.SETTINGS_CONTENT_READY_LOCATORS, require_displayed=True) is not None
+        return self._devset_find_first(self.SETTINGS_CONTENT_READY_LOCATORS,
+                                       require_displayed=True) is not None
 
     def _devset_wait_for_settings_content(
             self, timeout: float = 25.0, poll_interval: float = 0.5
@@ -505,7 +512,7 @@ class GHADeviceSettingPage(BasePage):
                     self._logger.info(
                         "[DeviceSettings] Device Settings finished loading after %.1fs.",
                         time.time() - start,
-                        )
+                    )
                 return True
             if time.time() >= deadline:
                 break
@@ -527,7 +534,8 @@ class GHADeviceSettingPage(BasePage):
                 )
                 GHACameraLivePage.click_setting_btn(target)
             except Exception as err:
-                self._logger.warning(f"Recovery click_setting_btn from Device Settings flow failed: {err}")
+                self._logger.warning(
+                    f"Recovery click_setting_btn from Device Settings flow failed: {err}")
         self._devset_wait_for_settings_content()
 
     def click_remove_device_btn(self, max_scrolls: int = 8) -> bool:
@@ -538,7 +546,8 @@ class GHADeviceSettingPage(BasePage):
             bool: True if clicked and confirmed successfully.
         """
         self._devset_ensure_on_device_settings_page()
-        self._logger.info("Locating 'Remove device' / 'Unlink all' button on Device Settings page...")
+        self._logger.info(
+            "Locating 'Remove device' / 'Unlink all' button on Device Settings page...")
         time.sleep(1.0)
 
         for scroll_idx in range(max_scrolls):
@@ -596,7 +605,8 @@ class GHADeviceSettingPage(BasePage):
             # is visible; accept either a displayed match or any present match on the current screen.
             dev_info_btn = (
                     self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=True)
-                    or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=False)
+                    or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS,
+                                               require_displayed=False)
             )
             if dev_info_btn:
                 try:
@@ -608,8 +618,10 @@ class GHADeviceSettingPage(BasePage):
                         )
                         self._swipe_down_page()
                         dev_info_btn = (
-                                self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=True)
-                                or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=False)
+                                self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS,
+                                                        require_displayed=True)
+                                or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS,
+                                                           require_displayed=False)
                                 or dev_info_btn
                         )
                 except Exception:
@@ -617,7 +629,8 @@ class GHADeviceSettingPage(BasePage):
                 break
             self._swipe_down_page()
         if not dev_info_btn:
-            self._logger.warning("Could not find 'Device information' entry on Device Settings page.")
+            self._logger.warning(
+                "Could not find 'Device information' entry on Device Settings page.")
             return device_details
         if not self._devset_tap_element(dev_info_btn, "'Device information' entry"):
             return device_details
@@ -626,8 +639,10 @@ class GHADeviceSettingPage(BasePage):
             entered_info_page = self._devset_wait_for_device_info_page(timeout=8.0)
             if not entered_info_page:
                 retry_entry = (
-                        self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=True)
-                        or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS, require_displayed=False)
+                        self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS,
+                                                require_displayed=True)
+                        or self._devset_find_first(self.DEVICE_INFO_ENTRY_LOCATORS,
+                                                   require_displayed=False)
                 )
                 if retry_entry:
                     self._logger.info("Retrying tap on 'Device information' entry...")
@@ -655,7 +670,8 @@ class GHADeviceSettingPage(BasePage):
                 if m_ip := re.search(r"\bIP:\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", raw_text):
                     device_details["device_ip"] = m_ip.group(1).strip()
             else:
-                self._logger.warning("Could not locate 'Device ID:' text on 'Device information' page.")
+                self._logger.warning(
+                    "Could not locate 'Device ID:' text on 'Device information' page.")
             self._logger.info(f"Extracted Device Information: {device_details}")
             self.device_tech_info = device_details
             if hasattr(self, "driver") and self.driver:
