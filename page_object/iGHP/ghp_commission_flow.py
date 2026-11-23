@@ -215,6 +215,7 @@ class GHPCommissioningPageObject(BasePage):
         self._cm_picker_preferred_method: str = ""
         self._cm_apple_done_clicked_at: float = 0.0
         self._cm_last_apple_card_title: str = ""
+        self._cm_last_apple_card_status: str = ""
         self._cm_springboard_failure_title: str = ""
 
     @classmethod
@@ -1322,6 +1323,61 @@ class GHPCommissioningPageObject(BasePage):
                 return txt
         return ""
 
+    def _cm_read_apple_card_status(self, card_title: str = "") -> str:
+        """Read full visible Apple PRXCard state (title + subtitle + progress text like 'Connecting...')."""
+        overlay_text_chain = (
+            f"{self.APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeStaticText[`visible == 1`]"
+        )
+        parts: List[str] = []
+        seen_low: Set[str] = set()
+        if card_title:
+            norm_title = " ".join(card_title.split())
+            if norm_title:
+                parts.append(norm_title)
+                seen_low.add(norm_title.lower())
+
+        def _collect(elems: List[WebElement], filter_status_bar: bool) -> None:
+            for elem in elems:
+                if not self._cm_is_visible(elem):
+                    continue
+                if filter_status_bar:
+                    try:
+                        r = elem.rect
+                        if isinstance(r, dict) and r.get("y", 100) < 55:
+                            continue
+                    except (StaleElementReferenceException, WebDriverException):
+                        pass
+                raw = self._cm_read_text(elem)
+                txt = " ".join(raw.split()) if raw else ""
+                if not txt:
+                    continue
+                low = txt.lower()
+                if low in self.APPLE_IGNORED_BUTTON_TITLES or low in seen_low:
+                    continue
+                if filter_status_bar and (
+                        re.fullmatch(r"\d{1,2}:\d{2}", txt) or re.fullmatch(r"\d{1,3}%", txt)
+                ):
+                    continue
+                seen_low.add(low)
+                parts.append(txt)
+
+        overlay_tvs = self._cm_find_all(IOS_CLASS_CHAIN_BY, self.APPLE_CARD_TITLE_CHAIN)
+        overlay_sts = self._cm_find_all(IOS_CLASS_CHAIN_BY, overlay_text_chain)
+        if overlay_tvs or overlay_sts:
+            _collect(overlay_tvs, filter_status_bar=False)
+            _collect(overlay_sts, filter_status_bar=False)
+        else:
+            _collect(
+                self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeTextView"),
+                filter_status_bar=True,
+            )
+            _collect(
+                self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText"),
+                filter_status_bar=True,
+            )
+
+        return " | ".join(parts) if parts else ""
+
     def _cm_dismiss_apple_sheet_if_open(self) -> None:
         for pred in (
                 self.ALERT_OK_BTN_PREDICATE,
@@ -1544,8 +1600,11 @@ class GHPCommissioningPageObject(BasePage):
             return True
 
         # 7. Connecting / Setting Up / BLE Discovery spinner card
+        progress_desc = self._cm_read_apple_card_status(card_title=card_title)
+        if progress_desc:
+            self._cm_last_apple_card_status = progress_desc
         self._logger.info(
-            f"[Apple Sheet] Waiting for Apple Matter progress ('{card_title or 'Connecting/Setting Up'}')..."
+            f"[Apple Sheet] Waiting for Apple Matter progress ('{progress_desc or 'Connecting/Setting Up'}')..."
         )
         time.sleep(1.5)
         return True
@@ -2041,6 +2100,7 @@ class GHPCommissioningPageObject(BasePage):
         page._cm_picker_preferred_method = ""
         page._cm_apple_done_clicked_at = 0.0
         page._cm_last_apple_card_title = ""
+        page._cm_last_apple_card_status = ""
         page._cm_springboard_failure_title = ""
         try:
             setattr(page.driver, "_commissioned_via_timeout_online", False)
@@ -2156,7 +2216,9 @@ class GHPCommissioningPageObject(BasePage):
                 time.sleep(page.CM_POLL_INTERVAL)
 
             # Overall commissioning timeout -> inspect Devices tab just like GHA
-            timeout_reason = f"GHP Commissioning timed out after {int(timeout)}s"
+            last_apple_state = page._cm_last_apple_card_status or page._cm_last_apple_card_title
+            state_hint = f" (last state: '{last_apple_state}')" if last_apple_state else ""
+            timeout_reason = f"GHP Commissioning timed out after {int(timeout)}s{state_hint}"
             page._logger.error(f"[Commissioning] {timeout_reason}")
             BasePage.capture_failure_screenshot(
                 page.driver, reason=timeout_reason, force=False, lock=False
