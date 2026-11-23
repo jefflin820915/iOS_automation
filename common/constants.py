@@ -38,7 +38,7 @@ ATT_LIVE_VERIFY_SECONDS = 8.0
 
 # ==================== App Settings ====================
 GHA_BUNDLE_ID = "com.google.Chromecast"
-iGHP_SAMPLE_APP_BUNDLE_ID = "com.google.homeplatform.sampleapp.gomezandres"
+iGHP_SAMPLE_APP_BUNDLE_ID = "com.google.homeplatform.sampleapp.prod"
 SAFARI_BUNDLE_ID = "com.apple.mobilesafari"
 GHP_DEV_SITE = "https://developers.home.google.com/apis/ios/get-started"
 
