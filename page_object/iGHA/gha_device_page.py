@@ -90,6 +90,7 @@ class GHADevicePage(BasePage):
         except Exception as tab_err:
             self._logger.warning(
                 f"GHATabPage.go_to_tab(DEVICES) fallback ({tab_err}); trying direct chip tap...")
+
         default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
         try:
             self.driver.implicitly_wait(0)
@@ -295,6 +296,7 @@ class GHADevicePage(BasePage):
         GHADevicePage._ensure_on_all_devices_tab(self)
         norm_target = self._normalize_text(device_name).lower()
         fallback_names = GHADevicePage._get_fallback_device_names(device_name)
+
         poll_deadline = time.time() + 6.0
         while time.time() < poll_deadline:
             if self._is_target_device_visible_on_screen(device_name):
@@ -316,6 +318,7 @@ class GHADevicePage(BasePage):
                     except Exception:
                         continue
             time.sleep(0.8)
+
         # Before scrolling away from the top screen (Attic), check if a fallback default name ('Doorbell' / 'Camera')
         # is already visible on the top screen.
         for fb_name in fallback_names:
@@ -326,6 +329,7 @@ class GHADevicePage(BasePage):
                 )
                 GHADevicePage._set_resolved_device_name(self, fb_name)
                 return True
+
         seen_device_names = set()
         consecutive_no_new_devices = 0
         for scroll_idx in range(max_scrolls):
@@ -379,6 +383,7 @@ class GHADevicePage(BasePage):
                                 break
                 except (StaleElementReferenceException, WebDriverException):
                     continue
+
             if fallback_matched_in_elements:
                 self._logger.warning(
                     f"[Fallback Name] Target '{device_name}' matched via fallback name "
@@ -386,6 +391,7 @@ class GHADevicePage(BasePage):
                 )
                 GHADevicePage._set_resolved_device_name(self, fallback_matched_in_elements)
                 return True
+
             for fb_name in fallback_names:
                 if self._is_target_device_visible_on_screen(fb_name, exact_tile_match=True):
                     self._logger.warning(
@@ -394,6 +400,7 @@ class GHADevicePage(BasePage):
                     )
                     GHADevicePage._set_resolved_device_name(self, fb_name)
                     return True
+
             if not seen_device_names and scroll_idx < 2:
                 self._logger.info(
                     "Device grid still loading (0 tiles seen). Waiting 1.5s before scrolling...")
@@ -464,6 +471,130 @@ class GHADevicePage(BasePage):
             self.driver.implicitly_wait(default_wait)
         return False
 
+    def _wait_for_devices_sync_spinner(self, timeout: float = 8.0,
+                                       poll_interval: float = 0.5) -> None:
+        """Wait briefly if 'All devices' is still showing a background refresh spinner before tapping a tile."""
+
+        def _has_spinner() -> bool:
+            default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+            try:
+                self.driver.implicitly_wait(0)
+                for elem in self.driver.find_elements(AppiumBy.CLASS_NAME,
+                                                      "XCUIElementTypeActivityIndicator"):
+                    try:
+                        if elem.is_displayed():
+                            return True
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.driver.implicitly_wait(default_wait)
+                except Exception:
+                    pass
+            return False
+
+        if not _has_spinner():
+            return
+        self._logger.info(
+            "[DevicePage] Waiting for 'All devices' sync spinner to finish before opening camera...")
+        deadline = time.time() + timeout
+        max_polls = max(1, int(timeout / max(poll_interval, 0.1)) + 1)
+        for _ in range(max_polls):
+            if not _has_spinner() or time.time() >= deadline:
+                break
+            time.sleep(poll_interval)
+
+    def _has_camera_live_view_markers(self) -> bool:
+        """Return True if Camera Live player or camera state overlay markers are visible."""
+        live_locators = [
+            (AppiumBy.IOS_CLASS_CHAIN,
+             '**/XCUIElementTypeButton[`name == "CamerazillaPlayerView"`]'),
+            (AppiumBy.ACCESSIBILITY_ID, "CamerazillaPlayerView"),
+            (AppiumBy.ACCESSIBILITY_ID, "CameraStateInfoView"),
+            (AppiumBy.ACCESSIBILITY_ID, "cameraStateTitleLabel"),
+            (AppiumBy.ACCESSIBILITY_ID, "Retry"),
+            (AppiumBy.IOS_PREDICATE,
+             'label CONTAINS "viewing live stream" OR name == "Live" OR label == "Live"'),
+        ]
+        default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+        try:
+            self.driver.implicitly_wait(0)
+            for by, loc in live_locators:
+                for elem in self.driver.find_elements(by, loc):
+                    try:
+                        if elem.is_displayed():
+                            return True
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        finally:
+            try:
+                self.driver.implicitly_wait(default_wait)
+            except Exception:
+                pass
+        return False
+
+    def _has_non_player_device_info_markers(self) -> bool:
+        """Return True if GHA opened the generic Device Info overview sheet instead of Camera Live view."""
+        if self._has_camera_live_view_markers():
+            return False
+        info_pred = (
+            'name IN {"Remove from favorites", "Add to favorites", "Send feedback", "Get help"} '
+            'OR label IN {"Remove from favorites", "Add to favorites", "Send feedback", "Get help"}'
+        )
+        default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+        try:
+            self.driver.implicitly_wait(0)
+            for elem in self.driver.find_elements(AppiumBy.IOS_PREDICATE, info_pred):
+                try:
+                    if elem.is_displayed():
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        finally:
+            try:
+                self.driver.implicitly_wait(default_wait)
+            except Exception:
+                pass
+        return False
+
+    def _close_device_info_sheet(self) -> None:
+        """Close the generic Device Info overview sheet ('X') to return to 'All devices'."""
+        close_locators = [
+            (AppiumBy.IOS_CLASS_CHAIN,
+             '**/XCUIElementTypeButton[`name == "closeButton" AND visible == 1`]'),
+            (AppiumBy.ACCESSIBILITY_ID, "closeButton"),
+            (AppiumBy.ACCESSIBILITY_ID, "Close"),
+            (AppiumBy.ACCESSIBILITY_ID, "close"),
+        ]
+        default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+        try:
+            self.driver.implicitly_wait(0)
+            for by, loc in close_locators:
+                for btn in self.driver.find_elements(by, loc):
+                    try:
+                        if btn.is_displayed():
+                            btn.click()
+                            return
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        finally:
+            try:
+                self.driver.implicitly_wait(default_wait)
+            except Exception:
+                pass
+        try:
+            self.driver.execute_script("mobile: tap", {"x": 24, "y": 65})
+        except Exception:
+            pass
+
     def enter_device_page(self, device_name: str, duration: float = 2.5,
                           max_retries: int = 2) -> bool:
         """Robustly tap or long-press on a device tile to enter its detail/control page on iOS.
@@ -509,13 +640,26 @@ class GHADevicePage(BasePage):
             return None
 
         if self._is_in_device_or_camera_page():
-            self._logger.info(f"Already detected in device/camera page for '{device_name}'.")
-            return True
-        for attempt in range(1, max_retries + 1):
+            if self._has_non_player_device_info_markers():
+                self._logger.warning(
+                    f"[DevicePage] Currently on generic Device Info page instead of Camera Live view for '{device_name}'; closing and re-entering..."
+                )
+                self._close_device_info_sheet()
+                time.sleep(1.5)
+                self._wait_for_devices_sync_spinner()
+            else:
+                self._logger.info(f"Already detected in device/camera page for '{device_name}'.")
+                return True
+        force_short_tap = False
+        recovered_from_info_sheet = False
+        attempt = 0
+        while attempt < max_retries:
+            attempt += 1
             if self._is_in_device_or_camera_page():
                 self._logger.info(
                     f"Successfully entered device page for '{device_name}' (confirmed on attempt {attempt})!")
                 return True
+            self._wait_for_devices_sync_spinner()
             self._logger.info(
                 f"[Attempt {attempt}/{max_retries}] Triggering interaction on '{device_name}'...")
             target_element = find_target_tile()
@@ -532,7 +676,7 @@ class GHADevicePage(BasePage):
                 rect = target_element.rect
                 center_x = int(rect['x'] + rect['width'] / 2)
                 center_y = int(rect['y'] + rect['height'] / 2)
-                if duration >= 2.0 or attempt > 1:
+                if not force_short_tap and (duration >= 2.0 or attempt > 1):
                     self._logger.info(
                         f"Executing mobile: touchAndHold at ({center_x}, {center_y}) for {duration}s...")
                     try:
@@ -570,6 +714,25 @@ class GHADevicePage(BasePage):
                     break
                 time.sleep(0.5)
             if navigated:
+                if not recovered_from_info_sheet and self._has_non_player_device_info_markers():
+                    # Wait briefly (up to 2.0s) in case CamerazillaPlayerView is still mounting
+                    for _ in range(4):
+                        time.sleep(0.5)
+                        if not self._has_non_player_device_info_markers():
+                            break
+                if self._has_non_player_device_info_markers() and not recovered_from_info_sheet:
+                    recovered_from_info_sheet = True
+                    force_short_tap = True
+                    self._logger.warning(
+                        f"[DevicePage] Landed on generic Device Info page ('Remove from favorites' / "
+                        f"'Send feedback' / 'Get help') instead of Camera Live view for '{device_name}'. "
+                        "Closing ('X'), waiting for sync, and retrying with short tap..."
+                    )
+                    self._close_device_info_sheet()
+                    time.sleep(1.5)
+                    self._wait_for_devices_sync_spinner()
+                    attempt = max(0, attempt - 1)
+                    continue
                 self._logger.info(
                     f"Successfully entered device page for '{device_name}' on attempt {attempt}!")
                 return True

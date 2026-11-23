@@ -492,7 +492,12 @@ class GHASession:
                 step_stage = "CLICK_ADD_PLUS_BUTTON"
                 self._logger.info(
                     "[Device Selection] Clicking '+' (Add devices) button to open 'Add a device'...")
-                GHAHomePage.click_add_devices_button(self)
+                plus_res = GHAHomePage.click_add_devices_button(self)
+                if plus_res is False:
+                    detail = "Failed clicking '+' (Add devices) button."
+                    self._record_device_selection_failure(step_stage, detail)
+                    self._logger.error(f"[Device Selection][{step_stage}] {detail}")
+                    return False
             step_stage = "OPEN_SETUP_DEVICE_PAGE"
             nav_result = GHAAddPage.navigate_to_setup_device_page(self)
             if nav_result is False:
@@ -1082,9 +1087,10 @@ class GHASession:
                     "Restarting GHA and retrying..."
                 )
                 self._recover_device_discovery()
-        fail_state = str(getattr(self, "_last_device_selection_state", "") or "").strip()
+        fail_state = str(
+            getattr(self, "_last_device_selection_state", "") or "").strip() or "UNKNOWN_SUBSTATE"
         fail_detail = str(getattr(self, "_last_device_selection_detail", "") or "").strip()
-        state_tag = f"[{fail_state}] " if fail_state else ""
+        state_tag = f"[{fail_state}] "
         detail_suffix = f": {fail_detail}" if fail_detail else ""
         message = (
             f"[Device Selection] {state_tag}'{target_name}' not discovered after "
@@ -1094,8 +1100,7 @@ class GHASession:
         if hasattr(BasePage, "capture_failure_screenshot"):
             BasePage.capture_failure_screenshot(self.driver, reason=message, force=False, lock=True)
         err = AssertionError(message)
-        if fail_state:
-            err.failure_stage = f"HANDLE_DEVICE_SELECTION_STEPS:{fail_state}"
+        err.failure_stage = f"HANDLE_DEVICE_SELECTION_STEPS:{fail_state}"
         raise err
 
     def pair_device_with_pairing_code(self) -> None:

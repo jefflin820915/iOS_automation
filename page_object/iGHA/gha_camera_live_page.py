@@ -256,6 +256,13 @@ class GHACameraLivePage(BasePage):
         (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "CamerazillaPlayerView"`]'),
         (AppiumBy.ACCESSIBILITY_ID, "CamerazillaPlayerView"),
     ]
+    LIVE_DEVICE_INFO_OVERVIEW_LOCATORS: List[Locator] = [
+        (
+            AppiumBy.IOS_PREDICATE,
+            'name IN {"Remove from favorites", "Add to favorites", "Send feedback", "Get help"} '
+            'OR label IN {"Remove from favorites", "Add to favorites", "Send feedback", "Get help"}',
+        ),
+    ]
     LIVE_OVERFLOW_MENU_LOCATORS: List[Locator] = [
         (AppiumBy.ACCESSIBILITY_ID, "overflowMenuButton"),
         (AppiumBy.ACCESSIBILITY_ID, "Settings"),
@@ -364,6 +371,24 @@ class GHACameraLivePage(BasePage):
                 constants.GHA_BUNDLE_ID) == constants.APP_STATE_FOREGROUND
         except WebDriverException:
             return True
+
+    def _live_is_non_player_device_info_page(self) -> bool:
+        """Return True if stuck on generic Device Info overview sheet without Camera Live player."""
+        with self._live_no_implicit_wait():
+            if (
+                    self._live_first(self.LIVE_PLAYER_LOCATORS) is not None
+                    or self._live_first(self.LIVE_ERROR_OVERLAY_LOCATORS) is not None
+                    or self._live_first(self.LIVE_RETRY_LOCATORS) is not None
+            ):
+                return False
+            for by, val in self.LIVE_DEVICE_INFO_OVERVIEW_LOCATORS:
+                for elem in self._live_find_all(by, val):
+                    try:
+                        if elem.is_displayed():
+                            return True
+                    except WebDriverException:
+                        continue
+        return False
 
     def _live_probe(self) -> Tuple[str, str, Optional[WebElement]]:
         """Classify the live view in one pass. Returns (state, detail, retry_btn).
@@ -823,8 +848,46 @@ class GHACameraLivePage(BasePage):
         timeline = _LiveTimeline(duration_seconds, max_retries)
         retry_count = 0
         last_heartbeat_log = 0.0
+        recovered_from_info_page = False
         while timeline.elapsed() < duration_seconds:
             sample, retry_btn = self._live_take_sample(timeline)
+            if (
+                    sample.state == _LiveState.NO_PLAYER
+                    and not recovered_from_info_page
+                    and self._live_is_non_player_device_info_page()
+            ):
+                for _ in range(4):
+                    time.sleep(0.5)
+                    if not self._live_is_non_player_device_info_page():
+                        break
+                else:
+                    recovered_from_info_page = True
+                    target_name = str(
+                        getattr(self, "device_name", None)
+                        or getattr(getattr(self, "session", None), "device_name", "")
+                        or ""
+                    )
+                    self._logger.warning(
+                        "[LiveCheck] Landed on Device Info overview page ('Remove from favorites' / "
+                        "'Send feedback' / 'Get help') instead of Camera Live player; closing back to "
+                        f"'All devices' and re-entering '{target_name or 'camera'}'..."
+                    )
+                    self.click_back_btn()
+                    time.sleep(1.5)
+                    if target_name:
+                        try:
+                            from page_object.iGHA.gha_device_page import GHADevicePage
+                            GHADevicePage(self.driver).enter_device_page(
+                                device_name=target_name, duration=0.0
+                            )
+                        except Exception as re_err:
+                            self._logger.warning(
+                                f"[LiveCheck] Recovery re-entry into '{target_name}' failed: {re_err}"
+                            )
+                    timeline = _LiveTimeline(duration_seconds, max_retries)
+                    retry_count = 0
+                    last_heartbeat_log = 0.0
+                    continue
             if sample.state == _LiveState.RETRY:
                 if retry_count >= max_retries:
                     message = timeline.build_failure_message(_LiveFailure.RETRY_EXHAUSTED)
