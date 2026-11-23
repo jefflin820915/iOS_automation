@@ -513,6 +513,18 @@ class GHACameraLivePage(BasePage):
                         continue
         return None
 
+    def _live_has_loading_spinner(self) -> bool:
+        """Return True if a centered UI loading spinner (ActivityIndicator) is currently displayed."""
+        with self._live_no_implicit_wait():
+            for elem in self._live_find_all(AppiumBy.CLASS_NAME,
+                                            "XCUIElementTypeActivityIndicator"):
+                try:
+                    if elem.is_displayed():
+                        return True
+                except WebDriverException:
+                    continue
+        return False
+
     def _live_is_on_device_settings_page(self) -> bool:
         """Return True if GHA has transitioned to the Device Settings page."""
         with self._live_no_implicit_wait():
@@ -524,6 +536,38 @@ class GHACameraLivePage(BasePage):
                     except WebDriverException:
                         return True
         return False
+
+    def _live_wait_for_device_settings_loaded(
+            self, timeout: float = 20.0, poll_interval: float = 0.5
+    ) -> bool:
+        """After leaving Camera Live, wait for Device Settings spinner to finish and content to render.
+
+        Prevents slow network loads (white screen + red ActivityIndicator) from being treated as
+        immediately ready before Device Settings rows appear.
+        """
+        if self._live_is_on_device_settings_page() and not self._live_has_loading_spinner():
+            return True
+
+        self._logger.info(
+            "[DeviceSettings] Left Camera Live screen; waiting for Device Settings page to finish loading..."
+        )
+        start = time.time()
+        deadline = start + timeout
+        max_polls = max(1, int(timeout / max(poll_interval, 0.1)) + 1)
+        for _ in range(max_polls):
+            has_spinner = self._live_has_loading_spinner()
+            if not has_spinner and self._live_is_on_device_settings_page():
+                self._logger.info(
+                    f"[DeviceSettings] Device Settings content ready after {time.time() - start:.1f}s."
+                )
+                return True
+            if self._live_is_still_on_camera_live_page():
+                return False
+            if time.time() >= deadline:
+                break
+            time.sleep(poll_interval)
+
+        return self._live_is_on_device_settings_page()
 
     def _live_is_still_on_camera_live_page(self) -> bool:
         """Return True if the Camera Live video player or Live badge is still displayed on screen."""
@@ -629,6 +673,7 @@ class GHACameraLivePage(BasePage):
         if self._live_is_on_device_settings_page():
             self._logger.info("Already on Device Settings page.")
             return True
+
         gear_x, gear_y = 362, 79
         for attempt in range(1, max_attempts + 1):
             overflow_btn = self._live_find_visible_overflow_btn()
@@ -663,10 +708,11 @@ class GHACameraLivePage(BasePage):
                         except Exception:
                             pass
                 self._live_tap_coords(gear_x, gear_y, desc="overflowMenuButton (gear)")
+
             deadline = time.time() + 2.2
             while time.time() < deadline:
                 time.sleep(0.4)
-                if self._live_is_on_device_settings_page():
+                if self._live_is_on_device_settings_page() and not self._live_has_loading_spinner():
                     self._logger.info(
                         "Successfully navigated to Device Settings page from Camera Live screen.")
                     return True
@@ -682,17 +728,30 @@ class GHACameraLivePage(BasePage):
                         prefer_coords=True,
                     )
                     time.sleep(1.2)
-                    if self._live_is_on_device_settings_page() or not self._live_is_still_on_camera_live_page():
-                        self._logger.info(
-                            "Successfully navigated to Device Settings page via popover menu.")
-                        return True
+                    if not self._live_is_still_on_camera_live_page():
+                        if self._live_wait_for_device_settings_loaded():
+                            self._logger.info(
+                                "Successfully navigated to Device Settings page via popover menu.")
+                            return True
+                        if not self._live_is_still_on_camera_live_page():
+                            self._logger.warning(
+                                "Left Camera Live via popover menu, but Device Settings content is still loading; handoff to Device Settings wait..."
+                            )
+                            return True
                     break
+
             if not self._live_is_still_on_camera_live_page():
+                if self._live_wait_for_device_settings_loaded():
+                    self._logger.info(
+                        "Successfully navigated to Device Settings page from Camera Live screen.")
+                    return True
                 self._logger.info("Left Camera Live screen after tapping Settings gear.")
                 return True
+
             self._logger.warning(
                 f"[Settings Gear] Still on Camera Live screen after attempt {attempt}/{max_attempts}; retrying..."
             )
+
         self._logger.warning(
             "Still on Camera Live screen after gear tap attempts; trying popover fallback coordinates (257, 123)..."
         )
