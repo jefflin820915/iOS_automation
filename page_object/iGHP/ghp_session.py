@@ -73,6 +73,7 @@ class GHPSession:
         self._logger = logging_utils.get_logger(__name__, "ghp_session")
         self._ghp_stopped_in_cleanup = False
         self._device_removed_in_emergency = False
+        self._device_reset_done_in_run: bool = False
         self.device_name: Optional[str] = None
         self.pairing_code: Optional[str] = None
         self.room_name: str = "Attic"
@@ -625,6 +626,7 @@ class GHPSession:
             except Exception:
                 w = 390
 
+            # Locate top-right 'More' ('•••') menu item in NavigationBar
             more_el = None
             try:
                 candidates = sess.driver.find_elements(IOS_PREDICATE_BY,
@@ -721,6 +723,7 @@ class GHPSession:
                         if ui_sdk_ver and ui_sdk_ver.upper() != "UNKNOWN":
                             sess.sdk_version = ui_sdk_ver
                     else:
+                        # Close More menu if it opened without 'About' matching
                         try:
                             sess.driver.execute_script("mobile: tap", {"x": w // 2, "y": 55})
                         except Exception:
@@ -873,6 +876,7 @@ class GHPSession:
     def reset_target_device(self, reason: str = "post-test cleanup") -> bool:
         """Mandatory post-test hardware reset: Smart Plug detail-page power-cycle + ADB factory reset."""
         sess = GHPSession._resolve_session(self)
+        sess._device_reset_done_in_run = True
         device = str(
             getattr(self, "device_name", None) or getattr(sess, "device_name", "") or "ALL")
         sess._logger.info(
@@ -927,7 +931,11 @@ class GHPSession:
         GHPDeviceSettingPage.click_remove_device_btn(self)
 
     def handle_verify_camera_live_stream_and_remove(self) -> None:
-        """Verify 30s camera live stream on GHP, extract info, decommission, and run hardware reset."""
+        """Verify 30s camera live stream on GHP, extract info, decommission, and run hardware reset.
+
+        Guarantees `reset_target_device` (Smart Plug detail-page power-cycle + ADB factory reset)
+        ALWAYS runs in `finally:` even if live stream verification or UI decommission raises.
+        """
         sess = GHPSession._resolve_session(self)
         sess._device_removed_in_emergency = False
         target_name = str(
