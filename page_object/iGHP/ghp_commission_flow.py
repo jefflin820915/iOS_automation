@@ -186,7 +186,7 @@ class GHPCommissioningPageObject(BasePage):
         'OR name CONTAINS[c] "Shown Here" OR label CONTAINS[c] "Shown Here")'
     )
     ENTER_CODE_LINK_PREDICATE: str = (
-        'type == "XCUIElementTypeLink" AND ('
+        'type IN {"XCUIElementTypeLink", "XCUIElementTypeButton"} AND ('
         'name CONTAINS[c] "Enter code" OR label CONTAINS[c] "Enter code")'
     )
     ENTER_CODE_TEXTVIEW_PREDICATE: str = (
@@ -195,8 +195,9 @@ class GHPCommissioningPageObject(BasePage):
         'OR label CONTAINS[c] "manually enter the setup code")'
     )
     SETUP_CODE_HEADER_PREDICATE: str = (
-        'type IN {"XCUIElementTypeTextView", "XCUIElementTypeStaticText"} AND ('
-        'name == "Setup Code" OR label == "Setup Code" '
+        'type IN {"XCUIElementTypeTextView", "XCUIElementTypeStaticText", '
+        '"XCUIElementTypeNavigationBar", "XCUIElementTypeAlert"} AND ('
+        'name == "Setup Code" OR label == "Setup Code" OR value == "Setup Code" '
         'OR label CONTAINS[c] "Enter the code found on the accessory")'
     )
     CONTINUE_BTN_PREDICATE: str = (
@@ -271,7 +272,23 @@ class GHPCommissioningPageObject(BasePage):
                     return el
             except (StaleElementReferenceException, WebDriverException):
                 continue
-        return first_elem if allow_hidden else None
+        if not allow_hidden:
+            return None
+        if len(elems) > 1:
+            for el in elems:
+                try:
+                    rect = el.rect
+                except (StaleElementReferenceException, WebDriverException):
+                    continue
+                if (
+                        isinstance(rect, dict)
+                        and rect.get("width", 0) > 0
+                        and rect.get("height", 0) > 0
+                        and rect.get("x", -1) >= 0
+                        and rect.get("y", -1) >= 0
+                ):
+                    return el
+        return first_elem
 
     def _cm_read_text(
             self, elem: Optional[WebElement], attrs: Tuple[str, ...] = ("label", "name", "value")
@@ -430,6 +447,112 @@ class GHPCommissioningPageObject(BasePage):
                 pass
         self._cm_click_or_tap(elem, desc="More options…")
 
+    def _cm_tap_enter_code_link(
+            self,
+            enter_link: Optional[WebElement],
+            help_tv: Optional[WebElement],
+            attempt: int,
+    ) -> None:
+        """Click/tap the inline 'Enter code…' link on Accessory Setup Help.
+
+        On iOS 26/27 'Enter\\ncode...' can wrap across two lines ('Enter' at
+        top-right, 'code...' at bottom-left of the XCUIElementTypeLink rect), so
+        tapping only the bounding-box center (0.50, 0.50) misses both words.
+        Cycles distinct rect offsets, native click(), and TextView coordinates
+        across attempts instead of repeating the same dead coordinate.
+        """
+
+        def _valid_rect(el: Optional[WebElement]) -> Optional[dict]:
+            if el is None:
+                return None
+            try:
+                r = el.rect
+            except WebDriverException:
+                return None
+            if isinstance(r, dict) and r.get("width", 0) > 0 and r.get("height", 0) > 0:
+                return r
+            return None
+
+        link_rect = _valid_rect(enter_link)
+        tv_rect = _valid_rect(help_tv)
+        actions: List[Tuple[str, object, Optional[Tuple[float, float]]]] = []
+
+        if enter_link is not None and link_rect is not None:
+            is_wrapped = link_rect["height"] >= 26
+            if is_wrapped:
+                link_offsets = (
+                    (0.14, 0.78),
+                    (0.88, 0.25),
+                    (0.50, 0.50),
+                    (0.25, 0.75),
+                    (0.75, 0.25),
+                )
+            else:
+                link_offsets = (
+                    (0.50, 0.50),
+                    (0.14, 0.78),
+                    (0.88, 0.25),
+                    (0.25, 0.50),
+                    (0.75, 0.50),
+                )
+            actions.append(("tap_rect", link_rect, link_offsets[0]))
+            actions.append(("tap_rect", link_rect, link_offsets[1]))
+            actions.append(("click", enter_link, None))
+            for off in link_offsets[2:]:
+                actions.append(("tap_rect", link_rect, off))
+        elif enter_link is not None:
+            actions.append(("click", enter_link, None))
+
+        if help_tv is not None and tv_rect is not None:
+            tv_offsets = (
+                (0.10, 0.84),
+                (0.88, 0.50),
+                (0.72, 0.80),
+                (0.50, 0.84),
+            )
+            if enter_link is None:
+                # Without a separate link element, try the classic 2-line end first.
+                tv_offsets = (
+                    (0.72, 0.80),
+                    (0.10, 0.84),
+                    (0.88, 0.50),
+                    (0.50, 0.84),
+                    (0.50, 0.50),
+                )
+            for off in tv_offsets:
+                actions.append(("tap_rect", tv_rect, off))
+        elif help_tv is not None:
+            actions.append(("click", help_tv, None))
+
+        if not actions:
+            return
+
+        start = (attempt - 1) % len(actions)
+        for idx in range(len(actions)):
+            kind, target, offset = actions[(start + idx) % len(actions)]
+            if kind == "tap_rect" and isinstance(target, dict) and offset is not None:
+                rx, ry = offset
+                tx = int(target["x"] + target["width"] * rx)
+                ty = int(target["y"] + target["height"] * ry)
+                label = "Enter code… link" if target is link_rect else "Enter code TextView"
+                self._logger.info(
+                    f"[PairingCode] Tapping '{label}' at ({tx}, {ty}) (attempt {attempt})..."
+                )
+                try:
+                    self.driver.execute_script("mobile: tap", {"x": tx, "y": ty})
+                    return
+                except WebDriverException:
+                    continue
+            elif kind == "click":
+                self._logger.info(
+                    f"[PairingCode] Clicking 'Enter code…' element natively (attempt {attempt})..."
+                )
+                try:
+                    target.click()
+                    return
+                except WebDriverException:
+                    continue
+
     def _cm_type_setup_code_digits(self, text_field: WebElement, digits: str) -> bool:
         """Enter setup code digits into Apple's Setup Code field, with digit-keypad tap fallback."""
         self._cm_click_or_tap(text_field, desc="Setup Code TextField")
@@ -486,13 +609,10 @@ class GHPCommissioningPageObject(BasePage):
         enter_code_clicks = 0
 
         while time.time() < deadline:
-            # Check if Apple sheet immediately surfaced an error card
-            apple_err = self._cm_detect_apple_failure_title()
-            if apple_err:
-                return f"Apple sheet reported failure while entering setup code: '{apple_err}'"
-
             # Accept any benign iOS system alert (e.g. Local Network / Bluetooth 'Allow' / 'OK',
-            # or 'Additional Setup Required' -> 'OK') before inspecting cards underneath
+            # or 'Additional Setup Required' -> 'OK') before inspecting cards underneath.
+            # Note: _cm_handle_apple_system_alert() also checks failure keywords internally so we
+            # avoid running _cm_detect_apple_failure_title() redundantly before it.
             if self._cm_handle_apple_system_alert():
                 time.sleep(0.8)
                 continue
@@ -587,34 +707,19 @@ class GHPCommissioningPageObject(BasePage):
             enter_link = self._cm_find_displayed(
                 IOS_PREDICATE_BY, self.ENTER_CODE_LINK_PREDICATE, allow_hidden=True
             )
-            if enter_link is not None:
-                enter_code_clicks += 1
-                self._logger.info(
-                    f"[PairingCode] Clicking 'Enter code…' link (attempt {enter_code_clicks})..."
+            help_tv = None
+            if enter_link is None or enter_code_clicks >= 1:
+                help_tv = self._cm_find_displayed(
+                    IOS_PREDICATE_BY, self.ENTER_CODE_TEXTVIEW_PREDICATE, allow_hidden=True
                 )
-                if enter_code_clicks % 2 == 1:
-                    self._cm_tap_center(enter_link, desc="Enter code…")
-                else:
-                    self._cm_click_or_tap(enter_link, desc="Enter code…")
-                time.sleep(1.5)
-                continue
-
-            help_tv = self._cm_find_displayed(
-                IOS_PREDICATE_BY, self.ENTER_CODE_TEXTVIEW_PREDICATE, allow_hidden=True
-            )
-            if help_tv is not None:
+            if enter_link is not None or help_tv is not None:
                 enter_code_clicks += 1
-                try:
-                    r = help_tv.rect
-                    tx = int(r["x"] + r["width"] * 0.72)
-                    ty = int(r["y"] + r["height"] * 0.80)
-                    self._logger.info(
-                        f"[PairingCode] Tapping 'Enter code…' inside TextView at ({tx}, {ty})..."
-                    )
-                    self.driver.execute_script("mobile: tap", {"x": tx, "y": ty})
-                except WebDriverException:
-                    self._cm_tap_center(help_tv, desc="Enter code TextView")
-                time.sleep(1.5)
+                self._cm_tap_enter_code_link(
+                    enter_link=enter_link,
+                    help_tv=help_tv,
+                    attempt=enter_code_clicks,
+                )
+                time.sleep(1.2)
                 continue
 
             # Screen 2: 'Select an Accessory to Add' -> "My Accessory Isn't Shown Here"
