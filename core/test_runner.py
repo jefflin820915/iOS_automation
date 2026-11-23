@@ -155,6 +155,10 @@ class MultiProjectTestRunner:
         self.udid = str(constants.IOS_CAPABILITIES.get("appium:udid", "") or "")
         self.wda_local_port = constants.IOS_CAPABILITIES.get("appium:wdaLocalPort", 8100)
         self.mjpeg_server_port = constants.IOS_CAPABILITIES.get("appium:mjpegServerPort")
+        self._session_ts: str = (
+                getattr(constants, "TIMESTAMP", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
+        self._app_session_dirs: Dict[str, str] = {}
         self._configure_process_session_log_dir()
         if self.adb_serials:
             initial_dev, _ = self.get_iteration_targets(1)
@@ -194,15 +198,32 @@ class MultiProjectTestRunner:
         self.software_version: str = "UNKNOWN"
         self.device_ip: str = "UNKNOWN"
         self.env_info_collected: bool = False
-        self.drive_uploader: Optional[DriveUploader] = DriveUploader.create_if_enabled()
+        self._drive_uploaders_by_app: Dict[str, Optional[DriveUploader]] = {
+            app_item: self._create_drive_uploader_for_app(app_item)
+            for app_item in self.app_names
+        }
+        self.drive_uploader: Optional[DriveUploader] = self._drive_uploaders_by_app.get(
+            self.project_name
+        )
         host_short = socket.gethostname().split(".")[0]
-        if self._multi_session_requested:
-            udid_tag = self._short_udid_tag(self.udid, self.wda_local_port)
-            self.drive_run_folder_name = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_tag}_{udid_tag}_{host_short}"
-        else:
-            self.drive_run_folder_name = f"{datetime.now():%Y%m%d_%H%M%S}_{self.project_tag}_{host_short}"
+        drive_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        udid_tag = self._short_udid_tag(self.udid, self.wda_local_port)
+        use_udid_in_drive = self._multi_session_requested or (
+                bool(self.udid) and len(self.app_names) > 1
+        )
+        self._drive_run_folders_by_app: Dict[str, str] = {
+            app_item: (
+                f"{drive_ts}_{app_item}_{udid_tag}_{host_short}"
+                if use_udid_in_drive
+                else f"{drive_ts}_{app_item}_{host_short}"
+            )
+            for app_item in self.app_names
+        }
+        self.drive_run_folder_name: str = self._drive_run_folders_by_app[self.project_name]
         self._drive_last_case_folder_id: Optional[str] = None
+        self._drive_last_case_folder_id_by_app: Dict[str, Optional[str]] = {}
         self._container_paths: List[str] = []
+        self._container_paths_by_app: Dict[str, List[str]] = {}
         self._completed_case_dirs: List[str] = []
         self._csv_accepts_drive_url: bool = self._csv_accepts_param("drive_url")
         if self.drive_uploader and not self._csv_accepts_drive_url:
@@ -366,47 +387,106 @@ class MultiProjectTestRunner:
             return False
         return cls._is_pid_alive(owner_pid)
 
-    def _mark_session_active(self) -> None:
-        """Write current PID into SESSION_LOG_DIR/.session_active.lock so sibling runners never prune it."""
+    @staticmethod
+    def _create_drive_uploader_for_app(app_name: str) -> Optional[DriveUploader]:
+        """Resolve per-app DriveUploader when supported, falling back to 0-arg create_if_enabled()."""
+        factory = getattr(DriveUploader, "create_if_enabled", None)
+        if not callable(factory):
+            return None
         try:
-            os.makedirs(constants.SESSION_LOG_DIR, exist_ok=True)
-            lock_path = os.path.join(constants.SESSION_LOG_DIR, self.ACTIVE_SESSION_LOCK_FILE)
+            params = inspect.signature(factory).parameters
+            if "app_name" in params:
+                return factory(app_name=app_name)
+        except (TypeError, ValueError):
+            pass
+        return factory()
+
+    def _mark_session_active(self, target_dir: Optional[str] = None) -> None:
+        """Write current PID into `.session_active.lock` so sibling runners never prune it."""
+        session_dir = os.path.abspath(target_dir or constants.SESSION_LOG_DIR)
+        try:
+            os.makedirs(session_dir, exist_ok=True)
+            lock_path = os.path.join(session_dir, self.ACTIVE_SESSION_LOCK_FILE)
             with open(lock_path, "w", encoding="utf-8") as f:
                 f.write(str(os.getpid()))
         except OSError as e:
             logger.debug(f"[SESSION LOCK] Could not write active lock file: {e}")
 
     def _release_session_active(self) -> None:
-        """Remove SESSION_LOG_DIR/.session_active.lock upon runner completion."""
-        lock_path = os.path.join(constants.SESSION_LOG_DIR, self.ACTIVE_SESSION_LOCK_FILE)
-        try:
-            if os.path.isfile(lock_path):
-                owner_pid = self._read_session_lock_pid(constants.SESSION_LOG_DIR)
-                if owner_pid in (None, os.getpid()):
-                    os.remove(lock_path)
-        except OSError:
-            pass
+        """Remove `.session_active.lock` from all active session directories upon runner completion."""
+        seen = set()
+        candidates = list(self._app_session_dirs.values()) + [constants.SESSION_LOG_DIR]
+        for session_dir in candidates:
+            norm = os.path.abspath(session_dir)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            lock_path = os.path.join(norm, self.ACTIVE_SESSION_LOCK_FILE)
+            try:
+                if os.path.isfile(lock_path):
+                    owner_pid = self._read_session_lock_pid(norm)
+                    if owner_pid in (None, os.getpid()):
+                        os.remove(lock_path)
+            except OSError:
+                pass
+
+    def _switch_session_log_dir_for_app(self, app_name: str) -> None:
+        """Point `constants.SESSION_LOG_DIR` (and Main/Additional subdirs) to `app_name`'s folder."""
+        app_key = (app_name or self.project_name or "igha").lower()
+        target_dir = self._app_session_dirs.get(app_key)
+        if not target_dir:
+            return
+        constants.SESSION_LOG_DIR = target_dir
+        constants.MAIN_LOG_DIR = os.path.join(target_dir, "Main log")
+        constants.ADDITIONAL_LOG_DIR = os.path.join(target_dir, "Additional log")
+        self._mark_session_active(target_dir)
 
     def _configure_process_session_log_dir(self) -> None:
-        """Ensure constants.SESSION_LOG_DIR will not collide with another concurrent terminal."""
+        """Ensure each app in this run gets its own local log folder and avoids terminal collisions."""
         current_dir = os.path.abspath(constants.SESSION_LOG_DIR)
         claimed_by_other = os.path.isdir(current_dir) and self._is_session_dir_active(
             current_dir, ignore_current_pid=True
         )
-        if not self._multi_session_requested and not claimed_by_other:
+        if len(self.app_names) == 1 and not self._multi_session_requested and not claimed_by_other:
+            self._app_session_dirs[self.project_name] = current_dir
             return
 
         logs_root = os.path.dirname(current_dir)
-        ts_part = getattr(constants, "TIMESTAMP", None) or datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts_part = self._session_ts
         udid_tag = self._short_udid_tag(self.udid, self.wda_local_port)
-        candidate = os.path.join(logs_root, f"LOG_{ts_part}_{self.project_tag}_{udid_tag}")
-        if os.path.isdir(candidate) and self._is_session_dir_active(candidate,
-                                                                    ignore_current_pid=True):
-            candidate = f"{candidate}_{os.getpid()}"
+        base_name = os.path.basename(current_dir)
+        use_udid_suffix = (
+                self._multi_session_requested
+                or claimed_by_other
+                or (udid_tag and f"_{udid_tag}" in base_name)
+                or (bool(self.udid) and len(self.app_names) > 1)
+        )
 
-        constants.SESSION_LOG_DIR = candidate
-        constants.MAIN_LOG_DIR = os.path.join(candidate, "Main log")
-        constants.ADDITIONAL_LOG_DIR = os.path.join(candidate, "Additional log")
+        for app_item in self.app_names:
+            dir_name = (
+                f"LOG_{ts_part}_{app_item}_{udid_tag}"
+                if use_udid_suffix
+                else f"LOG_{ts_part}_{app_item}"
+            )
+            candidate = os.path.join(logs_root, dir_name)
+            if os.path.isdir(candidate) and self._is_session_dir_active(candidate,
+                                                                        ignore_current_pid=True):
+                candidate = f"{candidate}_{os.getpid()}"
+            self._app_session_dirs[app_item] = os.path.abspath(candidate)
+
+        if len(self.app_names) > 1 and current_dir not in self._app_session_dirs.values():
+            if os.path.isdir(current_dir):
+                try:
+                    for sub in ("Main log", "Additional log"):
+                        sub_p = os.path.join(current_dir, sub)
+                        if os.path.isdir(sub_p) and not os.listdir(sub_p):
+                            os.rmdir(sub_p)
+                    if not os.listdir(current_dir):
+                        os.rmdir(current_dir)
+                except OSError:
+                    pass
+
+        self._switch_session_log_dir_for_app(self.project_name)
 
     @staticmethod
     @contextmanager
@@ -585,57 +665,100 @@ class MultiProjectTestRunner:
         logger.info(f"[DISK GUARD] Disk space after cleanup: {new_free_gb:.2f} GB free.")
 
     def _drive_reserve_case_folder(
-            self, iteration: int, test_status: str, device: Optional[str], class_name: str,
-            test_name: str
+            self,
+            iteration: int,
+            test_status: str,
+            device: Optional[str],
+            class_name: str,
+            test_name: str,
+            app_name: Optional[str] = None,
     ) -> Tuple[Optional[str], str]:
         """Create the Drive folder for this test case. Returns (folder_id, url) or (None, '')."""
-        if not self.drive_uploader:
+        app_key = (app_name or self.project_name or "igha").lower()
+        uploader = self._drive_uploaders_by_app.get(app_key, self.drive_uploader)
+        if not uploader:
             return None, ""
+        run_folder = self._drive_run_folders_by_app.get(app_key, self.drive_run_folder_name)
         folder_name = self._safe_drive_name(
             f"iter{iteration:03d}_{test_status}_{device or 'unknown'}_{class_name}.{test_name}"
         )
-        reserved = self.drive_uploader.reserve_folder(self.drive_run_folder_name, folder_name)
-        if not reserved:
+        reserved = uploader.reserve_folder(run_folder, folder_name)
+        if not isinstance(reserved, (tuple, list)) or len(reserved) != 2:
             return None, ""
         folder_id, url = reserved
-        logger.info(f"[DRIVE] Case folder: {url}")
+        logger.info(f"[DRIVE] [{app_key}] Case folder: {url}")
         return folder_id, url
 
-    def _drive_upload_case_dir(self, folder_id: Optional[str], case_dir: str, label: str) -> None:
-        """Queue background upload of the whole case directory."""
-        if not self.drive_uploader or not folder_id:
+    def _drive_upload_case_dir(
+            self,
+            folder_id: Optional[str],
+            case_dir: str,
+            label: str,
+            app_name: Optional[str] = None,
+    ) -> None:
+        """Queue background upload of the whole case directory into the app's Drive folder."""
+        app_key = (app_name or self.project_name or "igha").lower()
+        uploader = self._drive_uploaders_by_app.get(app_key, self.drive_uploader)
+        if not uploader or not folder_id:
             return
-        if self.drive_uploader.upload_async(folder_id, local_dir=case_dir, label=label):
+        if uploader.upload_async(folder_id, local_dir=case_dir, label=label):
             self._drive_last_case_folder_id = folder_id
+            self._drive_last_case_folder_id_by_app[app_key] = folder_id
 
     def _drive_finalize(self) -> None:
-        """Upload app container + session-level logs, then wait for all uploads to finish."""
-        if not self.drive_uploader:
+        """Upload per-app containers & session-level logs, then wait for all uploads to finish."""
+        active_uploaders: List[DriveUploader] = []
+        seen_ids = set()
+        for app_item in self.app_names:
+            up = self._drive_uploaders_by_app.get(app_item, self.drive_uploader)
+            if up and id(up) not in seen_ids:
+                seen_ids.add(id(up))
+                active_uploaders.append(up)
+        if not active_uploaders:
             return
+
         try:
-            reserved = self.drive_uploader.reserve_folder(self.drive_run_folder_name)
-            run_folder_id, run_url = reserved if reserved else (None, "")
-            if self._container_paths:
-                target = self._drive_last_case_folder_id or run_folder_id
-                if target:
-                    self.drive_uploader.upload_async(
-                        target, extra_paths=self._container_paths, label="app container")
-            session_dir = constants.SESSION_LOG_DIR
-            if run_folder_id and os.path.isdir(session_dir):
-                session_files = [
-                    os.path.join(session_dir, name)
-                    for name in sorted(os.listdir(session_dir))
-                    if not name.startswith(".") and os.path.isfile(os.path.join(session_dir, name))
-                ]
-                if session_files:
-                    self.drive_uploader.upload_async(
-                        run_folder_id, extra_paths=session_files, label="session logs")
-            logger.info(f"[DRIVE] Run folder: {run_url}")
+            for app_item in self.app_names:
+                up = self._drive_uploaders_by_app.get(app_item, self.drive_uploader)
+                if not up:
+                    continue
+                run_folder = self._drive_run_folders_by_app.get(app_item,
+                                                                self.drive_run_folder_name)
+                reserved = up.reserve_folder(run_folder)
+                run_folder_id, run_url = reserved if reserved else (None, "")
+                app_containers = self._container_paths_by_app.get(app_item) or (
+                    self._container_paths if app_item == self.project_name else []
+                )
+                if app_containers:
+                    target = (
+                            self._drive_last_case_folder_id_by_app.get(app_item)
+                            or self._drive_last_case_folder_id
+                            or run_folder_id
+                    )
+                    if target:
+                        up.upload_async(
+                            target, extra_paths=app_containers, label=f"{app_item} app container"
+                        )
+                session_dir = self._app_session_dirs.get(app_item, constants.SESSION_LOG_DIR)
+                if run_folder_id and os.path.isdir(session_dir):
+                    session_files = [
+                        os.path.join(session_dir, name)
+                        for name in sorted(os.listdir(session_dir))
+                        if
+                        not name.startswith(".") and os.path.isfile(os.path.join(session_dir, name))
+                    ]
+                    if session_files:
+                        up.upload_async(
+                            run_folder_id, extra_paths=session_files,
+                            label=f"{app_item} session logs"
+                        )
+                logger.info(f"[DRIVE] [{app_item}] Run folder: {run_url}")
             logger.info("[DRIVE] Waiting for uploads to finish... (Press Ctrl+C to skip)")
-            self.drive_uploader.wait_all(
-                timeout_s=getattr(constants, "DRIVE_UPLOAD_WAIT_TIMEOUT_S", 1800))
+            for up in active_uploaders:
+                up.wait_all(timeout_s=getattr(constants, "DRIVE_UPLOAD_WAIT_TIMEOUT_S", 1800))
         except KeyboardInterrupt:
-            self.drive_uploader.abort()
+            for up in active_uploaders:
+                up.abort()
             logger.warning("[DRIVE] Upload wait skipped by user.")
         except Exception as e:
             logger.warning(f"[DRIVE] Finalize failed: {e}")
@@ -838,7 +961,13 @@ class MultiProjectTestRunner:
         logger.info(f"       WDA Local Port     : {self.wda_local_port}")
         if self.mjpeg_server_port is not None:
             logger.info(f"       WDA MJPEG Port     : {self.mjpeg_server_port}")
-        logger.info(f"       Session Log Dir    : {constants.SESSION_LOG_DIR}")
+        if len(self.app_names) > 1:
+            for app_item in self.app_names:
+                logger.info(
+                    f"       Session Log [{app_item}] : {self._app_session_dirs.get(app_item, constants.SESSION_LOG_DIR)}"
+                )
+        else:
+            logger.info(f"       Session Log Dir    : {constants.SESSION_LOG_DIR}")
         if self.device_names:
             logger.info(f"       Target Devices     : {', '.join(self.device_names)}")
         elif self.device_name:
@@ -872,8 +1001,15 @@ class MultiProjectTestRunner:
             logger.info("-" * 65)
         if self.room_name:
             logger.info(f"       Assigned Room Name : {self.room_name}")
-        if self.drive_uploader:
-            logger.info(f"       Drive Run Folder   : {self.drive_run_folder_name}")
+        if any(self._drive_uploaders_by_app.values()) or self.drive_uploader:
+            if len(self.app_names) > 1:
+                for app_item in self.app_names:
+                    if self._drive_uploaders_by_app.get(app_item):
+                        logger.info(
+                            f"       Drive Run [{app_item}]   : {self._drive_run_folders_by_app.get(app_item)}"
+                        )
+            else:
+                logger.info(f"       Drive Run Folder   : {self.drive_run_folder_name}")
         targets = self.device_names or (
             [self.device_name] if isinstance(self.device_name, str) else [])
         first_adb = self.get_iteration_adb_serial(1)
@@ -912,7 +1048,8 @@ class MultiProjectTestRunner:
         logger.info("=" * 65)
         self._ensure_sufficient_disk_space()
         if self.driver:
-            bundles_to_pull: List[str] = []
+            all_pulled: List[str] = []
+            seen_bundles = set()
             for app_item in self.app_names:
                 if app_item == "att":
                     target_bundle = (
@@ -921,17 +1058,26 @@ class MultiProjectTestRunner:
                     )
                 else:
                     target_bundle = self._bundle_id_for_app(app_item, resolve_att=False)
-                if target_bundle and target_bundle not in bundles_to_pull:
-                    bundles_to_pull.append(target_bundle)
-            dest = logging_utils._current_main_log_dir or constants.SESSION_LOG_DIR
-            before = set(os.listdir(dest)) if os.path.isdir(dest) else set()
-            for target_bundle in bundles_to_pull:
+                if not target_bundle or target_bundle in seen_bundles:
+                    continue
+                seen_bundles.add(target_bundle)
+                dest = (
+                        self._app_session_dirs.get(app_item)
+                        or logging_utils._current_main_log_dir
+                        or constants.SESSION_LOG_DIR
+                )
+                os.makedirs(dest, exist_ok=True)
+                before = set(os.listdir(dest)) if os.path.isdir(dest) else set()
                 try:
                     logging_utils.pull_ios_app_container(self.driver, target_bundle, dest)
                 except Exception as e:
                     logger.error(f"Failed to pull {target_bundle} container: {e}")
-            after = set(os.listdir(dest)) if os.path.isdir(dest) else set()
-            self._container_paths = [os.path.join(dest, name) for name in sorted(after - before)]
+                after = set(os.listdir(dest)) if os.path.isdir(dest) else set()
+                newly_pulled = [os.path.join(dest, name) for name in sorted(after - before)]
+                if newly_pulled:
+                    self._container_paths_by_app[app_item] = newly_pulled
+                    all_pulled.extend(newly_pulled)
+            self._container_paths = all_pulled
             if self._container_paths:
                 logger.info(
                     f"[DRIVE] App container artifacts queued for upload: {self._container_paths}")
@@ -940,15 +1086,22 @@ class MultiProjectTestRunner:
         if self.syslog_collector:
             self.syslog_collector.stop()
         self._stop_device_log()  # [DEVICE LOG]
-        for extra in [os.path.join(constants.SESSION_LOG_DIR, "Main log"),
-                      os.path.join(constants.SESSION_LOG_DIR, "Additional log")]:
-            if os.path.exists(extra) and not os.listdir(extra):
-                try:
-                    os.rmdir(extra)
-                except Exception:
-                    pass
+        for s_dir in list(
+                dict.fromkeys(list(self._app_session_dirs.values()) + [constants.SESSION_LOG_DIR])):
+            for extra in [os.path.join(s_dir, "Main log"), os.path.join(s_dir, "Additional log")]:
+                if os.path.exists(extra) and not os.listdir(extra):
+                    try:
+                        os.rmdir(extra)
+                    except Exception:
+                        pass
         logger.info("=" * 65)
-        logger.info(f"Artifacts and Logs stored in: {constants.SESSION_LOG_DIR}")
+        if len(self.app_names) > 1:
+            for app_item in self.app_names:
+                logger.info(
+                    f"Artifacts and Logs [{app_item}] stored in: {self._app_session_dirs.get(app_item)}"
+                )
+        else:
+            logger.info(f"Artifacts and Logs stored in: {constants.SESSION_LOG_DIR}")
         logger.info("=" * 65)
 
     def _get_project_suite(self, app_name: Optional[str] = None) -> Tuple[Any, List[Type]]:
@@ -1017,6 +1170,7 @@ class MultiProjectTestRunner:
                             f"\n[MULTI-APP] Completed all devices for '{prev_app}'. "
                             f"Switching to next app '{current_app}' (Cycle #{cycle_num})..."
                         )
+                    self._switch_session_log_dir_for_app(current_app)
                     self._activate_app_context(current_app)
                     prev_app = current_app
 
@@ -1356,7 +1510,12 @@ class MultiProjectTestRunner:
                                 logger.info(f"[FAILURE ATTRIBUTION] Failing step: {failure_stage}")
                             # [DRIVE] Reserve the Drive folder first so its URL can go into CSV / Sheet.
                             drive_folder_id, drive_url = self._drive_reserve_case_folder(
-                                iteration, test_status, current_device, class_name, test_name
+                                iteration,
+                                test_status,
+                                current_device,
+                                class_name,
+                                test_name,
+                                app_name=current_app,
                             )
                             csv_kwargs = dict(
                                 test_name=f"{class_name}.{test_name}",
@@ -1406,8 +1565,10 @@ class MultiProjectTestRunner:
                             except Exception as csv_err:
                                 logger.warning(
                                     f"Failed to record result to CSV / Google Sheet: {csv_err}")
-                            self._drive_upload_case_dir(drive_folder_id, case_dir,
-                                                        label=child_folder_name)
+                            self._drive_upload_case_dir(
+                                drive_folder_id, case_dir, label=child_folder_name,
+                                app_name=current_app
+                            )
                             self._completed_case_dirs.append(case_dir)
         except KeyboardInterrupt:
             logger.info(
