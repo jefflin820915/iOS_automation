@@ -803,8 +803,116 @@ class GHPCommissioningPageObject(BasePage):
     # 3. Apple Matter Commissioning Sheets ('Add to Google Home', 'Uncertified',
     #    'Additional Setup Required', Location/Room, Custom Name, 'Done', and Failure Detection)
     # -------------------------------------------------------------------------
+    def _cm_format_apple_failure_details(
+            self, matched_elem: Optional[WebElement], matched_raw_text: str
+    ) -> str:
+        """Collect Apple failure card title + middle body message without leaking background Devices tiles."""
+        norm_matched = " ".join((matched_raw_text or "").split())
+        parts: List[str] = []
+        seen_low: Set[str] = set()
+
+        def _push(txt: str) -> None:
+            clean = " ".join((txt or "").split())
+            if not clean:
+                return
+            low = clean.lower()
+            if low in self.APPLE_IGNORED_BUTTON_TITLES or low in seen_low:
+                return
+            if re.fullmatch(r"\d{1,2}:\d{2}", clean) or re.fullmatch(r"\d{1,3}%", clean):
+                return
+            seen_low.add(low)
+            parts.append(clean)
+
+        # 1. Prefer SBTransientOverlayWindow (isolated from background GHP Devices tab)
+        overlay_text_chain = (
+            f"{self.APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeStaticText[`visible == 1`]"
+        )
+        overlay_tvs = self._cm_find_all(IOS_CLASS_CHAIN_BY, self.APPLE_CARD_TITLE_CHAIN)
+        overlay_sts = self._cm_find_all(IOS_CLASS_CHAIN_BY, overlay_text_chain)
+        if overlay_tvs or overlay_sts:
+            for el in overlay_tvs:
+                if self._cm_is_visible(el):
+                    _push(self._cm_read_text(el))
+            for el in overlay_sts:
+                if self._cm_is_visible(el):
+                    _push(self._cm_read_text(el))
+            if norm_matched and norm_matched.lower() not in seen_low:
+                parts.insert(0, norm_matched)
+            return " | ".join(parts) if parts else (
+                        norm_matched or "Apple Matter Commissioning Failed")
+
+        # 2. If the failure came from a nested UIAlert, collect its children first
+        matched_type = ""
+        matched_y: Optional[float] = None
+        if matched_elem is not None:
+            try:
+                matched_type = str(matched_elem.get_attribute("type") or "")
+            except WebDriverException:
+                matched_type = ""
+            try:
+                r = matched_elem.rect
+                if isinstance(r, dict) and r.get("y") is not None:
+                    matched_y = float(r["y"])
+            except WebDriverException:
+                matched_y = None
+            if matched_type == "XCUIElementTypeAlert":
+                for cls_name in ("XCUIElementTypeTextView", "XCUIElementTypeStaticText"):
+                    for child in self._cm_find_all(AppiumBy.CLASS_NAME, cls_name,
+                                                   root=matched_elem):
+                        _push(self._cm_read_text(child))
+                if norm_matched:
+                    for line in matched_raw_text.splitlines():
+                        _push(line)
+                return " | ".join(parts) if parts else norm_matched
+
+        # 3. PRXCard hosted in active hierarchy: title lives in XCUIElementTypeTextView,
+        #    middle subtitle lives in XCUIElementTypeStaticText just below the title.
+        card_top_y: Optional[float] = None
+        tvs = self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeTextView")
+        for tv in tvs:
+            if not self._cm_is_visible(tv):
+                continue
+            txt = self._cm_read_text(tv)
+            if not txt:
+                continue
+            _push(txt)
+            try:
+                r = tv.rect
+                if isinstance(r, dict) and r.get("y") is not None:
+                    ty = float(r["y"])
+                    if card_top_y is None or ty < card_top_y:
+                        card_top_y = ty
+            except WebDriverException:
+                pass
+
+        if card_top_y is None:
+            card_top_y = matched_y
+
+        ignored_bg_statuses = {"on", "off", "no devices in this room"}
+        for st in self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText"):
+            if not self._cm_is_visible(st):
+                continue
+            try:
+                r = st.rect
+                sy = float(r["y"]) if isinstance(r, dict) and r.get("y") is not None else None
+            except WebDriverException:
+                sy = None
+            if card_top_y is not None and sy is not None:
+                if sy < (card_top_y - 12.0) or sy > (card_top_y + 220.0):
+                    continue
+            elif sy is not None and sy < 55.0:
+                continue
+            txt = self._cm_read_text(st)
+            if not txt or " ".join(txt.split()).lower() in ignored_bg_statuses:
+                continue
+            _push(txt)
+
+        if norm_matched and norm_matched.lower() not in seen_low:
+            parts.insert(0, norm_matched)
+        return " | ".join(parts) if parts else (norm_matched or "Apple Matter Commissioning Failed")
+
     def _cm_detect_apple_failure_title(self, include_overlay_scan: bool = True) -> Optional[str]:
-        """Return matching Apple Matter failure text if a failure card/alert is on screen.
+        """Return matching Apple Matter failure text (including subtitle) if a failure card/alert is on screen.
 
         Normalizes newlines/whitespace so wrapped titles such as 'Unable to\\nAdd Accessory'
         (inside either the active tree or SBTransientOverlayWindow) are detected immediately.
@@ -812,7 +920,8 @@ class GHPCommissioningPageObject(BasePage):
         sb_fail = getattr(self, "_cm_springboard_failure_title", "") or ""
         if sb_fail:
             self._cm_springboard_failure_title = ""
-            return " ".join(sb_fail.split()) or sb_fail
+            lines = [" ".join(line.split()) for line in sb_fail.splitlines() if line.strip()]
+            return " | ".join(lines) if lines else (" ".join(sb_fail.split()) or sb_fail)
 
         clauses = " OR ".join(
             f'label CONTAINS[c] "{kw}" OR name CONTAINS[c] "{kw}" OR value CONTAINS[c] "{kw}"'
@@ -825,8 +934,7 @@ class GHPCommissioningPageObject(BasePage):
         elem = self._cm_find_displayed(IOS_PREDICATE_BY, predicate, allow_hidden=True)
         if elem is not None:
             raw = self._cm_read_text(elem)
-            norm = " ".join(raw.split()) if raw else ""
-            return norm or "Apple Matter Commissioning Failed"
+            return self._cm_format_apple_failure_details(elem, raw)
 
         if not include_overlay_scan:
             return None
@@ -850,7 +958,7 @@ class GHPCommissioningPageObject(BasePage):
                 raw = self._cm_read_text(cand)
                 norm = " ".join(raw.split()) if raw else ""
                 if norm and _contains_any(norm, self.APPLE_FAILURE_KEYWORDS):
-                    return norm
+                    return self._cm_format_apple_failure_details(cand, raw)
         return None
 
     def _cm_tap_springboard_alert_button_fallback(self, button_label: str) -> bool:
