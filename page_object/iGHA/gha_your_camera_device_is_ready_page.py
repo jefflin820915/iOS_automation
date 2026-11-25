@@ -37,13 +37,64 @@ class GHAYourCameraDeviceIsReadyPage(BasePage):
         ),
         (AppiumBy.ACCESSIBILITY_ID, getattr(constants, "GHA_DONE_BTN_ACCESSIBILITY_ID", "Done")),
         (AppiumBy.ACCESSIBILITY_ID, "Done"),
-        (AppiumBy.ACCESSIBILITY_ID, getattr(constants, "GHA_NEXT_BTN_ACCESSIBILITY_ID", "actionBarPrimaryButton")),
+        (AppiumBy.ACCESSIBILITY_ID,
+         getattr(constants, "GHA_NEXT_BTN_ACCESSIBILITY_ID", "actionBarPrimaryButton")),
         (
             AppiumBy.XPATH,
             '//XCUIElementTypeButton[@name="Done" or @label="Done" or @name="actionBarPrimaryButton"]',
         ),
     ]
     READY_HOME_GRID_LOCATOR: Locator = (AppiumBy.ACCESSIBILITY_ID, "deviceTileGridCollectionView")
+    READY_LOADING_LOCATOR: Locator = (
+        AppiumBy.IOS_PREDICATE,
+        'type == "XCUIElementTypeActivityIndicator" AND visible == 1',
+    )
+    READY_STAY_IN_KNOW_LOCATOR: Locator = (
+        AppiumBy.IOS_PREDICATE,
+        'type IN {"XCUIElementTypeStaticText", "XCUIElementTypeTextView", "XCUIElementTypeOther"} AND ('
+        'label CONTAINS[c] "Stay in the know" OR name CONTAINS[c] "Stay in the know" '
+        'OR label CONTAINS[c] "Stay up to date on Google Home")',
+    )
+    READY_NO_THANKS_LOCATORS: Tuple[Locator, ...] = (
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND ('
+            'label == "No thanks" OR name == "No thanks" OR name == "actionBarSecondaryButton")',
+        ),
+        (AppiumBy.ACCESSIBILITY_ID, "No thanks"),
+    )
+    READY_UPSTREAM_OPT_DISMISS_LOCATORS: Tuple[Tuple[str, Tuple[Locator, ...]], ...] = (
+        (
+            "Familiar face detection",
+            (
+                (
+                    AppiumBy.IOS_PREDICATE,
+                    'type == "XCUIElementTypeStaticText" AND ('
+                    'label == "Familiar face detection" OR name == "Familiar face detection")',
+                ),
+            ),
+        ),
+        (
+            "Notifications from partner",
+            (
+                (
+                    AppiumBy.IOS_PREDICATE,
+                    'type == "XCUIElementTypeStaticText" AND ('
+                    'label BEGINSWITH[c] "Notifications from the" '
+                    'OR name BEGINSWITH[c] "Notifications from the" '
+                    'OR label CONTAINS[c] "notifications from the Google Home app")',
+                ),
+            ),
+        ),
+    )
+    READY_UPSTREAM_BTN_LOCATORS: Tuple[Locator, ...] = (
+        (
+            AppiumBy.IOS_PREDICATE,
+            'type == "XCUIElementTypeButton" AND ('
+            'label IN {"Skip", "Next", "Not now", "No thanks"} '
+            'OR name IN {"Skip", "Next", "Not now", "No thanks", "actionBarSecondaryButton"})',
+        ),
+    )
     READY_FALLBACK_DONE_COORDS: Tuple[int, int] = (335, 790)
     READY_PAGE_TIMEOUT = 120.0
     READY_BTN_SETTLE_TIMEOUT = 5.0
@@ -144,7 +195,8 @@ class GHAYourCameraDeviceIsReadyPage(BasePage):
                 consecutive_gone += 1
                 if consecutive_gone >= 2:
                     return True
-                if self._ready_find_first([self.READY_HOME_GRID_LOCATOR], allow_hidden=True) is not None:
+                if self._ready_find_first([self.READY_HOME_GRID_LOCATOR],
+                                          allow_hidden=True) is not None:
                     return True
             else:
                 consecutive_gone = 0
@@ -185,16 +237,21 @@ class GHAYourCameraDeviceIsReadyPage(BasePage):
                 fx, fy = self.READY_FALLBACK_DONE_COORDS
                 self._ready_tap_coordinates(fx, fy)
                 return
+
             rect = None
             try:
                 rect = btn.rect
             except Exception:
                 pass
+
             displayed = False
             try:
                 displayed = btn.is_displayed()
             except Exception:
                 pass
+
+            # When XCUITest marks the button as visible=false (displayed=False) or on retry attempts,
+            # standard btn.click() can be silently ignored by XCUITest, so use coordinate tap.
             if not force_coordinates and displayed:
                 try:
                     btn.click()
@@ -203,11 +260,13 @@ class GHAYourCameraDeviceIsReadyPage(BasePage):
                     self._logger.warning(
                         f"[CameraReady] Direct click() failed ({click_err}); falling back to coordinate tap..."
                     )
+
             if rect and rect.get("width", 0) > 0 and rect.get("height", 0) > 0:
                 cx = int(rect["x"] + rect["width"] / 2)
                 cy = int(rect["y"] + rect["height"] / 2)
                 self._ready_tap_coordinates(cx, cy)
                 return
+
             try:
                 self.driver.execute_script("mobile: tap", {"elementId": btn.id})
                 return
@@ -215,8 +274,69 @@ class GHAYourCameraDeviceIsReadyPage(BasePage):
                 fx, fy = self.READY_FALLBACK_DONE_COORDS
                 self._ready_tap_coordinates(fx, fy)
 
+    def _ready_is_spinner_visible(self) -> bool:
+        elem = self._ready_find_first([self.READY_LOADING_LOCATOR], allow_hidden=False)
+        return elem is not None
+
+    def _ready_wait_for_ready_page(self, timeout: float) -> Optional[WebElement]:
+        """Wait for 'Your camera device is ready', waiting out slow 'Stay in the know' spinners or advancing late OOBE pages."""
+        deadline = time.time() + timeout
+        last_upstream_action_at: Optional[float] = None
+        logged_spinner = False
+        while True:
+            elem = self._ready_find_first(self.READY_HEADLINE_LOCATORS, allow_hidden=True)
+            if elem is not None or time.time() >= deadline:
+                return elem
+
+            if self._ready_is_spinner_visible():
+                if not logged_spinner:
+                    self._logger.info(
+                        "[CameraReady] Upstream OOBE screen is still loading (spinner active); waiting before advancing..."
+                    )
+                    logged_spinner = True
+            else:
+                logged_spinner = False
+                now = time.time()
+                if last_upstream_action_at is None or (now - last_upstream_action_at) >= 3.0:
+                    if self._ready_find_first([self.READY_STAY_IN_KNOW_LOCATOR],
+                                              allow_hidden=True) is not None:
+                        no_thanks = self._ready_find_first(self.READY_NO_THANKS_LOCATORS,
+                                                           allow_hidden=True)
+                        try:
+                            enabled = no_thanks is not None and getattr(no_thanks, "is_enabled",
+                                                                        lambda: True)()
+                        except WebDriverException:
+                            enabled = False
+                        if enabled and no_thanks is not None:
+                            self._logger.warning(
+                                "[CameraReady] Upstream 'Stay in the know' is still open and idle; tapping 'No thanks'..."
+                            )
+                            try:
+                                self._ready_tap(no_thanks, force_coordinates=True)
+                            except WebDriverException:
+                                pass
+                            last_upstream_action_at = time.time()
+                    else:
+                        for name, locators in self.READY_UPSTREAM_OPT_DISMISS_LOCATORS:
+                            if self._ready_find_first(locators, allow_hidden=True) is not None:
+                                up_btn = self._ready_find_first(self.READY_UPSTREAM_BTN_LOCATORS,
+                                                                allow_hidden=True)
+                                if up_btn is not None:
+                                    self._logger.warning(
+                                        f"[CameraReady] Upstream late OOBE screen '{name}' appeared; tapping action button..."
+                                    )
+                                    try:
+                                        self._ready_tap(up_btn, force_coordinates=True)
+                                    except WebDriverException:
+                                        pass
+                                    last_upstream_action_at = time.time()
+                                break
+
+            time.sleep(self.READY_POLL_INTERVAL)
+
     def is_your_camera_device_is_ready_page(self, timeout: float = 0) -> bool:
-        return self._ready_wait_for(self.READY_HEADLINE_LOCATORS, timeout, allow_hidden=True) is not None
+        return self._ready_wait_for(self.READY_HEADLINE_LOCATORS, timeout,
+                                    allow_hidden=True) is not None
 
     def click_done_btn(self) -> bool:
         """Wait for the 'Your camera device is ready' page, tap 'Done', and verify the page closed.
@@ -224,23 +344,26 @@ class GHAYourCameraDeviceIsReadyPage(BasePage):
             True if the page was left successfully, False otherwise.
         """
         self._logger.info("[CameraReady] Waiting for 'Your camera device is ready' page...")
-        if self._ready_wait_for(self.READY_HEADLINE_LOCATORS, self.READY_PAGE_TIMEOUT, allow_hidden=True) is None:
+        if self._ready_wait_for_ready_page(self.READY_PAGE_TIMEOUT) is None:
             self._logger.error(
                 f"[CameraReady] Page did not appear within {self.READY_PAGE_TIMEOUT:.0f}s."
             )
             return False
+
         has_tapped_done = False
         for attempt in range(1, self.READY_MAX_ATTEMPTS + 1):
             btn = self._ready_wait_done_clickable()
             if btn is None:
                 # Only allow 'Page already closed' AFTER we have actually tapped 'Done' at least once!
                 if has_tapped_done and not self._ready_is_headline_in_dom():
-                    self._logger.info("[CameraReady] Page already closed after previous 'Done' tap.")
+                    self._logger.info(
+                        "[CameraReady] Page already closed after previous 'Done' tap.")
                     return True
                 self._logger.warning(
                     f"[CameraReady] 'Done' button element not found on attempt {attempt}/{self.READY_MAX_ATTEMPTS}; "
                     "using fallback coordinate tap..."
                 )
+
             force_coordinates = attempt > 1 or btn is None
             self._logger.info(
                 f"[CameraReady] Clicking 'Done' ({'coordinate tap' if force_coordinates else 'click'}, "
@@ -251,9 +374,11 @@ class GHAYourCameraDeviceIsReadyPage(BasePage):
                 has_tapped_done = True
             except WebDriverException as e:
                 self._logger.warning(f"[CameraReady] Tap on 'Done' failed: {e}")
+
             if self._ready_wait_gone(self.READY_LEAVE_TIMEOUT):
                 self._logger.info("[CameraReady] Left 'Your camera device is ready' page.")
                 return True
             self._logger.warning("[CameraReady] Still on page after tapping 'Done'. Retrying...")
+
         self._logger.error("[CameraReady] Failed to leave 'Your camera device is ready' page.")
         return False

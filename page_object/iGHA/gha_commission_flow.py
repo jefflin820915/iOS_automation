@@ -1718,7 +1718,7 @@ class GHACommissioningPageObject(BasePage):
         ]
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 600
+            self, device_name: str, room_name: str = "Attic", timeout: float = 900
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, OTA updates, and completion.
         If the flow hits `timeout`, restarts GHA and checks the 'All devices' page:
