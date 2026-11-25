@@ -38,6 +38,15 @@ class GHPDevicePage(BasePage):
         "error fetching",
     )
 
+    TRANSIENT_NOT_LIVE_STATUS_KEYWORDS: Tuple[str, ...] = (
+        "ready",
+        "initializing",
+        "connecting",
+        "updating",
+        "loading",
+        "setting up",
+    )
+
     TAB_PREDICATES = {
         "devices": 'type == "XCUIElementTypeButton" AND (name == "Devices" OR label == "Devices")',
         "automations": 'type == "XCUIElementTypeButton" AND (name == "Automations" OR label == "Automations")',
@@ -65,13 +74,21 @@ class GHPDevicePage(BasePage):
         '(type == "XCUIElementTypeButton" AND ('
         'name IN {"mic.slash.fill", "mic.fill", "google_symbols/mic_off_symbol", '
         '"google_symbols/mic_symbol", "Turn Camera OFF", "Turn Camera ON", '
-        '"Retry Connection", "Retry", "google_symbols/menu_symbol", "BackButton"} '
+        '"Retry Connection", "Retry", "Settings", "Go to live", "google_symbols/menu_symbol"} '
         'OR label IN {"Microphone Off", "Microphone On", "Turn Camera OFF", '
-        '"Turn Camera ON", "Retry Connection", "Retry"})) '
+        '"Turn Camera ON", "Retry Connection", "Retry", "Settings", "Go to live"})) '
         'OR (type == "XCUIElementTypeStaticText" AND ('
         'label IN {"Live", "Snapshot", "Camera is OFF", "Unable to play video."} '
         'OR label CONTAINS[c] "stream has disconnected" '
         'OR label CONTAINS[c] "device is offline"))'
+    )
+
+    NON_PLAYER_DETAILS_PREDICATE: str = (
+        '(type == "XCUIElementTypeStaticText" AND ('
+        'label IN {"Vendor Name", "Model Name", "Software Version", "Device Information", '
+        '"Diagnostics Settings", "Serial Number", "OTA Status"} '
+        'OR value IN {"Vendor Name", "Model Name", "Software Version", "Device Information"})) '
+        'OR (type == "XCUIElementTypeButton" AND (name == "Decommission" OR label == "Decommission"))'
     )
 
     def __init__(self, driver: WebDriver, timeout: float = 10.0) -> None:
@@ -388,8 +405,38 @@ class GHPDevicePage(BasePage):
             return "offline"
         return "online"
 
-    def _is_camera_live_page_open(self, device_name: str = "") -> bool:
-        """Return True if GHP has navigated away from Devices tab into Camera Live View."""
+    def _is_tile_status_pending_ready(self, status: str) -> bool:
+        """Return True when tile status is a transient pre-live state such as 'Ready'."""
+        low = self._norm(status)
+        if not low:
+            return False
+        return any(kw in low for kw in self.TRANSIENT_NOT_LIVE_STATUS_KEYWORDS)
+
+    def _pull_down_to_refresh_devices(self) -> None:
+        """Pull down on the Devices tab list to trigger a refresh of device tile statuses."""
+        try:
+            win = self.driver.get_window_size()
+            w = int(win.get("width", 390))
+            h = int(win.get("height", 844))
+        except Exception:
+            w, h = 390, 844
+        cx = w // 2
+        try:
+            self.driver.execute_script(
+                "mobile: dragFromToForDuration",
+                {
+                    "duration": 0.35,
+                    "fromX": cx,
+                    "fromY": int(h * 0.24),
+                    "toX": cx,
+                    "toY": int(h * 0.72),
+                },
+            )
+            time.sleep(1.5)
+        except WebDriverException:
+            pass
+
+    def _has_live_player_controls(self) -> bool:
         with self._fast_probe():
             try:
                 markers = self.driver.find_elements(IOS_PREDICATE_BY,
@@ -399,8 +446,31 @@ class GHPDevicePage(BasePage):
                         return True
             except WebDriverException:
                 pass
-            if device_name and not self._is_tab_bar_visible():
-                escaped = device_name.strip().replace('"', '\\"')
+        return False
+
+    def _is_non_player_device_details_open(self) -> bool:
+        """Return True if tapping a 'Ready' tile opened Device Info / Settings without a Live player."""
+        if self._is_tab_bar_visible() or self._has_live_player_controls():
+            return False
+        with self._fast_probe():
+            try:
+                elems = self.driver.find_elements(IOS_PREDICATE_BY,
+                                                  self.NON_PLAYER_DETAILS_PREDICATE)
+                return any(e.is_displayed() for e in elems)
+            except WebDriverException:
+                return False
+
+    def _is_camera_live_page_open(self, device_name: str = "") -> bool:
+        """Return True if GHP has navigated away from Devices tab into Camera Live View."""
+        if self._is_tab_bar_visible():
+            return False
+        if self._has_live_player_controls():
+            return True
+        if self._is_non_player_device_details_open():
+            return False
+        if device_name:
+            escaped = device_name.strip().replace('"', '\\"')
+            with self._fast_probe():
                 try:
                     titles = self.driver.find_elements(
                         IOS_PREDICATE_BY,
@@ -411,6 +481,53 @@ class GHPDevicePage(BasePage):
                 except WebDriverException:
                     pass
         return False
+
+    def _wait_until_camera_tile_ready(
+            self,
+            target_name: str,
+            initial_hit: Tuple[WebElement, str, str],
+            max_scrolls: int = 8,
+            ready_wait_timeout: float = 60.0,
+    ) -> Tuple[WebElement, str, str]:
+        """Wait & pull-to-refresh while a newly paired camera shows 'Ready' until it transitions to 'On'."""
+        tile, title, status = initial_hit
+        if not self._is_tile_status_pending_ready(status) or ready_wait_timeout <= 0:
+            return tile, title, status
+
+        self._logger.info(
+            f"[Device Status] '{title}' currently shows '{status}'. "
+            f"Waiting for status -> 'On' before entering Camera Live View (up to {int(ready_wait_timeout)}s)..."
+        )
+        deadline = time.time() + ready_wait_timeout
+        last_logged_status = status
+        poll_count = 0
+
+        while time.time() < deadline:
+            time.sleep(2.0)
+            poll_count += 1
+            if poll_count % 3 == 0:
+                self._pull_down_to_refresh_devices()
+
+            fresh = self._find_visible_tile_for_name(title) or self._locate_device_tile_with_scroll(
+                target_name, max_scrolls=max_scrolls
+            )
+            if fresh is None:
+                continue
+            tile, title, status = fresh
+            if status != last_logged_status:
+                self._logger.info(f"[Device Status] '{title}' status update: '{status}'")
+                last_logged_status = status
+            if not self._is_tile_status_pending_ready(status):
+                self._logger.info(
+                    f"[Device Status] '{title}' transitioned to '{status}'. Entering Camera Live View..."
+                )
+                return tile, title, status
+
+        self._logger.warning(
+            f"[Device Status] '{title}' is still '{status}' after {int(ready_wait_timeout)}s; "
+            "attempting entry anyway..."
+        )
+        return tile, title, status
 
     def is_device_exist_device_page(self, device_name: Optional[str] = None,
                                     max_scrolls: int = 8) -> bool:
@@ -430,8 +547,13 @@ class GHPDevicePage(BasePage):
             f"Confirmed device '{title}' exists on GHP Devices tab (status='{status}').")
         return True
 
-    def enter_device_page(self, device_name: Optional[str] = None, max_scrolls: int = 8) -> bool:
-        """Tap the target camera tile on GHP Devices tab and verify Camera Live View opens."""
+    def enter_device_page(
+            self,
+            device_name: Optional[str] = None,
+            max_scrolls: int = 8,
+            ready_wait_timeout: float = 60.0,
+    ) -> bool:
+        """Wait for 'Ready' -> 'On' if needed, tap the camera tile, and verify Camera Live View opens."""
         page = GHPDevicePage._resolve_page(self)
         target = str(device_name or getattr(self, "device_name", "") or "").strip()
         page._logger.info(f"Entering GHP Camera Live page for '{target}'...")
@@ -447,22 +569,54 @@ class GHPDevicePage(BasePage):
             BasePage.capture_failure_screenshot(page.driver, reason=msg, force=False, lock=True)
             raise AssertionError(msg)
 
-        tile, title, status = hit
+        ready_deadline = time.time() + ready_wait_timeout
+        tile, title, status = page._wait_until_camera_tile_ready(
+            target, hit, max_scrolls=max_scrolls, ready_wait_timeout=ready_wait_timeout
+        )
         tile = page._ensure_tile_in_safe_tap_zone(tile, title)
-        for attempt in range(1, 3):
+
+        for attempt in range(1, 4):
             page._logger.info(
-                f"Tapping camera tile '{title}' (status='{status}', attempt {attempt}/2)..."
+                f"Tapping camera tile '{title}' (status='{status}', attempt {attempt}/3)..."
             )
             page._tap_element_or_coords(tile, desc=f"Camera tile '{title}'")
             deadline = time.time() + 6.0
+            opened_non_player = False
             while time.time() < deadline:
                 if page._is_camera_live_page_open(title):
                     page._logger.info(f"Successfully entered Camera Live page for '{title}'.")
                     return True
+                if page._is_non_player_device_details_open():
+                    opened_non_player = True
+                    break
                 time.sleep(0.5)
+
+            if opened_non_player:
+                page._logger.warning(
+                    f"[Device Entry] Tapping '{title}' (status='{status}') opened non-player "
+                    "Device Details page instead of Camera Live View. Navigating back to wait for 'On'..."
+                )
+                page._exit_subview_to_tabs_if_needed()
+                page.go_to_tab("Devices")
+                page._pull_down_to_refresh_devices()
+                remaining = max(0.0, ready_deadline - time.time())
+                fresh_hit = page._find_visible_tile_for_name(
+                    title) or page._locate_device_tile_with_scroll(
+                    target, max_scrolls=max_scrolls
+                )
+                if fresh_hit is not None:
+                    tile, title, status = page._wait_until_camera_tile_ready(
+                        target,
+                        fresh_hit,
+                        max_scrolls=max_scrolls,
+                        ready_wait_timeout=min(remaining, 20.0),
+                    )
+                    tile = page._ensure_tile_in_safe_tap_zone(tile, title)
+                continue
+
             fresh = page._find_visible_tile_for_name(title)
             if fresh is not None:
-                tile = fresh[0]
+                tile, title, status = fresh
 
         msg = f"Tapped camera tile '{title}' on GHP Devices tab, but Camera Live page did not open."
         page._logger.error(msg)
