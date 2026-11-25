@@ -198,12 +198,15 @@ class GHPCommissioningPageObject(BasePage):
     )
     ENTER_CODE_LINK_PREDICATE: str = (
         'type IN {"XCUIElementTypeLink", "XCUIElementTypeButton"} AND ('
-        'name CONTAINS[c] "Enter code" OR label CONTAINS[c] "Enter code")'
+        'name CONTAINS[c] "Enter code" OR label CONTAINS[c] "Enter code" '
+        'OR (name CONTAINS[c] "Enter" AND name CONTAINS[c] "code") '
+        'OR (label CONTAINS[c] "Enter" AND label CONTAINS[c] "code"))'
     )
     ENTER_CODE_TEXTVIEW_PREDICATE: str = (
         'type IN {"XCUIElementTypeTextView", "XCUIElementTypeStaticText"} AND ('
         'value CONTAINS[c] "manually enter the setup code" '
-        'OR label CONTAINS[c] "manually enter the setup code")'
+        'OR label CONTAINS[c] "manually enter the setup code" '
+        'OR value CONTAINS[c] "manually enter" OR label CONTAINS[c] "manually enter")'
     )
     SETUP_CODE_HEADER_PREDICATE: str = (
         'type IN {"XCUIElementTypeTextView", "XCUIElementTypeStaticText", '
@@ -603,7 +606,7 @@ class GHPCommissioningPageObject(BasePage):
                 time.sleep(0.08)
         return True
 
-    def _cm_enter_pairing_code_steps(self, pairing_code: str, timeout: float = 45.0) -> Optional[
+    def _cm_enter_pairing_code_steps(self, pairing_code: str, timeout: float = 90.0) -> Optional[
         str]:
         """Walk Apple HomeUIService sheet from 'Add Accessory' to submitting 'Setup Code'."""
         digits = "".join(ch for ch in str(pairing_code or "") if ch.isdigit())
@@ -621,17 +624,20 @@ class GHPCommissioningPageObject(BasePage):
         enter_code_clicks = 0
 
         while time.time() < deadline:
-            # Accept any benign iOS system alert (e.g. Local Network / Bluetooth 'Allow' / 'OK',
-            # or 'Additional Setup Required' -> 'OK') before inspecting cards underneath.
-            # Note: _cm_handle_apple_system_alert() also checks failure keywords internally so we
-            # avoid running _cm_detect_apple_failure_title() redundantly before it.
-            if self._cm_handle_apple_system_alert():
-                time.sleep(0.8)
-                continue
-
-            apple_err = self._cm_detect_apple_failure_title()
+            # Fast single-query check for terminal Apple error cards (e.g. 'Unable to Add Accessory')
+            apple_err = self._cm_detect_apple_failure_title(include_overlay_scan=False)
             if apple_err:
                 return f"Apple sheet reported failure while entering setup code: '{apple_err}'"
+
+            # Quick permission prompt check ('Allow') without scanning every alert button variant
+            allow_btn = self._cm_find_displayed(
+                IOS_PREDICATE_BY,
+                'type == "XCUIElementTypeButton" AND (name IN {"Allow", "允許"} OR label IN {"Allow", "允許"})',
+            )
+            if allow_btn is not None:
+                self._cm_click_or_tap(allow_btn, desc="System alert 'Allow'")
+                time.sleep(0.8)
+                continue
 
             # Screen 4: 'Setup Code' screen with XCUIElementTypeTextField + 'Continue'
             setup_hdr = self._cm_find_displayed(
@@ -761,8 +767,16 @@ class GHPCommissioningPageObject(BasePage):
                     f"(attempt {more_options_clicks}). Clicking..."
                 )
                 self._cm_tap_more_options_link(more_link, attempt=more_options_clicks)
-                time.sleep(1.5)
+                time.sleep(1.2)
                 continue
+
+            if self._cm_handle_apple_system_alert():
+                time.sleep(0.8)
+                continue
+
+            apple_err = self._cm_detect_apple_failure_title(include_overlay_scan=True)
+            if apple_err:
+                return f"Apple sheet reported failure while entering setup code: '{apple_err}'"
 
             time.sleep(0.6)
 
@@ -772,7 +786,7 @@ class GHPCommissioningPageObject(BasePage):
         )
 
     def enter_pairing_code_on_apple_sheet(
-            self, pairing_code: Optional[str] = None, timeout: float = 45.0
+            self, pairing_code: Optional[str] = None, timeout: float = 90.0
     ) -> bool:
         """Navigate Apple's 'More options…' flow and submit the manual Matter pairing code."""
         page = GHPCommissioningPageObject._resolve_page(self)
@@ -789,7 +803,7 @@ class GHPCommissioningPageObject(BasePage):
     # 3. Apple Matter Commissioning Sheets ('Add to Google Home', 'Uncertified',
     #    'Additional Setup Required', Location/Room, Custom Name, 'Done', and Failure Detection)
     # -------------------------------------------------------------------------
-    def _cm_detect_apple_failure_title(self) -> Optional[str]:
+    def _cm_detect_apple_failure_title(self, include_overlay_scan: bool = True) -> Optional[str]:
         """Return matching Apple Matter failure text if a failure card/alert is on screen.
 
         Normalizes newlines/whitespace so wrapped titles such as 'Unable to\\nAdd Accessory'
@@ -813,6 +827,9 @@ class GHPCommissioningPageObject(BasePage):
             raw = self._cm_read_text(elem)
             norm = " ".join(raw.split()) if raw else ""
             return norm or "Apple Matter Commissioning Failed"
+
+        if not include_overlay_scan:
+            return None
 
         # Fallback: inspect SBTransientOverlayWindow, PRXCard TextViews, and Alerts with whitespace normalization
         overlay_text_chain = (
@@ -873,7 +890,7 @@ class GHPCommissioningPageObject(BasePage):
                 pass
         return False
 
-    def _cm_handle_apple_system_alert(self) -> bool:
+    def _cm_handle_apple_system_alert(self, skip_failure_precheck: bool = False) -> bool:
         """Accept benign iOS / Apple Matter modal alerts ('Additional Setup Required' -> 'OK',
         'Uncertified Accessory' -> 'Add Anyway', Local Network / Bluetooth -> 'Allow').
 
@@ -881,7 +898,7 @@ class GHPCommissioningPageObject(BasePage):
         Handles both UI-tree overlays (`SBTransientOverlayWindow`) and `SpringBoard` (`mobile: alert`).
         """
         # 1. Never swallow Apple Matter failure cards or GHP OOBE error/decommission alerts
-        if self._cm_detect_apple_failure_title():
+        if not skip_failure_precheck and self._cm_detect_apple_failure_title():
             return False
         if (
                 self._cm_find_displayed(
@@ -1465,7 +1482,7 @@ class GHPCommissioningPageObject(BasePage):
 
         # 2. Accept benign iOS / Apple Matter system alerts
         #    ('Additional Setup Required' -> 'OK', 'Uncertified Accessory' -> 'Add Anyway', permissions -> 'Allow')
-        if self._cm_handle_apple_system_alert():
+        if self._cm_handle_apple_system_alert(skip_failure_precheck=True):
             return True
 
         # Re-check failure title in case SpringBoard alert probe detected an Apple failure alert
