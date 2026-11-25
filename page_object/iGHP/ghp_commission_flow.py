@@ -54,7 +54,10 @@ class GHPCommissioningPageObject(BasePage):
 
     APPLE_FAILURE_KEYWORDS: Tuple[str, ...] = (
         "Unable to Add Accessory",
+        "Unable to\nAdd Accessory",
         "Unable to Add",
+        "Unable to\nAdd",
+        "Unable to",
         "Pairing Failed",
         "Setup Failed",
         "Accessory Not Found",
@@ -64,6 +67,11 @@ class GHPCommissioningPageObject(BasePage):
         "Couldn't Add",
         "Couldn’t Add",
         "Could Not Add",
+        "Couldn't Connect",
+        "Couldn’t Connect",
+        "Could Not Connect",
+        "Couldn't Communicate",
+        "Couldn’t Communicate",
         "Failed to Add",
         "Failed to",
         "Incorrect Setup Code",
@@ -73,6 +81,9 @@ class GHPCommissioningPageObject(BasePage):
         "Can't Be Used",
         "Can’t Be Used",
         "Already Added",
+        "無法加入",
+        "無法連線",
+        "無法連接",
     )
 
     # Benign iOS / Apple HomeUIService modal alert buttons to accept automatically
@@ -779,11 +790,15 @@ class GHPCommissioningPageObject(BasePage):
     #    'Additional Setup Required', Location/Room, Custom Name, 'Done', and Failure Detection)
     # -------------------------------------------------------------------------
     def _cm_detect_apple_failure_title(self) -> Optional[str]:
-        """Return matching Apple Matter failure text if a failure card/alert is on screen."""
+        """Return matching Apple Matter failure text if a failure card/alert is on screen.
+
+        Normalizes newlines/whitespace so wrapped titles such as 'Unable to\\nAdd Accessory'
+        (inside either the active tree or SBTransientOverlayWindow) are detected immediately.
+        """
         sb_fail = getattr(self, "_cm_springboard_failure_title", "") or ""
         if sb_fail:
             self._cm_springboard_failure_title = ""
-            return sb_fail
+            return " ".join(sb_fail.split()) or sb_fail
 
         clauses = " OR ".join(
             f'label CONTAINS[c] "{kw}" OR name CONTAINS[c] "{kw}" OR value CONTAINS[c] "{kw}"'
@@ -795,7 +810,30 @@ class GHPCommissioningPageObject(BasePage):
         )
         elem = self._cm_find_displayed(IOS_PREDICATE_BY, predicate, allow_hidden=True)
         if elem is not None:
-            return self._cm_read_text(elem) or "Apple Matter Commissioning Failed"
+            raw = self._cm_read_text(elem)
+            norm = " ".join(raw.split()) if raw else ""
+            return norm or "Apple Matter Commissioning Failed"
+
+        # Fallback: inspect SBTransientOverlayWindow, PRXCard TextViews, and Alerts with whitespace normalization
+        overlay_text_chain = (
+            f"{self.APPLE_OVERLAY_WINDOW_CHAIN}/**/XCUIElementTypeStaticText[`visible == 1`]"
+        )
+        probe_lists = [
+            self._cm_find_all(IOS_CLASS_CHAIN_BY, self.APPLE_CARD_TITLE_CHAIN),
+            self._cm_find_all(IOS_CLASS_CHAIN_BY, overlay_text_chain),
+            self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeTextView"),
+            self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeAlert"),
+        ]
+        # When an OK/Dismiss alert button is visible, also scan StaticTexts for wrapped failure copy
+        if self._cm_find_displayed(IOS_PREDICATE_BY, self.ALERT_OK_BTN_PREDICATE) is not None:
+            probe_lists.append(self._cm_find_all(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText"))
+
+        for elems in probe_lists:
+            for cand in elems:
+                raw = self._cm_read_text(cand)
+                norm = " ".join(raw.split()) if raw else ""
+                if norm and _contains_any(norm, self.APPLE_FAILURE_KEYWORDS):
+                    return norm
         return None
 
     def _cm_tap_springboard_alert_button_fallback(self, button_label: str) -> bool:
@@ -861,8 +899,9 @@ class GHPCommissioningPageObject(BasePage):
             txt = self._cm_read_text(alert)
             if not txt:
                 continue
+            norm_txt = " ".join(txt.split())
             if _contains_any(
-                    txt,
+                    norm_txt,
                     (
                             "Stream removed",
                             "NSPOSIXErrorDomain",
@@ -874,11 +913,11 @@ class GHPCommissioningPageObject(BasePage):
                     ),
             ):
                 return False
-            if _contains_any(txt, self.APPLE_FAILURE_KEYWORDS):
-                self._cm_springboard_failure_title = txt
+            if _contains_any(norm_txt, self.APPLE_FAILURE_KEYWORDS):
+                self._cm_springboard_failure_title = norm_txt
                 return False
-            if not detected_alert_title and txt.lower() != "setup code":
-                detected_alert_title = txt
+            if not detected_alert_title and norm_txt.lower() != "setup code":
+                detected_alert_title = norm_txt
 
         if not detected_alert_title:
             add_setup_el = self._cm_find_displayed(
@@ -908,6 +947,12 @@ class GHPCommissioningPageObject(BasePage):
                         btn_elem = nested[0]
                         break
             if btn_elem is not None:
+                if btn_label.lower() == "ok":
+                    # Double-check all visible texts before clicking 'OK' so failure cards are never dismissed
+                    card_snapshot = self._cm_read_apple_card_status(card_title=detected_alert_title)
+                    if card_snapshot and _contains_any(card_snapshot, self.APPLE_FAILURE_KEYWORDS):
+                        self._cm_springboard_failure_title = card_snapshot
+                        return False
                 if detected_alert_title:
                     self._cm_last_apple_card_title = detected_alert_title
                 self._logger.info(
@@ -951,8 +996,9 @@ class GHPCommissioningPageObject(BasePage):
             except Exception:
                 sb_text = ""
 
+            norm_sb = " ".join(sb_text.split()) if sb_text else ""
             if _contains_any(
-                    sb_text,
+                    norm_sb,
                     (
                             "Stream removed",
                             "NSPOSIXErrorDomain",
@@ -965,8 +1011,8 @@ class GHPCommissioningPageObject(BasePage):
             ):
                 return False
 
-            if _contains_any(sb_text, self.APPLE_FAILURE_KEYWORDS):
-                self._cm_springboard_failure_title = sb_text
+            if _contains_any(norm_sb, self.APPLE_FAILURE_KEYWORDS):
+                self._cm_springboard_failure_title = norm_sb
                 return False
 
             matched_btn: Optional[str] = None
@@ -1033,7 +1079,7 @@ class GHPCommissioningPageObject(BasePage):
         pred = (
             'name == "PRXCardBottomTray" '
             'OR type == "XCUIElementTypePickerWheel" '
-            'OR (type == "XCUIElementTypeButton" AND name == "Close" AND label == "Close") '
+            'OR (type == "XCUIElementTypeButton" AND (name == "Close" OR label == "Close" OR name == "xmark")) '
             'OR (type == "XCUIElementTypeButton" AND ('
             'name BEGINSWITH[c] "Add to" OR label BEGINSWITH[c] "Add to" '
             'OR name == "Set Up" OR label == "Set Up"))'
@@ -1381,7 +1427,8 @@ class GHPCommissioningPageObject(BasePage):
     def _cm_dismiss_apple_sheet_if_open(self) -> None:
         for pred in (
                 self.ALERT_OK_BTN_PREDICATE,
-                'type == "XCUIElementTypeButton" AND (name IN {"Done", "Close", "Cancel"} OR label IN {"Done", "Close", "Cancel"})',
+                'type == "XCUIElementTypeButton" AND ('
+                'name IN {"Done", "Close", "Cancel", "xmark"} OR label IN {"Done", "Close", "Cancel"})',
         ):
             btn = self._cm_find_displayed(IOS_PREDICATE_BY, pred)
             if btn is not None:
@@ -2086,7 +2133,7 @@ class GHPCommissioningPageObject(BasePage):
         return f"{reason}{removed_note}"
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 1200.0
+            self, device_name: str, room_name: str = "Attic", timeout: float = 600.0
     ) -> bool:
         """Complete Apple Matter sheets and GHP CameraOOBEView (OTA + Settings + Done)."""
         page = GHPCommissioningPageObject._resolve_page(self)
@@ -2214,6 +2261,21 @@ class GHPCommissioningPageObject(BasePage):
                                 return True
 
                 time.sleep(page.CM_POLL_INTERVAL)
+
+            # Final check in case an Apple failure card appeared right as timeout expired
+            final_apple_fail = page._cm_detect_apple_failure_title()
+            if final_apple_fail:
+                page._logger.error(
+                    f"[Apple Sheet] Failure detected at timeout: '{final_apple_fail}'")
+                BasePage.capture_failure_screenshot(
+                    page.driver, reason=f"Apple sheet failure: {final_apple_fail}", force=True,
+                    lock=True
+                )
+                page._cm_dismiss_apple_sheet_if_open()
+                raise _GHPApiAppleSheetFailure(
+                    f"Apple Matter commissioning failed: '{final_apple_fail}'",
+                    card_title=final_apple_fail,
+                )
 
             # Overall commissioning timeout -> inspect Devices tab just like GHA
             last_apple_state = page._cm_last_apple_card_status or page._cm_last_apple_card_title
