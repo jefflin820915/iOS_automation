@@ -93,12 +93,30 @@ class GHACommissioningPageObject(BasePage):
         'type == "XCUIElementTypeStaticText" AND visible == 1',
     )
     SYSTEM_ALERT_BUTTONS = ("Add Anyway", "Set up anyway", "OK", "Allow")
-    APPLE_SHEET_IGNORED_BUTTON_LABELS = {"ok", "done", "cancel", "continue", "set up", "add anyway"}
+    APPLE_SHEET_IGNORED_BUTTON_LABELS = {
+        "ok",
+        "done",
+        "cancel",
+        "continue",
+        "set up",
+        "add anyway",
+        "close",
+        "xmark",
+    }
     APPLE_FAILURE_KEYWORDS = (
         "unable to add accessory",
+        "unable to\nadd accessory",
         "unable to add",
+        "unable to\nadd",
+        "unable to",
         "couldn't add",
+        "couldn’t add",
         "could not add",
+        "couldn't connect",
+        "couldn’t connect",
+        "could not connect",
+        "couldn't communicate",
+        "couldn’t communicate",
         "pairing failed",
         "setup failed",
         "failed to",
@@ -107,6 +125,10 @@ class GHACommissioningPageObject(BasePage):
         "not reachable",
         "cannot be used",
         "can't be used",
+        "can’t be used",
+        "無法加入",
+        "無法連線",
+        "無法連接",
     )
     FAILURE_KEYWORDS = (
         "Can’t connect", "Can't connect", "Couldn't connect", "Could not connect",
@@ -194,8 +216,8 @@ class GHACommissioningPageObject(BasePage):
     CM_POLL_INTERVAL = 1.5
     CM_PROGRESS_INTERVAL = 2.5
     CM_OTA_POLL_INTERVAL = 1.5
-    CM_OTA_ZERO_PERCENT_TIMEOUT = 600.0
-    CM_OTA_DEFAULT_TIMEOUT = 600.0
+    CM_OTA_ZERO_PERCENT_TIMEOUT = 20.0
+    CM_OTA_DEFAULT_TIMEOUT = 300.0
     CM_OTA_EMPTY_HEADLINE_TOLERANCE = 3
     CM_REMOVE_ATTEMPTS = 2
     CM_ALL_DEVICES_MAX_SCROLLS = 6
@@ -313,16 +335,25 @@ class GHACommissioningPageObject(BasePage):
                                        self.APPLE_OVERLAY_WINDOW_CHAIN) is not None
 
     def _cm_read_alert_title(self, alert_elem: WebElement) -> str:
-        """Extract the title/message from an iOS system alert before dismissing it."""
+        """Extract the title and body message from an iOS system alert before dismissing it."""
         texts: List[str] = []
-        for cls_name in ("XCUIElementTypeStaticText", "XCUIElementTypeTextView"):
+        seen_low: set = set()
+        for cls_name in ("XCUIElementTypeTextView", "XCUIElementTypeStaticText"):
             for child in self._cm_find_all(AppiumBy.CLASS_NAME, cls_name, root=alert_elem):
-                t = self._cm_read_text(child, ("label", "name", "value"))
-                if t and t.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS and t not in texts:
+                raw = self._cm_read_text(child, ("label", "name", "value"))
+                t = " ".join(raw.split()) if raw else ""
+                if (
+                        t
+                        and t.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS
+                        and t.lower() not in seen_low
+                ):
+                    seen_low.add(t.lower())
                     texts.append(t)
         if texts:
-            return texts[0]
-        return self._cm_read_text(alert_elem, ("label", "name", "value"))
+            return " | ".join(texts)
+        raw_alert = self._cm_read_text(alert_elem, ("label", "name", "value"))
+        lines = [" ".join(line.split()) for line in raw_alert.splitlines() if line.strip()]
+        return " | ".join(lines) if lines else ""
 
     def handle_system_alert(self) -> bool:
         """Dismiss iOS system alerts like 'Uncertified Accessory'.
@@ -333,18 +364,25 @@ class GHACommissioningPageObject(BasePage):
         if alert_elem is None:
             return False
         alert_title = self._cm_read_alert_title(alert_elem)
+        sheet_present = self.is_apple_sheet_present()
         if alert_title:
             self._cm_last_apple_card_title = alert_title
             if _contains_any(alert_title, self.APPLE_FAILURE_KEYWORDS):
-                self._cm_apple_failure_title = alert_title
+                full_alert = (
+                    self._cm_get_apple_card_details(alert_title) if sheet_present else alert_title
+                )
+                self._cm_last_apple_card_title = full_alert
+                self._cm_apple_failure_title = full_alert
                 return False
         # If the Apple sheet is active and showing a failure card, let handle_apple_commissioning_sheet handle it.
-        if self.is_apple_sheet_present():
+        if sheet_present:
             card_title = self._cm_get_apple_card_title()
             if card_title:
                 self._cm_last_apple_card_title = card_title
                 if _contains_any(card_title, self.APPLE_FAILURE_KEYWORDS):
-                    self._cm_apple_failure_title = card_title
+                    full_card = self._cm_get_apple_card_details(card_title)
+                    self._cm_last_apple_card_title = full_card
+                    self._cm_apple_failure_title = full_card
                     return False
         self._logger.warning(
             f"Detected iOS System Alert dialog{f' ({alert_title!r})' if alert_title else ''}!")
@@ -352,10 +390,45 @@ class GHACommissioningPageObject(BasePage):
             if self._cm_click_displayed(AppiumBy.ACCESSIBILITY_ID, btn_text):
                 if btn_text == "OK" and alert_title and not getattr(self, "_cm_apple_failure_title",
                                                                     ""):
-                    self._cm_apple_failure_title = alert_title
+                    self._cm_apple_failure_title = (
+                        self._cm_get_apple_card_details(alert_title)
+                        if sheet_present
+                        else alert_title
+                    )
                 self._logger.info(f"Dismissed system alert via '{btn_text}'.")
                 return True
         return False
+
+    def _cm_get_apple_card_details(self, primary_text: str = "") -> str:
+        """Collect visible Apple sheet title + middle body message (isolated to SBTransientOverlayWindow)."""
+        parts: List[str] = []
+        seen_low: set = set()
+
+        def _push(raw: str) -> None:
+            clean = " ".join((raw or "").split())
+            if not clean:
+                return
+            low = clean.lower()
+            if low in self.APPLE_SHEET_IGNORED_BUTTON_LABELS or low in seen_low:
+                return
+            if re.fullmatch(r"\d{1,2}:\d{2}", clean) or re.fullmatch(r"\d{1,3}%", clean):
+                return
+            seen_low.add(low)
+            parts.append(clean)
+
+        for chain in (self.APPLE_CARD_TITLE_CHAIN, self.APPLE_CARD_STATIC_TEXT_CHAIN):
+            for elem in self._cm_find_all(AppiumBy.IOS_CLASS_CHAIN, chain):
+                try:
+                    if not elem.is_displayed():
+                        continue
+                except WebDriverException:
+                    continue
+                _push(self._cm_read_text(elem, ("name", "label", "value")))
+
+        norm_primary = " ".join((primary_text or "").split())
+        if norm_primary and norm_primary.lower() not in seen_low:
+            parts.insert(0, norm_primary)
+        return " | ".join(parts) if parts else norm_primary
 
     def _cm_get_apple_card_title(self) -> str:
         for _ in range(3):
@@ -366,7 +439,8 @@ class GHACommissioningPageObject(BasePage):
                         continue
                 except WebDriverException:
                     continue
-                title = self._cm_read_text(elem, ("name", "label", "value"))
+                raw = self._cm_read_text(elem, ("name", "label", "value"))
+                title = " ".join(raw.split()) if raw else ""
                 if title and title.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS:
                     candidates.append(title)
             if not candidates:
@@ -377,7 +451,8 @@ class GHACommissioningPageObject(BasePage):
                             continue
                     except WebDriverException:
                         continue
-                    title = self._cm_read_text(elem, ("name", "label", "value"))
+                    raw = self._cm_read_text(elem, ("name", "label", "value"))
+                    title = " ".join(raw.split()) if raw else ""
                     if title and title.lower() not in self.APPLE_SHEET_IGNORED_BUTTON_LABELS:
                         candidates.append(title)
             if candidates:
@@ -407,16 +482,23 @@ class GHACommissioningPageObject(BasePage):
 
     def _cm_on_apple_failure(self, card_title: str) -> NoReturn:
         """Capture failure screenshot on the Apple sheet, then dismiss it and signal the main flow."""
-        self._logger.error(f"[AppleSheet] Reported failure: '{card_title}'")
-        self._cm_apple_failure_title = card_title
-        self._cm_last_apple_card_title = card_title
+        card_details = (
+                           self._cm_get_apple_card_details(card_title)
+                           if self.is_apple_sheet_present()
+                           else card_title
+                       ) or card_title
+        self._logger.error(f"[AppleSheet] Reported failure: '{card_details}'")
+        self._cm_apple_failure_title = card_details
+        self._cm_last_apple_card_title = card_details
         if hasattr(BasePage, "capture_failure_screenshot"):
             BasePage.capture_failure_screenshot(
-                self.driver, reason=f"Apple sheet failure: {card_title}", force=True, lock=True
+                self.driver, reason=f"Apple sheet failure: {card_details}", force=True, lock=True
             )
-        self._cm_click_apple_sheet_button("OK", "Done")
+        self._cm_click_apple_sheet_button("OK", "Done", "Close", "xmark")
         time.sleep(2.0)
-        raise _CMAppleSheetFailure(f"Apple sheet failed with '{card_title}'", card_title=card_title)
+        raise _CMAppleSheetFailure(
+            f"Apple sheet failed with '{card_details}'", card_title=card_details
+        )
 
     def _cm_on_apple_bridge_name(self, device_name: str) -> None:
         self._logger.info(
@@ -1636,7 +1718,7 @@ class GHACommissioningPageObject(BasePage):
         ]
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 1200
+            self, device_name: str, room_name: str = "Attic", timeout: float = 600
     ) -> bool:
         """State machine handling Apple sheets, GHA loading, room setup, OTA updates, and completion.
         If the flow hits `timeout`, restarts GHA and checks the 'All devices' page:
