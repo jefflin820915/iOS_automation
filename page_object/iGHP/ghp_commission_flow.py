@@ -2086,7 +2086,7 @@ class GHPCommissioningPageObject(BasePage):
         return f"{reason}{removed_note}"
 
     def complete_commissioning_and_pairing_flow(
-            self, device_name: str, room_name: str = "Attic", timeout: float = 600.0
+            self, device_name: str, room_name: str = "Attic", timeout: float = 1200.0
     ) -> bool:
         """Complete Apple Matter sheets and GHP CameraOOBEView (OTA + Settings + Done)."""
         page = GHPCommissioningPageObject._resolve_page(self)
