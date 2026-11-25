@@ -482,14 +482,36 @@ class GHPDevicePage(BasePage):
                     pass
         return False
 
+    def _restart_ghp_for_device_refresh(self) -> None:
+        """Terminate and relaunch iGHP, return to the Devices tab, and pull to refresh once."""
+        bundle_id = getattr(self, "APP_BUNDLE_ID", None) or get_ghp_bundle_id()
+        self._logger.warning(
+            f"[Device Status] Restarting iGHP app ({bundle_id}) to force fresh device state..."
+        )
+        try:
+            self.driver.terminate_app(bundle_id)
+        except Exception as e:
+            self._logger.debug(f"[Device Status] terminate_app ignored error: {e}")
+        time.sleep(1.5)
+        self.driver.activate_app(bundle_id)
+        time.sleep(3.0)
+        self.go_to_tab("Devices")
+        self._pull_down_to_refresh_devices()
+
     def _wait_until_camera_tile_ready(
             self,
             target_name: str,
             initial_hit: Tuple[WebElement, str, str],
             max_scrolls: int = 8,
             ready_wait_timeout: float = 60.0,
+            allow_app_restart: bool = True,
+            post_restart_wait_timeout: float = 15.0,
     ) -> Tuple[WebElement, str, str]:
-        """Wait & pull-to-refresh while a newly paired camera shows 'Ready' until it transitions to 'On'."""
+        """Wait & pull-to-refresh while a newly paired camera shows 'Ready' until it transitions to 'On'.
+
+        If the timeout expires while the status still indicates 'Ready' (or another transient
+        pre-live state), restart the iGHP app once and re-check the device status.
+        """
         tile, title, status = initial_hit
         if not self._is_tile_status_pending_ready(status) or ready_wait_timeout <= 0:
             return tile, title, status
@@ -523,8 +545,46 @@ class GHPDevicePage(BasePage):
                 )
                 return tile, title, status
 
+        if allow_app_restart:
+            self._logger.warning(
+                f"[Device Status] '{title}' is still '{status}' after {int(ready_wait_timeout)}s; "
+                "restarting iGHP app to re-check status..."
+            )
+            self._restart_ghp_for_device_refresh()
+            restarted_hit = self._find_visible_tile_for_name(
+                title) or self._locate_device_tile_with_scroll(
+                target_name, max_scrolls=max_scrolls
+            )
+            if restarted_hit is None:
+                time.sleep(2.0)
+                restarted_hit = self._find_visible_tile_for_name(
+                    title) or self._locate_device_tile_with_scroll(
+                    target_name, max_scrolls=max_scrolls
+                )
+            if restarted_hit is not None:
+                tile, title, status = restarted_hit
+                self._logger.info(
+                    f"[Device Status] After iGHP app restart, '{title}' status is '{status}'."
+                )
+                if not self._is_tile_status_pending_ready(status):
+                    self._logger.info(
+                        f"[Device Status] After app restart, '{title}' transitioned to '{status}'. "
+                        "Entering Camera Live View..."
+                    )
+                    return tile, title, status
+                effective_post_wait = min(post_restart_wait_timeout, max(0.0, ready_wait_timeout))
+                if effective_post_wait > 0:
+                    return self._wait_until_camera_tile_ready(
+                        target_name,
+                        restarted_hit,
+                        max_scrolls=max_scrolls,
+                        ready_wait_timeout=effective_post_wait,
+                        allow_app_restart=False,
+                        post_restart_wait_timeout=0.0,
+                    )
+
         self._logger.warning(
-            f"[Device Status] '{title}' is still '{status}' after {int(ready_wait_timeout)}s; "
+            f"[Device Status] '{title}' is still '{status}' after waiting; "
             "attempting entry anyway..."
         )
         return tile, title, status
@@ -610,6 +670,7 @@ class GHPDevicePage(BasePage):
                         fresh_hit,
                         max_scrolls=max_scrolls,
                         ready_wait_timeout=min(remaining, 20.0),
+                        allow_app_restart=False,
                     )
                     tile = page._ensure_tile_in_safe_tap_zone(tile, title)
                 continue
