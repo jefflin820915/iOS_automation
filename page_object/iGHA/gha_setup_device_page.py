@@ -20,6 +20,8 @@ class GHASetUpDevicePage(BasePage):
         "2K Battery Doorbell Camera": "4738:21009:1573",
         "Onn Wired Indoor Camera New": "5502:4233:687",
         "HD Wired Indoor Camera DVT": "4738:20483:1682",
+        "2K Battery Outdoor Camera": "4738:21507:4085",
+        "HOMA 1080P Wired Indoor Camera": "4738:20482:3350",
     }
 
     @contextlib.contextmanager
