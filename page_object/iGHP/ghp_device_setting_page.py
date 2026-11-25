@@ -178,6 +178,17 @@ class GHPDeviceSettingPage(BasePage):
         except (StaleElementReferenceException, WebDriverException):
             return ""
 
+    def _read_kv_text(self, elem: WebElement) -> str:
+        """Fast attribute read for Settings StaticTexts ('label' -> 'value') minimizing WDA RPCs."""
+        for attr in ("label", "value"):
+            try:
+                val = elem.get_attribute(attr)
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+            except (StaleElementReferenceException, WebDriverException):
+                continue
+        return ""
+
     def _scroll_settings(self, direction: str = "down") -> None:
         try:
             win = self.driver.get_window_size()
@@ -214,8 +225,27 @@ class GHPDeviceSettingPage(BasePage):
         return None
 
     def _collect_visible_kv_pairs(self, collected: Dict[str, str]) -> None:
-        """Scan visible XCUIElementTypeCell rows and StaticText pairs for technical metadata."""
+        """Scan visible StaticText pairs (and Cell rows if needed) for technical metadata."""
         with self._fast_probe():
+            # 1. Fast single-query flat pass over visible StaticText elements (avoids O(cells) RPC bursts)
+            try:
+                all_texts = self.driver.find_elements(AppiumBy.CLASS_NAME,
+                                                      "XCUIElementTypeStaticText")
+            except WebDriverException:
+                all_texts = []
+            ordered_vals = [self._read_kv_text(t) for t in all_texts]
+            ordered_vals = [v for v in ordered_vals if v]
+            for idx in range(len(ordered_vals) - 1):
+                key = self._match_canonical_key(ordered_vals[idx])
+                nxt = ordered_vals[idx + 1].strip()
+                if key and nxt and nxt != "?" and self._match_canonical_key(nxt) is None:
+                    if key not in collected or collected[key] in ("", "UNKNOWN", "?"):
+                        collected[key] = nxt
+
+            if collected.get("software_version") and collected.get("serial_number"):
+                return
+
+            # 2. Fallback: inspect XCUIElementTypeCell rows when flat StaticTexts didn't expose values
             try:
                 cells = self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeCell")
             except WebDriverException:
@@ -227,7 +257,7 @@ class GHPDeviceSettingPage(BasePage):
                     continue
                 vals: List[str] = []
                 for t in texts:
-                    v = self._read_text(t)
+                    v = self._read_kv_text(t) or self._read_text(t)
                     if v and v not in vals:
                         vals.append(v)
                 if len(vals) >= 2:
@@ -236,21 +266,6 @@ class GHPDeviceSettingPage(BasePage):
                     if key and val and val != "?" and self._match_canonical_key(val) is None:
                         if key not in collected or collected[key] in ("", "UNKNOWN", "?"):
                             collected[key] = val
-
-            # Also handle non-Cell VStack/ScrollView layouts (e.g. DeviceDetailsView LineItemView)
-            try:
-                all_texts = self.driver.find_elements(AppiumBy.CLASS_NAME,
-                                                      "XCUIElementTypeStaticText")
-            except WebDriverException:
-                all_texts = []
-            ordered_vals = [self._read_text(t) for t in all_texts]
-            ordered_vals = [v for v in ordered_vals if v]
-            for idx in range(len(ordered_vals) - 1):
-                key = self._match_canonical_key(ordered_vals[idx])
-                nxt = ordered_vals[idx + 1].strip()
-                if key and nxt and nxt != "?" and self._match_canonical_key(nxt) is None:
-                    if key not in collected or collected[key] in ("", "UNKNOWN", "?"):
-                        collected[key] = nxt
 
     def _store_tech_info(self, owner: Any, info: Dict[str, str]) -> None:
         """Persist extracted device technical metadata onto Page, Session, TestCase, and WebDriver."""
@@ -361,11 +376,11 @@ class GHPDeviceSettingPage(BasePage):
             except (TypeError, ValueError):
                 w, h, x, y = 0.0, 0.0, 0.0, 0.0
             if w > 0 or h > 0:
-                if w < 20 or h < 10 or h > 140:
+                if w < 10 or h < 8 or h > 180:
                     return None
                 cx = x + w / 2.0
                 cy = y + h / 2.0
-                in_viewport = (0.0 <= cx <= float(win_w)) and (44.0 <= cy <= float(win_h - 6))
+                in_viewport = (0.0 <= cx <= float(win_w)) and (30.0 <= cy <= float(win_h - 2))
                 if not in_viewport:
                     return None
 
@@ -408,10 +423,75 @@ class GHPDeviceSettingPage(BasePage):
                     if idx == 0 and score[0] == 0 and score[1] == 0 and score[2] == 0:
                         return el
                     scored.append((score, el))
+
+            if not scored:
+                # Last-resort tail scan across Button / StaticText / Cell in case predicate matching missed
+                for cls_name in (
+                        "XCUIElementTypeButton",
+                        "XCUIElementTypeCell",
+                        "XCUIElementTypeStaticText",
+                ):
+                    try:
+                        elems = self.driver.find_elements(AppiumBy.CLASS_NAME, cls_name)
+                    except WebDriverException:
+                        continue
+                    for el in elems[-12:]:
+                        txt = self._read_text(el)
+                        if "decommission" not in txt.lower():
+                            continue
+                        score = self._evaluate_decommission_candidate(el, win_w, win_h)
+                        if score is not None:
+                            scored.append((score, el))
         if not scored:
             return None
         scored.sort(key=lambda item: item[0])
         return scored[0][1]
+
+    def _is_on_camera_player_screen(self) -> bool:
+        """Return True if the app popped back from Camera Settings onto the Camera Live / Player screen."""
+        player_pred = (
+            'type == "XCUIElementTypeButton" AND ('
+            'name IN {"Settings", "Turn Camera OFF", "Turn Camera ON", '
+            '"Microphone Off", "Microphone On", "Go to live", "google_symbols/menu_symbol"} '
+            'OR label IN {"Settings", "Turn Camera OFF", "Turn Camera ON", '
+            '"Microphone Off", "Microphone On", "Go to live"})'
+        )
+        settings_pred = (
+            'type == "XCUIElementTypeStaticText" AND ('
+            'label IN {"Vendor Name", "Model Name", "Software Version", '
+            '"Device Information", "Diagnostics Settings", "Microphone Settings"} '
+            'OR value IN {"Vendor Name", "Model Name", "Software Version"})'
+        )
+        with self._fast_probe():
+            try:
+                p_elems = self.driver.find_elements(IOS_PREDICATE_BY, player_pred)
+                on_player = any(e.is_displayed() for e in p_elems)
+            except WebDriverException:
+                on_player = False
+            if not on_player:
+                return False
+            try:
+                s_elems = self.driver.find_elements(IOS_PREDICATE_BY, settings_pred)
+                if any(e.is_displayed() for e in s_elems):
+                    return False
+            except WebDriverException:
+                pass
+            return True
+
+    def _reopen_settings_if_on_player_page(self) -> bool:
+        """If GHP popped back to Camera Live / Player screen, tap 'Settings' to re-open Camera Settings."""
+        if not self._is_on_camera_player_screen():
+            return False
+        self._logger.warning(
+            "[GHP Settings] Detected Camera Live / Player screen instead of Settings; "
+            "re-opening Camera Settings..."
+        )
+        from page_object.iGHP.ghp_camera_live_page import GHPCameraLivePage
+
+        reopened = bool(GHPCameraLivePage.click_setting_btn(self))
+        if reopened:
+            time.sleep(0.8)
+        return reopened
 
     def _log_decommission_probe_diagnostics(self) -> None:
         """Log visible buttons/labels on Settings screen to aid diagnosing missed 'Decommission' elements."""
@@ -1039,16 +1119,27 @@ class GHPDeviceSettingPage(BasePage):
         page = GHPDeviceSettingPage._resolve_page(self)
         page._logger.info("Scrolling to 'Decommission' button in GHP Settings...")
         decom_btn: Optional[WebElement] = None
+        reopen_attempts = 0
         for step in range(max_scrolls + 1):
             decom_btn = page._find_settings_decommission_button()
             if decom_btn is not None:
                 break
+            if reopen_attempts < 2 and page._reopen_settings_if_on_player_page():
+                reopen_attempts += 1
+                decom_btn = page._find_settings_decommission_button()
+                if decom_btn is not None:
+                    break
             if step < max_scrolls:
                 page._scroll_settings("down")
 
         if decom_btn is None:
             page._scroll_settings("up")
             decom_btn = page._find_settings_decommission_button()
+        if decom_btn is None and reopen_attempts < 2 and page._reopen_settings_if_on_player_page():
+            decom_btn = page._find_settings_decommission_button()
+            if decom_btn is None:
+                page._scroll_settings("down")
+                decom_btn = page._find_settings_decommission_button()
 
         if decom_btn is None:
             page._log_decommission_probe_diagnostics()
