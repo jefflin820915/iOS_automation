@@ -40,9 +40,24 @@ class GHPDeviceSettingPage(BasePage):
     )
 
     DECOMMISSION_BTN_PREDICATE: str = (
-        'type == "XCUIElementTypeButton" AND '
-        '(name == "Decommission" OR label == "Decommission" '
-        'OR name CONTAINS[c] "Decommission" OR label CONTAINS[c] "Decommission")'
+        'type == "XCUIElementTypeButton" AND ('
+        'name == "Decommission" OR label == "Decommission" OR value == "Decommission" '
+        'OR name CONTAINS[c] "Decommission" OR label CONTAINS[c] "Decommission" '
+        'OR value CONTAINS[c] "Decommission")'
+    )
+
+    DECOMMISSION_ROW_PREDICATE: str = (
+        'type IN {"XCUIElementTypeCell", "XCUIElementTypeStaticText", "XCUIElementTypeOther"} AND ('
+        'name == "Decommission" OR label == "Decommission" OR value == "Decommission" '
+        'OR name CONTAINS[c] "Decommission" OR label CONTAINS[c] "Decommission" '
+        'OR value CONTAINS[c] "Decommission")'
+    )
+
+    DECOMMISSION_DESCENDANT_XPATH: str = (
+        '//XCUIElementTypeButton[.//XCUIElementTypeStaticText['
+        '@name="Decommission" or @label="Decommission" or @value="Decommission"]] | '
+        '//XCUIElementTypeCell[.//XCUIElementTypeStaticText['
+        '@name="Decommission" or @label="Decommission" or @value="Decommission"]]'
     )
 
     ALERT_CONTAINER_PREDICATE: str = (
@@ -218,7 +233,7 @@ class GHPDeviceSettingPage(BasePage):
                 if len(vals) >= 2:
                     key = self._match_canonical_key(vals[0])
                     val = vals[1].strip()
-                    if key and val and val != "?":
+                    if key and val and val != "?" and self._match_canonical_key(val) is None:
                         if key not in collected or collected[key] in ("", "UNKNOWN", "?"):
                             collected[key] = val
 
@@ -306,24 +321,128 @@ class GHPDeviceSettingPage(BasePage):
                 raise AssertionError(msg)
         return dict(page.device_tech_info)
 
-    def _find_settings_decommission_button(self) -> Optional[WebElement]:
-        """Locate the primary 'Decommission' button in Camera Settings (excluding alert buttons)."""
-        with self._fast_probe():
+    def _evaluate_decommission_candidate(
+            self,
+            elem: WebElement,
+            win_w: int,
+            win_h: int,
+    ) -> Optional[Tuple[int, int, int, float]]:
+        """Score a candidate element for Settings 'Decommission', returning sort key or None."""
+        try:
+            elem_type = str(elem.get_attribute("type") or "")
+        except (StaleElementReferenceException, WebDriverException):
+            elem_type = ""
+
+        txt = self._read_text(elem)
+        norm = " ".join(txt.split())
+        low = norm.lower()
+        if "history" in low or "cancel" in low or len(low) > 35:
+            return None
+
+        try:
+            displayed = bool(elem.is_displayed())
+        except (StaleElementReferenceException, WebDriverException):
+            displayed = False
+
+        rect = None
+        try:
+            rect = elem.rect
+        except (StaleElementReferenceException, WebDriverException):
+            rect = None
+
+        cy = 0.0
+        in_viewport = False
+        if isinstance(rect, dict):
             try:
-                btns = self.driver.find_elements(IOS_PREDICATE_BY, self.DECOMMISSION_BTN_PREDICATE)
-            except WebDriverException:
-                btns = []
-            for btn in btns:
+                x = float(rect.get("x", 0))
+                y = float(rect.get("y", 0))
+                w = float(rect.get("width", 0))
+                h = float(rect.get("height", 0))
+            except (TypeError, ValueError):
+                w, h, x, y = 0.0, 0.0, 0.0, 0.0
+            if w > 0 or h > 0:
+                if w < 20 or h < 10 or h > 140:
+                    return None
+                cx = x + w / 2.0
+                cy = y + h / 2.0
+                in_viewport = (0.0 <= cx <= float(win_w)) and (44.0 <= cy <= float(win_h - 6))
+                if not in_viewport:
+                    return None
+
+        if not displayed and not in_viewport:
+            return None
+
+        if elem_type == "XCUIElementTypeButton":
+            type_rank = 0
+        elif elem_type == "XCUIElementTypeCell":
+            type_rank = 1
+        elif elem_type == "XCUIElementTypeStaticText":
+            type_rank = 2
+        else:
+            type_rank = 3
+
+        exact_rank = 0 if low == "decommission" else 1
+        return (0 if displayed else 1, type_rank, exact_rank, -cy)
+
+    def _find_settings_decommission_button(self) -> Optional[WebElement]:
+        """Locate the 'Decommission' button/row in Camera Settings (including SwiftUI Cell/StaticText or off-displayed)."""
+        win_w, win_h = self._get_window_dimensions()
+        locators: Tuple[Tuple[str, str], ...] = (
+            (IOS_PREDICATE_BY, self.DECOMMISSION_BTN_PREDICATE),
+            (AppiumBy.ACCESSIBILITY_ID, "Decommission"),
+            (IOS_PREDICATE_BY, self.DECOMMISSION_ROW_PREDICATE),
+            (AppiumBy.XPATH, self.DECOMMISSION_DESCENDANT_XPATH),
+        )
+        scored: List[Tuple[Tuple[int, int, int, float], WebElement]] = []
+        with self._fast_probe():
+            for idx, (by, query) in enumerate(locators):
                 try:
-                    if not btn.is_displayed():
-                        continue
-                    txt = self._read_text(btn).lower()
-                    if "history" in txt or "cancel" in txt:
-                        continue
-                    return btn
+                    elems = self.driver.find_elements(by, query)
                 except WebDriverException:
                     continue
-        return None
+                for el in elems:
+                    score = self._evaluate_decommission_candidate(el, win_w, win_h)
+                    if score is None:
+                        continue
+                    # Fast return when the primary query finds a displayed exact Button
+                    if idx == 0 and score[0] == 0 and score[1] == 0 and score[2] == 0:
+                        return el
+                    scored.append((score, el))
+        if not scored:
+            return None
+        scored.sort(key=lambda item: item[0])
+        return scored[0][1]
+
+    def _log_decommission_probe_diagnostics(self) -> None:
+        """Log visible buttons/labels on Settings screen to aid diagnosing missed 'Decommission' elements."""
+        samples: List[str] = []
+        with self._fast_probe():
+            for cls_name in (
+                    "XCUIElementTypeButton",
+                    "XCUIElementTypeStaticText",
+                    "XCUIElementTypeCell",
+            ):
+                try:
+                    elems = self.driver.find_elements(AppiumBy.CLASS_NAME, cls_name)
+                except WebDriverException:
+                    continue
+                for el in elems[-12:]:
+                    try:
+                        txt = self._read_text(el)
+                        if not txt:
+                            continue
+                        rect = el.rect if hasattr(el, "rect") else {}
+                        disp = el.is_displayed()
+                        y = int(float(rect.get("y", -1))) if isinstance(rect, dict) else -1
+                        samples.append(
+                            f"{cls_name.replace('XCUIElementType', '')}({txt!r},disp={disp},y={y})")
+                    except (StaleElementReferenceException, WebDriverException, TypeError,
+                            ValueError):
+                        continue
+        if samples:
+            self._logger.info(
+                f"[Decommission Probe] Visible tail elements: {', '.join(samples[-15:])}"
+            )
 
     def _get_window_dimensions(self) -> Tuple[int, int]:
         try:
@@ -369,6 +488,25 @@ class GHPDeviceSettingPage(BasePage):
                         return True
                 except (StaleElementReferenceException, WebDriverException):
                     continue
+        return False
+
+    def _has_any_decommission_prompt_open(self) -> bool:
+        """Return True if native Decommission alert, Sign-In alert, or removal WebView is already visible."""
+        if self._is_web_signin_alert_open() or self._is_decommission_webview_open():
+            return True
+        with self._fast_probe():
+            try:
+                alerts = self.driver.find_elements(IOS_PREDICATE_BY, self.ALERT_CONTAINER_PREDICATE)
+                if any(a.is_displayed() for a in alerts):
+                    return True
+            except WebDriverException:
+                pass
+            try:
+                btns = self.driver.execute_script("mobile: alert", {"action": "getButtons"})
+                if isinstance(btns, (list, tuple)) and btns:
+                    return True
+            except Exception:
+                pass
         return False
 
     def _find_webview_button_by_labels(
@@ -828,25 +966,33 @@ class GHPDeviceSettingPage(BasePage):
                 time.sleep(0.5)
                 continue
 
-            # Retry tapping 'Decommission' once if first click only stopped scroll momentum
+            # Retry tapping 'Decommission' once if first click only stopped scroll momentum or hit a non-button text
             if (
                     not retried_decom_tap
-                    and decom_btn_rect
-                    and (time.time() - start_ts) >= 3.5
-                    and self._find_settings_decommission_button() is not None
+                    and (time.time() - start_ts) >= 2.0
             ):
-                retried_decom_tap = True
-                cx = int(decom_btn_rect["x"] + decom_btn_rect["width"] / 2)
-                cy = int(decom_btn_rect["y"] + decom_btn_rect["height"] / 2)
-                self._logger.info(
-                    f"[Decommission] Retrying tap on 'Decommission' button at ({cx}, {cy})..."
-                )
-                try:
-                    self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
-                except WebDriverException:
-                    pass
-                time.sleep(0.8)
-                continue
+                live_btn = self._find_settings_decommission_button()
+                if live_btn is not None:
+                    live_rect = decom_btn_rect
+                    try:
+                        r_now = live_btn.rect
+                        if isinstance(r_now, dict) and float(r_now.get("width", 0)) > 0:
+                            live_rect = r_now
+                    except WebDriverException:
+                        pass
+                    if live_rect:
+                        retried_decom_tap = True
+                        cx = int(live_rect["x"] + live_rect["width"] / 2)
+                        cy = int(live_rect["y"] + live_rect["height"] / 2)
+                        self._logger.info(
+                            f"[Decommission] Retrying tap on 'Decommission' button at ({cx}, {cy})..."
+                        )
+                        try:
+                            self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                        except WebDriverException:
+                            pass
+                        time.sleep(0.8)
+                        continue
 
             time.sleep(0.5)
 
@@ -901,6 +1047,11 @@ class GHPDeviceSettingPage(BasePage):
                 page._scroll_settings("down")
 
         if decom_btn is None:
+            page._scroll_settings("up")
+            decom_btn = page._find_settings_decommission_button()
+
+        if decom_btn is None:
+            page._log_decommission_probe_diagnostics()
             msg = "Failed to locate 'Decommission' button on GHP Settings page."
             page._logger.error(msg)
             BasePage.capture_failure_screenshot(page.driver, reason=msg, force=False, lock=True)
@@ -911,18 +1062,34 @@ class GHPDeviceSettingPage(BasePage):
             rect = decom_btn.rect
         except WebDriverException:
             rect = None
+        try:
+            was_displayed = bool(decom_btn.is_displayed())
+        except WebDriverException:
+            was_displayed = False
+        try:
+            elem_type = str(decom_btn.get_attribute("type") or "")
+        except WebDriverException:
+            elem_type = ""
 
-        page._logger.info("Clicking 'Decommission' button...")
+        page._logger.info(
+            f"Clicking 'Decommission' button (type={elem_type or 'unknown'}, displayed={was_displayed})..."
+        )
         clicked = False
         try:
             decom_btn.click()
             clicked = True
         except WebDriverException as err:
             page._logger.debug(f"Direct click on 'Decommission' failed ({err}); tapping center...")
-        if rect and not clicked:
-            cx = int(rect["x"] + rect["width"] / 2)
-            cy = int(rect["y"] + rect["height"] / 2)
-            page.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+        if rect and (not clicked or not was_displayed or elem_type != "XCUIElementTypeButton"):
+            if clicked:
+                time.sleep(0.4)
+            if not clicked or not page._has_any_decommission_prompt_open():
+                cx = int(rect["x"] + rect["width"] / 2)
+                cy = int(rect["y"] + rect["height"] / 2)
+                try:
+                    page.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                except WebDriverException:
+                    pass
 
         time.sleep(0.8)
         confirmed = page._complete_decommission_confirmation_flow(
