@@ -165,7 +165,31 @@ class GHPSession:
         try:
             options = AppiumOptions()
             options.load_capabilities(constants.IOS_CAPABILITIES)
-            new_driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
+            lock_ctx = contextmanager(lambda: (yield))()
+            try:
+                import fcntl as _fcntl
+                import os as _os
+                import tempfile as _tempfile
+
+                @contextmanager
+                def _wda_lock():
+                    lf = open(_os.path.join(_tempfile.gettempdir(), "ios_automation_wda_init.lock"),
+                              "a+")
+                    try:
+                        _fcntl.flock(lf.fileno(), _fcntl.LOCK_EX)
+                        yield
+                    finally:
+                        try:
+                            _fcntl.flock(lf.fileno(), _fcntl.LOCK_UN)
+                        except OSError:
+                            pass
+                        lf.close()
+
+                lock_ctx = _wda_lock()
+            except Exception:
+                pass
+            with lock_ctx:
+                new_driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
             new_driver.implicitly_wait(getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0))
             setattr(new_driver, "_active_app_bundle_id", get_ghp_bundle_id())
             if device_tech_info is not None:

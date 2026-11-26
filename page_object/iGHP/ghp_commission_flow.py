@@ -2843,6 +2843,43 @@ class GHPCommissioningPageObject(BasePage):
             time.sleep(1.0)
         GHPDevicePage._resolve_page(self).go_to_tab("Devices")
 
+    def _cm_rescue_plug_on_in_ghp(self, plug_name: str, on_wait: float) -> bool:
+        """Fail-safe rescue: ensure `plug_name` is restored to ON in iGHP even if a step failed after OFF."""
+        self._logger.warning(
+            f"[PowerCycle] FAIL-SAFE: '{plug_name}' was switched OFF without confirmed ON; "
+            "running emergency ON recovery..."
+        )
+        bundle_id = get_ghp_bundle_id()
+        try:
+            state_now = self._cm_read_plug_detail_switch_state()
+            if state_now == "on":
+                return True
+            if state_now == "off":
+                if self._cm_toggle_plug_detail_switch(plug_name, target_off=False):
+                    time.sleep(on_wait)
+                    return True
+
+            try:
+                self.driver.terminate_app(bundle_id)
+                time.sleep(1.2)
+            except Exception:
+                pass
+            self.driver.activate_app(bundle_id)
+            time.sleep(2.5)
+            if not self._cm_ensure_devices_tab_ready():
+                return False
+            if not self._cm_open_plug_detail_page(plug_name):
+                return False
+            if self._cm_toggle_plug_detail_switch(plug_name, target_off=False):
+                time.sleep(on_wait)
+                self._logger.info(
+                    f"[PowerCycle] FAIL-SAFE successfully restored '{plug_name}' to ON.")
+                return True
+        except Exception as rescue_err:
+            self._logger.error(
+                f"[PowerCycle] FAIL-SAFE error restoring '{plug_name}' to ON: {rescue_err}")
+        return False
+
     def _cm_power_cycle_one_plug(self, plug_name: str, off_wait: float, on_wait: float) -> bool:
         """Open `plug_name` detail page, toggle Switch OFF -> wait -> ON -> wait, then go back."""
         if not self._cm_ensure_devices_tab_ready():
@@ -2850,16 +2887,20 @@ class GHPCommissioningPageObject(BasePage):
         if not self._cm_open_plug_detail_page(plug_name):
             return False
 
+        turned_off = False
+        confirmed_on = False
         try:
             initial = self._cm_read_plug_detail_switch_state()
             self._logger.info(
                 f"[PowerCycle] '{plug_name}' detail Switch initial state: '{initial}'")
+            turned_off = initial == "off"
             if initial != "off":
                 self._logger.info(
                     f"[PowerCycle] Switching OFF '{plug_name}' and waiting {off_wait:.1f}s..."
                 )
                 if not self._cm_toggle_plug_detail_switch(plug_name, target_off=True):
                     return False
+                turned_off = True
                 time.sleep(off_wait)
 
             self._logger.info(
@@ -2867,9 +2908,16 @@ class GHPCommissioningPageObject(BasePage):
             )
             if not self._cm_toggle_plug_detail_switch(plug_name, target_off=False):
                 return False
+            confirmed_on = True
             time.sleep(on_wait)
             return True
+        except WebDriverException as err:
+            self._logger.error(f"[PowerCycle] Failed power-cycling '{plug_name}': {err}")
+            return False
         finally:
+            if turned_off and not confirmed_on:
+                if self._cm_rescue_plug_on_in_ghp(plug_name, on_wait):
+                    confirmed_on = True
             self._cm_exit_plug_detail_page()
 
     def power_cycle_smart_plug(
