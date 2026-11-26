@@ -182,6 +182,19 @@ class GHPCommissioningPageObject(BasePage):
         'type == "XCUIElementTypeButton" AND ('
         'name == "Add Device to Google Fabric" OR label == "Add Device to Google Fabric")'
     )
+    ADD_3P_FABRIC_ANY_PREDICATE: str = (
+        'type IN {"XCUIElementTypeButton", "XCUIElementTypeCell", "XCUIElementTypeStaticText", "XCUIElementTypeOther"} '
+        'AND (name CONTAINS[c] "3P Fabric" OR label CONTAINS[c] "3P Fabric" OR value CONTAINS[c] "3P Fabric")'
+    )
+    ADD_GOOGLE_FABRIC_ANY_PREDICATE: str = (
+        'type IN {"XCUIElementTypeButton", "XCUIElementTypeCell", "XCUIElementTypeStaticText", "XCUIElementTypeOther"} '
+        'AND (name CONTAINS[c] "Google Fabric" OR label CONTAINS[c] "Google Fabric" OR value CONTAINS[c] "Google Fabric")'
+    )
+    FABRIC_MENU_SIBLING_PREDICATE: str = (
+        'type IN {"XCUIElementTypeButton", "XCUIElementTypeCell", "XCUIElementTypeStaticText"} AND ('
+        'name IN {"Add Room", "Setup Hub", "Link Cloud Account"} '
+        'OR label IN {"Add Room", "Setup Hub", "Link Cloud Account"})'
+    )
 
     # Apple Matter pairing-code entry screens
     MORE_OPTIONS_LINK_PREDICATE: str = (
@@ -231,6 +244,7 @@ class GHPCommissioningPageObject(BasePage):
         self._cm_last_apple_card_title: str = ""
         self._cm_last_apple_card_status: str = ""
         self._cm_springboard_failure_title: str = ""
+        self._cm_prefer_3p_fabric: bool = True
 
     @classmethod
     def _resolve_page(cls, ctx: Any) -> "GHPCommissioningPageObject":
@@ -361,54 +375,214 @@ class GHPCommissioningPageObject(BasePage):
     # -------------------------------------------------------------------------
     # 1. Click '+' and select 'Add Device to Google & 3P Fabric'
     # -------------------------------------------------------------------------
+    def _cm_find_fabric_menu_buttons(
+            self,
+    ) -> Tuple[Optional[WebElement], Optional[WebElement]]:
+        """Locate the 3P and 1P fabric options in the open '+' menu (Button or generic wrapper)."""
+        btn_3p = self._cm_find_displayed(IOS_PREDICATE_BY, self.ADD_3P_FABRIC_PREDICATE)
+        btn_1p = self._cm_find_displayed(IOS_PREDICATE_BY, self.ADD_GOOGLE_FABRIC_PREDICATE)
+        if btn_3p is None:
+            for el in self._cm_find_all(IOS_PREDICATE_BY, self.ADD_3P_FABRIC_ANY_PREDICATE):
+                txt = " ".join(self._cm_read_text(el).split()).lower()
+                if "add" not in txt or "3p fabric" not in txt or "required" in txt or "ios 17" in txt:
+                    continue
+                try:
+                    if el.is_displayed():
+                        btn_3p = el
+                        break
+                except (StaleElementReferenceException, WebDriverException):
+                    continue
+        if btn_1p is None:
+            for el in self._cm_find_all(IOS_PREDICATE_BY, self.ADD_GOOGLE_FABRIC_ANY_PREDICATE):
+                txt = " ".join(self._cm_read_text(el).split()).lower()
+                if (
+                        "add" not in txt
+                        or "google fabric" not in txt
+                        or "3p" in txt
+                        or "required" in txt
+                        or "ios 17" in txt
+                ):
+                    continue
+                try:
+                    if el.is_displayed():
+                        btn_1p = el
+                        break
+                except (StaleElementReferenceException, WebDriverException):
+                    continue
+        return btn_3p, btn_1p
+
+    def _cm_is_fabric_menu_open(self) -> bool:
+        """Return True if GHP's top-left '+' dropdown menu is still open on screen."""
+        btn_3p, btn_1p = self._cm_find_fabric_menu_buttons()
+        if btn_3p is not None or btn_1p is not None:
+            return True
+        return self._cm_find_displayed(IOS_PREDICATE_BY,
+                                       self.FABRIC_MENU_SIBLING_PREDICATE) is not None
+
+    def _cm_tap_menu_rect_or_element(
+            self,
+            elem: Optional[WebElement],
+            cached_rect: Optional[dict],
+            desc: str,
+            prefer_coord_first: bool = False,
+    ) -> bool:
+        """Click/tap a UIMenu item, falling back cleanly to coordinate tap when click() is swallowed."""
+        rect = cached_rect
+        if elem is not None and rect is None:
+            try:
+                r = elem.rect
+                if isinstance(r, dict) and r.get("width", 0) > 0 and r.get("height", 0) > 0:
+                    rect = r
+            except (StaleElementReferenceException, WebDriverException):
+                rect = None
+
+        if prefer_coord_first and rect:
+            cx = int(rect["x"] + rect["width"] / 2)
+            cy = int(rect["y"] + rect["height"] / 2)
+            try:
+                self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                return True
+            except WebDriverException:
+                pass
+        if elem is not None:
+            if self._cm_click_or_tap(elem, desc=desc):
+                return True
+        if rect:
+            cx = int(rect["x"] + rect["width"] / 2)
+            cy = int(rect["y"] + rect["height"] / 2)
+            try:
+                self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                return True
+            except WebDriverException:
+                pass
+        return False
+
     def _cm_open_fabric_menu_and_select(self, prefer_3p: bool = True) -> Optional[str]:
         """Internal helper: returns None on success, or an error description string on failure."""
+        self._cm_prefer_3p_fabric = bool(prefer_3p)
         GHPDevicePage._resolve_page(self).go_to_tab("Devices")
-        for attempt in range(1, 4):
-            btn_3p = self._cm_find_displayed(IOS_PREDICATE_BY, self.ADD_3P_FABRIC_PREDICATE)
-            btn_1p = self._cm_find_displayed(IOS_PREDICATE_BY, self.ADD_GOOGLE_FABRIC_PREDICATE)
+        ios176_pred = 'type == "XCUIElementTypeStaticText" AND label CONTAINS[c] "iOS 17.6+ required"'
+        tap_coords_next = False
+
+        for attempt in range(1, 5):
+            btn_3p, btn_1p = self._cm_find_fabric_menu_buttons()
             if btn_3p is None and btn_1p is None:
                 add_el = self._cm_find_displayed(
                     IOS_PREDICATE_BY, self.TOP_LEFT_ADD_PREDICATE, allow_hidden=True
                 )
                 if add_el is not None:
-                    self._logger.info(f"Tapping top-left '+' (Add) button (attempt {attempt}/3)...")
+                    self._logger.info(f"Tapping top-left '+' (Add) button (attempt {attempt}/4)...")
                     if not self._cm_tap_center(add_el, desc="GHP '+' Add button"):
                         self.driver.execute_script("mobile: tap", {"x": 38, "y": 69})
                 else:
                     self._logger.info(
-                        f"'+' element not exposed as accessible; tapping (38, 69) (attempt {attempt}/3)..."
+                        f"'+' element not exposed as accessible; tapping (38, 69) (attempt {attempt}/4)..."
                     )
                     self.driver.execute_script("mobile: tap", {"x": 38, "y": 69})
 
                 menu_deadline = time.time() + 4.0
                 while time.time() < menu_deadline:
-                    btn_3p = self._cm_find_displayed(IOS_PREDICATE_BY, self.ADD_3P_FABRIC_PREDICATE)
-                    btn_1p = self._cm_find_displayed(IOS_PREDICATE_BY,
-                                                     self.ADD_GOOGLE_FABRIC_PREDICATE)
+                    btn_3p, btn_1p = self._cm_find_fabric_menu_buttons()
                     if btn_3p is not None or btn_1p is not None:
+                        # Allow UIMenu opening spring animation to settle briefly before tapping item
+                        time.sleep(0.25)
                         break
                     time.sleep(0.3)
 
             target_btn = (btn_3p or btn_1p) if prefer_3p else (btn_1p or btn_3p)
             if target_btn is not None:
                 chosen_label = self._cm_read_text(target_btn) or "Add Device to Fabric"
-                self._logger.info(f"Clicking fabric menu option: '{chosen_label}'...")
-                self._cm_click_or_tap(target_btn, desc=chosen_label)
-                time.sleep(1.5)
+                try:
+                    target_rect = target_btn.rect
+                except (StaleElementReferenceException, WebDriverException):
+                    target_rect = None
 
-                # If device is < iOS 17.6, GHP shows snackbar 'iOS 17.6+ required to add 3P Fabric.'
-                ios176_warn = self._cm_find_displayed(
-                    IOS_PREDICATE_BY,
-                    'type == "XCUIElementTypeStaticText" AND label CONTAINS[c] "iOS 17.6+ required"',
+                self._logger.info(
+                    f"Clicking fabric menu option: '{chosen_label}' (attempt {attempt}/4)..."
                 )
-                if ios176_warn is not None and prefer_3p:
+                self._cm_tap_menu_rect_or_element(
+                    target_btn,
+                    target_rect,
+                    desc=chosen_label,
+                    prefer_coord_first=tap_coords_next,
+                )
+
+                # Confirm menu actually dismissed (or iOS 17.6+ warning appeared) instead of assuming click landed
+                ios176_triggered = False
+                menu_closed = False
+                verify_deadline = time.time() + 2.5
+                while time.time() < verify_deadline:
+                    if self._cm_find_displayed(IOS_PREDICATE_BY, ios176_pred) is not None:
+                        ios176_triggered = True
+                        break
+                    if not self._cm_is_fabric_menu_open():
+                        menu_closed = True
+                        break
+                    time.sleep(0.25)
+
+                if ios176_triggered and prefer_3p:
                     self._logger.warning(
                         "Detected 'iOS 17.6+ required to add 3P Fabric'; falling back to 'Add Device to Google Fabric'..."
                     )
                     prefer_3p = False
+                    self._cm_prefer_3p_fabric = False
+                    tap_coords_next = False
                     continue
-                return None
+
+                if menu_closed:
+                    # Wait briefly unless Apple sheet is already visible to catch async 'iOS 17.6+ required' toast
+                    if (
+                            prefer_3p
+                            and self._cm_find_displayed(IOS_PREDICATE_BY,
+                                                        self.MORE_OPTIONS_LINK_PREDICATE)
+                            is None
+                    ):
+                        time.sleep(0.8)
+                        if self._cm_find_displayed(IOS_PREDICATE_BY, ios176_pred) is not None:
+                            self._logger.warning(
+                                "Detected 'iOS 17.6+ required to add 3P Fabric'; falling back to 'Add Device to Google Fabric'..."
+                            )
+                            prefer_3p = False
+                            self._cm_prefer_3p_fabric = False
+                            tap_coords_next = False
+                            continue
+                    return None
+
+                # Menu is STILL visible on screen: switch input mode (coordinate tap <-> native click) right away
+                fallback_coord = not tap_coords_next
+                self._logger.warning(
+                    f"[FabricMenu] '{chosen_label}' menu still visible after tap (attempt {attempt}/4); "
+                    f"retrying via {'coordinate tap' if fallback_coord else 'element click'}..."
+                )
+                fresh_3p, fresh_1p = self._cm_find_fabric_menu_buttons()
+                fresh_target = (fresh_3p or fresh_1p) if prefer_3p else (fresh_1p or fresh_3p)
+                self._cm_tap_menu_rect_or_element(
+                    fresh_target,
+                    target_rect,
+                    desc=f"{chosen_label} retry",
+                    prefer_coord_first=fallback_coord,
+                )
+                retry_deadline = time.time() + 2.2
+                while time.time() < retry_deadline:
+                    if self._cm_find_displayed(IOS_PREDICATE_BY, ios176_pred) is not None:
+                        ios176_triggered = True
+                        break
+                    if not self._cm_is_fabric_menu_open():
+                        menu_closed = True
+                        break
+                    time.sleep(0.25)
+
+                if ios176_triggered and prefer_3p:
+                    self._logger.warning(
+                        "Detected 'iOS 17.6+ required to add 3P Fabric'; falling back to 'Add Device to Google Fabric'..."
+                    )
+                    prefer_3p = False
+                    self._cm_prefer_3p_fabric = False
+                    tap_coords_next = False
+                    continue
+                if menu_closed:
+                    return None
+                tap_coords_next = not tap_coords_next
 
         return "Failed to open '+' menu and click 'Add Device to Google & 3P Fabric' in GHP."
 
@@ -622,6 +796,8 @@ class GHPCommissioningPageObject(BasePage):
         more_options_clicks = 0
         not_shown_clicks = 0
         enter_code_clicks = 0
+        fabric_menu_recoveries = 0
+        last_fabric_menu_recovery_at = 0.0
 
         while time.time() < deadline:
             # Fast single-query check for terminal Apple error cards (e.g. 'Unable to Add Accessory')
@@ -772,6 +948,23 @@ class GHPCommissioningPageObject(BasePage):
 
             if self._cm_handle_apple_system_alert():
                 time.sleep(0.8)
+                continue
+
+            # Guard against GHP '+' dropdown menu remaining stuck open instead of opening Apple Matter sheet
+            if (
+                    more_options_clicks == 0
+                    and not_shown_clicks == 0
+                    and enter_code_clicks == 0
+                    and fabric_menu_recoveries < 2
+                    and (time.time() - last_fabric_menu_recovery_at) >= 2.0
+                    and self._cm_is_fabric_menu_open()
+            ):
+                fabric_menu_recoveries += 1
+                last_fabric_menu_recovery_at = time.time()
+                self._logger.warning(
+                    "[PairingCode] GHP '+' fabric menu is still open on screen; retrying selection..."
+                )
+                self._cm_open_fabric_menu_and_select(prefer_3p=self._cm_prefer_3p_fabric)
                 continue
 
             apple_err = self._cm_detect_apple_failure_title(include_overlay_scan=True)

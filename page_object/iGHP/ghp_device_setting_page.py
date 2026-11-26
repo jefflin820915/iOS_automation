@@ -53,6 +53,49 @@ class GHPDeviceSettingPage(BasePage):
         'OR value CONTAINS[c] "Decommission")'
     )
 
+    REMOVE_BTN_PREDICATE: str = (
+        'type == "XCUIElementTypeButton" AND ('
+        'name IN {"Remove", "Remove Device", "Remove device", "Remove Camera", "Remove camera", '
+        '"Remove Accessory", "Remove accessory", "Delete Device", "Delete device"} '
+        'OR label IN {"Remove", "Remove Device", "Remove device", "Remove Camera", "Remove camera", '
+        '"Remove Accessory", "Remove accessory", "Delete Device", "Delete device"} '
+        'OR value IN {"Remove", "Remove Device", "Remove device", "Remove Camera", "Remove camera", '
+        '"Remove Accessory", "Remove accessory", "Delete Device", "Delete device"})'
+    )
+
+    REMOVE_ROW_PREDICATE: str = (
+        'type IN {"XCUIElementTypeCell", "XCUIElementTypeStaticText", "XCUIElementTypeOther"} AND ('
+        'name IN {"Remove", "Remove Device", "Remove device", "Remove Camera", "Remove camera", '
+        '"Remove Accessory", "Remove accessory", "Delete Device", "Delete device"} '
+        'OR label IN {"Remove", "Remove Device", "Remove device", "Remove Camera", "Remove camera", '
+        '"Remove Accessory", "Remove accessory", "Delete Device", "Delete device"} '
+        'OR value IN {"Remove", "Remove Device", "Remove device", "Remove Camera", "Remove camera", '
+        '"Remove Accessory", "Remove accessory", "Delete Device", "Delete device"})'
+    )
+
+    REMOVE_EXACT_LABELS: Tuple[str, ...] = (
+        "remove",
+        "remove device",
+        "remove camera",
+        "remove accessory",
+        "delete device",
+        "delete accessory",
+    )
+
+    REMOVE_EXCLUDED_KEYWORDS: Tuple[str, ...] = (
+        "history",
+        "cancel",
+        "video",
+        "recording",
+        "event",
+        "zone",
+        "schedule",
+        "favorite",
+        "activity",
+        "light",
+        "chime",
+    )
+
     DECOMMISSION_DESCENDANT_XPATH: str = (
         '//XCUIElementTypeButton[.//XCUIElementTypeStaticText['
         '@name="Decommission" or @label="Decommission" or @value="Decommission"]] | '
@@ -63,6 +106,7 @@ class GHPDeviceSettingPage(BasePage):
     ALERT_CONTAINER_PREDICATE: str = (
         'type IN {"XCUIElementTypeAlert", "XCUIElementTypeSheet"} AND ('
         'name CONTAINS[c] "Decommission" OR label CONTAINS[c] "Decommission" '
+        'OR name CONTAINS[c] "Remove" OR label CONTAINS[c] "Remove" '
         'OR name CONTAINS[c] "Are you sure" OR label CONTAINS[c] "Are you sure")'
     )
 
@@ -189,29 +233,95 @@ class GHPDeviceSettingPage(BasePage):
                 continue
         return ""
 
-    def _scroll_settings(self, direction: str = "down") -> None:
-        try:
-            win = self.driver.get_window_size()
-            w = int(win.get("width", 390))
-            h = int(win.get("height", 844))
-        except Exception:
-            w, h = 390, 844
-        cx = w // 2
+    def _scroll_settings(self, direction: str = "down", x_ratio: float = 0.5) -> None:
+        w, h = self._get_window_dimensions()
+        cx = max(20, min(w - 20, int(w * x_ratio)))
         if direction == "down":
-            from_y, to_y = int(h * 0.72), int(h * 0.28)
+            from_y, to_y = int(h * 0.80), int(h * 0.20)
         else:
-            from_y, to_y = int(h * 0.28), int(h * 0.72)
+            from_y, to_y = int(h * 0.22), int(h * 0.80)
+        scrolled = False
         try:
             self.driver.execute_script(
                 "mobile: dragFromToForDuration",
-                {"duration": 0.25, "fromX": cx, "fromY": from_y, "toX": cx, "toY": to_y},
+                {"duration": 0.30, "fromX": cx, "fromY": from_y, "toX": cx, "toY": to_y},
             )
+            scrolled = True
         except WebDriverException:
+            pass
+        if not scrolled:
             try:
                 self.driver.execute_script("mobile: scroll", {"direction": direction})
+                scrolled = True
             except WebDriverException:
                 pass
-        time.sleep(0.8)
+        if not scrolled:
+            try:
+                swipe_dir = "up" if direction == "down" else "down"
+                self.driver.execute_script("mobile: swipe", {"direction": swipe_dir})
+            except WebDriverException:
+                pass
+        time.sleep(0.7)
+
+    def _get_settings_scroll_signature(self) -> Tuple[Tuple[str, int], ...]:
+        """Capture a lightweight signature of bottom-most visible Settings items to detect scroll movement."""
+        _win_w, win_h = self._get_window_dimensions()
+        sig: List[Tuple[str, int]] = []
+        with self._fast_probe():
+            for cls_name in ("XCUIElementTypeStaticText", "XCUIElementTypeButton"):
+                try:
+                    elems = self.driver.find_elements(AppiumBy.CLASS_NAME, cls_name)
+                except WebDriverException:
+                    continue
+                for el in elems[-16:]:
+                    try:
+                        r = el.rect
+                        if not isinstance(r, dict):
+                            continue
+                        y = float(r.get("y", -1))
+                        h = float(r.get("height", 0))
+                        if h <= 0 or y < 0 or y > float(win_h):
+                            continue
+                        txt = self._read_kv_text(el) or self._read_text(el)
+                        if txt:
+                            sig.append((txt, int(round(y / 4.0))))
+                    except (StaleElementReferenceException, WebDriverException, TypeError,
+                            ValueError):
+                        continue
+                if sig:
+                    break
+        return tuple(sig[-8:])
+
+    def _scroll_settings_down_checked(self) -> bool:
+        """Scroll Settings down and return True if the viewport actually moved (False if stuck or at bottom)."""
+        before_sig = self._get_settings_scroll_signature()
+        self._scroll_settings("down")
+        after_sig = self._get_settings_scroll_signature()
+        if not before_sig or after_sig != before_sig:
+            return True
+
+        # Primary center drag had no effect: try native mobile:scroll, left-side drag (away from controls), and swipe
+        try:
+            self.driver.execute_script("mobile: scroll", {"direction": "down"})
+            time.sleep(0.7)
+            if self._get_settings_scroll_signature() != before_sig:
+                return True
+        except WebDriverException:
+            pass
+
+        self._scroll_settings("down", x_ratio=0.18)
+        if self._get_settings_scroll_signature() != before_sig:
+            return True
+
+        try:
+            self.driver.execute_script("mobile: swipe", {"direction": "up"})
+            time.sleep(0.7)
+            if self._get_settings_scroll_signature() != before_sig:
+                return True
+        except WebDriverException:
+            pass
+
+        return False
 
     @classmethod
     def _match_canonical_key(cls, raw_label: str) -> Optional[str]:
@@ -288,7 +398,7 @@ class GHPDeviceSettingPage(BasePage):
                     pass
 
     def get_device_information(
-            self, max_scrolls: int = 4, verify_ota_status: bool = True
+            self, max_scrolls: int = 8, verify_ota_status: bool = True
     ) -> Dict[str, str]:
         """Extract Software Version, Serial Number, IP Address, Device ID, and OTA Status from Camera Settings."""
         page = GHPDeviceSettingPage._resolve_page(self)
@@ -303,16 +413,23 @@ class GHPDeviceSettingPage(BasePage):
                 break
             time.sleep(0.5)
 
-        for step in range(max_scrolls):
+        unchanged_scrolls = 0
+        for _step in range(max_scrolls):
             page._collect_visible_kv_pairs(collected)
-            # Stop scrolling early if Decommission button is already visible and core fields are captured
+            # Stop scrolling early if Decommission/Remove button is already visible and core fields are captured
             if (
                     collected.get("software_version")
                     and collected.get("serial_number")
                     and page._find_settings_decommission_button() is not None
             ):
                 break
-            page._scroll_settings("down")
+            moved = page._scroll_settings_down_checked()
+            if moved:
+                unchanged_scrolls = 0
+            else:
+                unchanged_scrolls += 1
+                if unchanged_scrolls >= 2:
+                    break
         page._collect_visible_kv_pairs(collected)
         page._store_tech_info(self, collected)
 
@@ -351,7 +468,9 @@ class GHPDeviceSettingPage(BasePage):
         txt = self._read_text(elem)
         norm = " ".join(txt.split())
         low = norm.lower()
-        if "history" in low or "cancel" in low or len(low) > 35:
+        if not low or len(low) > 35 or any(ex in low for ex in self.REMOVE_EXCLUDED_KEYWORDS):
+            return None
+        if "decommission" not in low and low not in self.REMOVE_EXACT_LABELS:
             return None
 
         try:
@@ -396,17 +515,24 @@ class GHPDeviceSettingPage(BasePage):
         else:
             type_rank = 3
 
-        exact_rank = 0 if low == "decommission" else 1
+        if low == "decommission":
+            exact_rank = 0
+        elif low in self.REMOVE_EXACT_LABELS:
+            exact_rank = 1
+        else:
+            exact_rank = 2
         return (0 if displayed else 1, type_rank, exact_rank, -cy)
 
     def _find_settings_decommission_button(self) -> Optional[WebElement]:
-        """Locate the 'Decommission' button/row in Camera Settings (including SwiftUI Cell/StaticText or off-displayed)."""
+        """Locate the 'Decommission' / 'Remove' button/row in Camera Settings."""
         win_w, win_h = self._get_window_dimensions()
         locators: Tuple[Tuple[str, str], ...] = (
             (IOS_PREDICATE_BY, self.DECOMMISSION_BTN_PREDICATE),
             (AppiumBy.ACCESSIBILITY_ID, "Decommission"),
             (IOS_PREDICATE_BY, self.DECOMMISSION_ROW_PREDICATE),
             (AppiumBy.XPATH, self.DECOMMISSION_DESCENDANT_XPATH),
+            (IOS_PREDICATE_BY, self.REMOVE_BTN_PREDICATE),
+            (IOS_PREDICATE_BY, self.REMOVE_ROW_PREDICATE),
         )
         scored: List[Tuple[Tuple[int, int, int, float], WebElement]] = []
         with self._fast_probe():
@@ -436,8 +562,8 @@ class GHPDeviceSettingPage(BasePage):
                     except WebDriverException:
                         continue
                     for el in elems[-12:]:
-                        txt = self._read_text(el)
-                        if "decommission" not in txt.lower():
+                        txt = " ".join(self._read_text(el).split()).lower()
+                        if "decommission" not in txt and txt not in self.REMOVE_EXACT_LABELS:
                             continue
                         score = self._evaluate_decommission_candidate(el, win_w, win_h)
                         if score is not None:
@@ -723,11 +849,13 @@ class GHPDeviceSettingPage(BasePage):
         """
         win_w, win_h = self._get_window_dimensions()
         with self._fast_probe():
-            # 1. Native 'Decommission' confirmation alert/sheet
+            # 1. Native 'Decommission' / 'Remove' confirmation alert/sheet
             alert_btns: List[WebElement] = []
             for chain in (
                     '**/XCUIElementTypeAlert/**/XCUIElementTypeButton[`name == "Decommission" OR label == "Decommission"`]',
                     '**/XCUIElementTypeSheet/**/XCUIElementTypeButton[`name == "Decommission" OR label == "Decommission"`]',
+                    '**/XCUIElementTypeAlert/**/XCUIElementTypeButton[`name IN {"Remove", "Remove Device", "Delete"} OR label IN {"Remove", "Remove Device", "Delete"}`]',
+                    '**/XCUIElementTypeSheet/**/XCUIElementTypeButton[`name IN {"Remove", "Remove Device", "Delete"} OR label IN {"Remove", "Remove Device", "Delete"}`]',
             ):
                 try:
                     alert_btns.extend(self.driver.find_elements(IOS_CLASS_CHAIN_BY, chain))
@@ -735,15 +863,16 @@ class GHPDeviceSettingPage(BasePage):
                     pass
 
             if not alert_btns:
-                try:
-                    all_btns = self.driver.find_elements(IOS_PREDICATE_BY,
-                                                         self.DECOMMISSION_BTN_PREDICATE)
-                    visible_btns = [b for b in all_btns if b.is_displayed()]
-                    if len(visible_btns) >= 2:
-                        visible_btns.sort(key=lambda b: b.rect.get("y", 9999))
-                        alert_btns = [visible_btns[0]]
-                except WebDriverException:
-                    pass
+                for btn_pred in (self.DECOMMISSION_BTN_PREDICATE, self.REMOVE_BTN_PREDICATE):
+                    try:
+                        all_btns = self.driver.find_elements(IOS_PREDICATE_BY, btn_pred)
+                        visible_btns = [b for b in all_btns if b.is_displayed()]
+                        if len(visible_btns) >= 2:
+                            visible_btns.sort(key=lambda b: b.rect.get("y", 9999))
+                            alert_btns = [visible_btns[0]]
+                            break
+                    except WebDriverException:
+                        pass
 
             for confirm_btn in alert_btns:
                 rect = None
@@ -751,7 +880,8 @@ class GHPDeviceSettingPage(BasePage):
                     rect = confirm_btn.rect
                 except WebDriverException:
                     rect = None
-                self._logger.info("Confirming 'Decommission' in alert/confirmation dialog...")
+                confirm_label = self._read_text(confirm_btn) or "Decommission"
+                self._logger.info(f"Confirming '{confirm_label}' in alert/confirmation dialog...")
                 try:
                     confirm_btn.click()
                     time.sleep(1.0)
@@ -767,7 +897,7 @@ class GHPDeviceSettingPage(BasePage):
                 if still_open:
                     try:
                         self.driver.execute_script(
-                            "mobile: alert", {"action": "accept", "buttonLabel": "Decommission"}
+                            "mobile: alert", {"action": "accept", "buttonLabel": confirm_label}
                         )
                         time.sleep(0.8)
                     except WebDriverException:
@@ -879,6 +1009,9 @@ class GHPDeviceSettingPage(BasePage):
                         "继续",
                         "Allow",
                         "允許",
+                        "Remove Device",
+                        "Remove",
+                        "Delete",
                         "OK",
                         "好",
                 ):
@@ -1114,32 +1247,48 @@ class GHPDeviceSettingPage(BasePage):
                         pass
             time.sleep(0.8)
 
-    def click_remove_device_btn(self, max_scrolls: int = 6) -> bool:
-        """Scroll to 'Decommission' in GHP Camera Settings, click it, and complete native + WebView removal confirmations."""
-        page = GHPDeviceSettingPage._resolve_page(self)
-        page._logger.info("Scrolling to 'Decommission' button in GHP Settings...")
-        decom_btn: Optional[WebElement] = None
+    def _scroll_settings_to_find_remove_button(
+            self, max_scrolls: int = 12
+    ) -> Optional[WebElement]:
+        """Scroll Settings downward until 'Decommission' / 'Remove' appears or bottom is confirmed."""
         reopen_attempts = 0
+        unchanged_scrolls = 0
         for step in range(max_scrolls + 1):
-            decom_btn = page._find_settings_decommission_button()
+            decom_btn = self._find_settings_decommission_button()
             if decom_btn is not None:
-                break
-            if reopen_attempts < 2 and page._reopen_settings_if_on_player_page():
+                return decom_btn
+            if reopen_attempts < 2 and self._reopen_settings_if_on_player_page():
                 reopen_attempts += 1
-                decom_btn = page._find_settings_decommission_button()
+                unchanged_scrolls = 0
+                decom_btn = self._find_settings_decommission_button()
                 if decom_btn is not None:
+                    return decom_btn
+            if step >= max_scrolls:
+                break
+            moved = self._scroll_settings_down_checked()
+            if moved:
+                unchanged_scrolls = 0
+            else:
+                unchanged_scrolls += 1
+                if unchanged_scrolls >= 2:
+                    # Reached bottom of scroll view: wait briefly and perform one final check before stopping
+                    time.sleep(0.5)
+                    decom_btn = self._find_settings_decommission_button()
+                    if decom_btn is not None:
+                        return decom_btn
+                    if reopen_attempts < 2 and self._reopen_settings_if_on_player_page():
+                        reopen_attempts += 1
+                        unchanged_scrolls = 0
+                        continue
                     break
-            if step < max_scrolls:
-                page._scroll_settings("down")
+        return self._find_settings_decommission_button()
 
-        if decom_btn is None:
-            page._scroll_settings("up")
-            decom_btn = page._find_settings_decommission_button()
-        if decom_btn is None and reopen_attempts < 2 and page._reopen_settings_if_on_player_page():
-            decom_btn = page._find_settings_decommission_button()
-            if decom_btn is None:
-                page._scroll_settings("down")
-                decom_btn = page._find_settings_decommission_button()
+    def click_remove_device_btn(self, max_scrolls: int = 12) -> bool:
+        """Scroll all the way down to 'Decommission' / 'Remove' in GHP Settings, click it, and confirm removal."""
+        page = GHPDeviceSettingPage._resolve_page(self)
+        page._logger.info(
+            "Scrolling to bottom of GHP Settings for 'Decommission' / 'Remove' button...")
+        decom_btn = page._scroll_settings_to_find_remove_button(max_scrolls=max_scrolls)
 
         if decom_btn is None:
             page._log_decommission_probe_diagnostics()
