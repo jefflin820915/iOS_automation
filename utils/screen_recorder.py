@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from typing import Any, Dict, Optional
+
 from appium import webdriver
 from appium.options.common import AppiumOptions
 from appium.webdriver.webdriver import WebDriver
@@ -17,6 +18,7 @@ logger = logging_utils.get_logger(__name__, "screen_recorder")
 
 class _LocalVideoUploadServer:
     """Ephemeral localhost HTTP server receiving streamed video from Appium's `remotePath` option.
+
     Why this exists:
     When `driver.stop_recording_screen()` is called without `remotePath`, Appium reads the entire
     `.mp4` file into Node.js memory, converts it to a giant Base64 string, and calls `JSON.stringify`
@@ -27,6 +29,7 @@ class _LocalVideoUploadServer:
     via `fs.createReadStream` over loopback HTTP and return an empty JSON string `""`, completely
     avoiding Base64 encoding and V8 `JSON.stringify` OOM.
     """
+
     def __init__(self, target_path: str):
         self.target_path = target_path
         self.received_bytes = 0
@@ -34,8 +37,10 @@ class _LocalVideoUploadServer:
         self.error: Optional[Exception] = None
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+
     def start(self) -> str:
         parent = self
+
         class _UploadHandler(BaseHTTPRequestHandler):
             def _handle_upload(self) -> None:
                 try:
@@ -86,10 +91,13 @@ class _LocalVideoUploadServer:
                         self.end_headers()
                     except Exception:
                         pass
+
             do_PUT = _handle_upload
             do_POST = _handle_upload
+
             def log_message(self, format: str, *args: Any) -> None:
                 return  # Suppress noisy BaseHTTPRequestHandler stderr logs
+
         self._server = HTTPServer(("127.0.0.1", 0), _UploadHandler)
         port = self._server.server_address[1]
         self._thread = threading.Thread(
@@ -97,6 +105,7 @@ class _LocalVideoUploadServer:
         )
         self._thread.start()
         return f"http://127.0.0.1:{port}/video.mp4"
+
     def _strip_multipart_envelope(self) -> None:
         """If Appium uploaded as multipart/form-data, strip the outer boundary header and footer."""
         with open(self.target_path, "rb") as f:
@@ -112,6 +121,7 @@ class _LocalVideoUploadServer:
             tail = f.read(tail_read)
             boundary_pos = tail.rfind(b"\r\n--")
             payload_end = (file_len - tail_read + boundary_pos) if boundary_pos >= 0 else file_len
+
         tmp_path = self.target_path + ".raw"
         with open(self.target_path, "rb") as src, open(tmp_path, "wb") as dst:
             src.seek(payload_start)
@@ -123,6 +133,7 @@ class _LocalVideoUploadServer:
                 dst.write(chunk)
                 remaining -= len(chunk)
         os.replace(tmp_path, self.target_path)
+
     def close(self) -> None:
         if self._server:
             try:
@@ -136,8 +147,11 @@ class _LocalVideoUploadServer:
             self._server = None
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+
+
 class ScreenRecorder:
     """Handles screen recording of iOS devices using Appium WebDriver and saves to Additional log.
+
     Uses the standard Appium API (driver.start_recording_screen / stop_recording_screen).
     - Defaults to H.264 (`videoType='libx264'`, `pixelFormat='yuv420p'`, `videoFps=5`, `videoQuality='low'`)
       so a 10-15 min recording is ~5-15 MB instead of ~250 MB (Motion JPEG). Automatically falls back to
@@ -146,6 +160,7 @@ class ScreenRecorder:
       does not Base64-encode and `JSON.stringify` a multi-hundred-MB buffer in V8 memory (which crashes
       Node.js with `FATAL ERROR: Zone Allocation failed - process out of memory`).
     """
+
     WDA_ERROR_SIGNATURES = (
         "ECONNREFUSED",
         "ECONNRESET",
@@ -157,8 +172,10 @@ class ScreenRecorder:
         "invalid session id",
         "NoSuchDriverError",
     )
+
     def __init__(self, output_dir: str = "Additional log"):
         """Initializes the ScreenRecorder.
+
         Args:
             output_dir: Target directory where video files will be saved. Defaults to "Additional log".
         """
@@ -166,11 +183,13 @@ class ScreenRecorder:
         self._is_recording = False
         self._started_at: Optional[float] = None
         self._time_limit: Optional[int] = None
+
     @classmethod
     def _is_wda_connection_error(cls, exc: Exception) -> bool:
         """Return True if the exception indicates WDA (127.0.0.1:8100) or the Appium session disconnected."""
         msg = str(exc)
         return any(sig in msg for sig in cls.WDA_ERROR_SIGNATURES)
+
     @staticmethod
     def _reconnect_driver_in_place(driver: WebDriver) -> bool:
         """Rebuild the Appium WebDriver session in-place so all existing driver references heal automatically."""
@@ -185,7 +204,27 @@ class ScreenRecorder:
         try:
             options = AppiumOptions()
             options.load_capabilities(constants.IOS_CAPABILITIES)
-            new_driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
+            try:
+                import fcntl as _fcntl
+                import tempfile as _tempfile
+
+                lock_f = open(os.path.join(_tempfile.gettempdir(), "ios_automation_wda_init.lock"),
+                              "a+")
+                _fcntl.flock(lock_f.fileno(), _fcntl.LOCK_EX)
+            except Exception:
+                lock_f = None
+            try:
+                new_driver = webdriver.Remote(constants.APPIUM_SERVER_URL, options=options)
+            finally:
+                if lock_f is not None:
+                    try:
+                        _fcntl.flock(lock_f.fileno(), _fcntl.LOCK_UN)
+                    except Exception:
+                        pass
+                    try:
+                        lock_f.close()
+                    except Exception:
+                        pass
             new_driver.implicitly_wait(getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0))
             if device_tech_info is not None:
                 new_driver.device_tech_info = device_tech_info
@@ -195,8 +234,10 @@ class ScreenRecorder:
             )
             return True
         except Exception as reconnect_err:
-            logger.error(f"[ScreenRecorder] Failed to rebuild Appium WebDriver session: {reconnect_err}")
+            logger.error(
+                f"[ScreenRecorder] Failed to rebuild Appium WebDriver session: {reconnect_err}")
             return False
+
     def start_recording(
             self,
             driver: WebDriver,
@@ -208,6 +249,7 @@ class ScreenRecorder:
             pixel_format: Optional[str] = "yuv420p",
     ) -> bool:
         """Starts screen recording on the connected iOS device.
+
         Args:
             driver: Active Appium WebDriver instance.
             time_limit: Maximum recording time in seconds (default 1800s / 30 mins).
@@ -223,6 +265,7 @@ class ScreenRecorder:
         if not driver:
             logger.error("[ScreenRecorder] Driver is not initialized. Cannot start recording.")
             return False
+
         options: Dict[str, Any] = {
             "timeLimit": time_limit,
             "videoQuality": video_quality,
@@ -234,6 +277,7 @@ class ScreenRecorder:
             options["videoType"] = video_type
         if pixel_format:
             options["pixelFormat"] = pixel_format
+
         try:
             driver.start_recording_screen(**options)
         except Exception as e:
@@ -241,7 +285,8 @@ class ScreenRecorder:
                 try:
                     driver.start_recording_screen(**options)
                 except Exception as retry_err:
-                    logger.error(f"[ScreenRecorder] Failed to start screen recording after WDA reconnect: {retry_err}")
+                    logger.error(
+                        f"[ScreenRecorder] Failed to start screen recording after WDA reconnect: {retry_err}")
                     self._is_recording = False
                     return False
             elif video_type or pixel_format:
@@ -256,24 +301,28 @@ class ScreenRecorder:
                 try:
                     driver.start_recording_screen(**options)
                 except Exception as fallback_err:
-                    logger.error(f"[ScreenRecorder] Failed to start screen recording: {fallback_err}")
+                    logger.error(
+                        f"[ScreenRecorder] Failed to start screen recording: {fallback_err}")
                     self._is_recording = False
                     return False
             else:
                 logger.error(f"[ScreenRecorder] Failed to start screen recording: {e}")
                 self._is_recording = False
                 return False
+
         self._is_recording = True
         self._started_at = time.time()
         self._time_limit = time_limit
         extra = "".join(
-            f", {key}={value}" for key, value in (("type", video_type), ("pix_fmt", pixel_format)) if value
+            f", {key}={value}" for key, value in (("type", video_type), ("pix_fmt", pixel_format))
+            if value
         )
         logger.info(
             f"[ScreenRecorder] Screen recording started successfully "
             f"(timeLimit={time_limit}s, quality={video_quality}, fps={video_fps}, scale={video_scale}{extra})."
         )
         return True
+
     def stop_recording(
             self,
             driver: WebDriver,
@@ -281,9 +330,11 @@ class ScreenRecorder:
             use_remote_stream: bool = True,
     ) -> Optional[str]:
         """Stops screen recording and saves the .mp4 video to the Additional log directory.
+
         Uses an ephemeral localhost HTTP server (`remotePath`) by default so Appium streams the `.mp4`
         directly to disk instead of Base64-encoding and `JSON.stringify`-ing it in V8 memory.
         Falls back to decoding Base64 if the driver returns Base64 payload directly.
+
         Args:
             driver: Active Appium WebDriver instance.
             test_name: Optional test case name to prefix the output filename.
@@ -294,6 +345,7 @@ class ScreenRecorder:
         if not driver or not self._is_recording:
             logger.warning("[ScreenRecorder] Recording is not active or driver is None.")
             return None
+
         elapsed = time.time() - self._started_at if self._started_at else 0.0
         try:
             abs_output_dir = os.path.abspath(self.output_dir)
@@ -307,10 +359,12 @@ class ScreenRecorder:
             self._is_recording = False
             self._started_at = None
             return None
+
         upload_server: Optional[_LocalVideoUploadServer] = None
         raw_base64_video: Any = None
         try:
-            logger.info(f"[ScreenRecorder] Stopping screen recording (recorded for {elapsed:.0f}s)...")
+            logger.info(
+                f"[ScreenRecorder] Stopping screen recording (recorded for {elapsed:.0f}s)...")
             if use_remote_stream:
                 try:
                     upload_server = _LocalVideoUploadServer(video_path)
@@ -340,11 +394,13 @@ class ScreenRecorder:
                 upload_server.close()
             self._is_recording = False
             self._started_at = None
+
         if self._time_limit and elapsed > self._time_limit:
             logger.warning(
                 f"[ScreenRecorder] Case ran {elapsed:.0f}s but timeLimit is {self._time_limit}s: "
                 f"the last {elapsed - self._time_limit:.0f}s are not in the video."
             )
+
         # Case 1: Streamed directly to disk via localhost HTTP `remotePath`
         if upload_server and upload_server.received_bytes > 0 and os.path.exists(video_path):
             file_size_mb = upload_server.received_bytes / (1024 * 1024)
@@ -353,6 +409,7 @@ class ScreenRecorder:
                 f"(Size: {file_size_mb:.2f} MB)"
             )
             return video_path
+
         # Case 2: Fallback when driver returned Base64 payload directly
         if not raw_base64_video:
             if os.path.exists(video_path):
@@ -362,6 +419,7 @@ class ScreenRecorder:
                     pass
             logger.warning("[ScreenRecorder] No video data received from Appium.")
             return None
+
         try:
             video_bytes = base64.b64decode(raw_base64_video)
             with open(video_path, "wb") as f:
@@ -369,6 +427,8 @@ class ScreenRecorder:
         except Exception as e:
             logger.error(f"[ScreenRecorder] Failed to save screen recording: {e}")
             return None
+
         file_size_mb = len(video_bytes) / (1024 * 1024)
-        logger.info(f"[ScreenRecorder] Screen recording saved to: {video_path} (Size: {file_size_mb:.2f} MB)")
+        logger.info(
+            f"[ScreenRecorder] Screen recording saved to: {video_path} (Size: {file_size_mb:.2f} MB)")
         return video_path

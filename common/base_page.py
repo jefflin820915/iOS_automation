@@ -1,4 +1,5 @@
 """Base Page Object providing core verification, page source dumping, and wait helpers for iOS Appium."""
+
 from datetime import datetime
 import os
 import time
@@ -9,6 +10,7 @@ from appium.webdriver.webelement import WebElement
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+
 from common import constants
 from utils import logging_utils
 
@@ -26,12 +28,15 @@ class PageNotPresentException(Exception):
 
 class BasePage:
     """Base class for all iOS Appium Page Objects."""
+
+    APP_BUNDLE_ID: Optional[str] = None
     PAGE_HEADLINE: Optional[str] = None
     PAGE_LOCATOR: Optional[Tuple[AppiumBy, str]] = None
     INIT_CHECK_THROTTLE_SECONDS: float = 5.0
 
     def __init__(self, driver: WebDriver, timeout: float = 10.0) -> None:
         """Initialize BasePage with iOS Appium WebDriver instance.
+
         Args:
             driver (WebDriver): The active iOS Appium WebDriver instance.
             timeout (float): Default explicit wait timeout in seconds.
@@ -53,6 +58,7 @@ class BasePage:
             remove_existing: bool = True
     ) -> None:
         """Reset per-test failure screenshot tracking on the WebDriver instance.
+
         Args:
             driver: Active Appium WebDriver instance.
             target_path: Optional destination file path for the current test's failure screenshot.
@@ -85,13 +91,16 @@ class BasePage:
             lock: bool = True,
     ) -> Optional[str]:
         """Capture a screenshot immediately at the moment of failure, before recovery/cleanup alters the UI.
+
         Once a screenshot is captured with `lock=True` (the default for terminal failure handlers),
         subsequent calls during recovery/teardown or in `test_runner.py` will not overwrite it.
+
         Args:
             driver: Active Appium WebDriver instance.
             reason: Short description of the failure moment for logging.
             force: If True (and not locked), overwrite an earlier tentative screenshot (e.g. from a probe).
             lock: If True, lock the captured screenshot so later cleanup/unwinding cannot overwrite it.
+
         Returns:
             The saved screenshot file path if captured (or already captured), or None on failure.
         """
@@ -109,6 +118,7 @@ class BasePage:
                         except Exception:
                             pass
                     return already_captured
+
             target_path = getattr(driver, "_failure_screenshot_target", None)
             if not target_path:
                 add_dir = getattr(logging_utils, "_current_additional_log_dir", None) or getattr(
@@ -125,6 +135,7 @@ class BasePage:
                 parent_dir = os.path.dirname(target_path)
                 if parent_dir:
                     os.makedirs(parent_dir, exist_ok=True)
+
             driver.save_screenshot(target_path)
             try:
                 setattr(driver, "_failure_screenshot_captured", target_path)
@@ -143,10 +154,12 @@ class BasePage:
 
     def ensure_device_unlocked_and_ready(self, force: bool = True) -> bool:
         """Ensure the iOS device screen is unlocked first, then resume GHA if suspended.
+
         Args:
             force (bool): If True (default for per-run checks), always query lock & app state.
                 If False (used during bulk PageObject __init__), skip if checked within
                 INIT_CHECK_THROTTLE_SECONDS on the same driver instance.
+
         Returns:
             bool: True if the device screen is unlocked after the check, False otherwise.
         """
@@ -164,12 +177,14 @@ class BasePage:
                 setattr(self.driver, "_last_unlock_ready_check_ts", now)
             except Exception:
                 pass
+
         unlocked = self._unlock_device_if_locked()
         self._resume_if_suspended()
         return unlocked
 
     def get_window_hierarchy(self) -> str:
         """Dump the full XML UI accessibility hierarchy of the active iOS screen.
+
         Returns:
             str: XML string of current page source (equivalent to Android dumpWindowHierarchy).
         """
@@ -186,12 +201,15 @@ class BasePage:
             timeout: Optional[float] = None
     ) -> WebElement:
         """Check if the specified component is loaded and visible within timeout.
+
         Args:
             by (AppiumBy): Appium locator strategy (e.g. AppiumBy.ACCESSIBILITY_ID).
             value (str): Locator selector string.
             timeout (float, optional): Maximum wait time in seconds. Defaults to self.timeout.
+
         Returns:
             WebElement: The located WebElement.
+
         Raises:
             PageNotPresentException: If element is not found within timeout.
         """
@@ -306,3 +324,88 @@ class BasePage:
                 time.sleep(1.0)
         except Exception:
             pass
+
+    LOADING_SPINNER_PREDICATE: str = 'type == "XCUIElementTypeActivityIndicator" AND visible == 1'
+
+    def wait_out_loading_spinner(
+            self,
+            timeout: float = 15.0,
+            poll_interval: float = 0.4,
+            context_tag: str = "",
+    ) -> bool:
+        """Wait until visible iOS loading spinners (`XCUIElementTypeActivityIndicator`) disappear.
+
+        Returns True once no visible spinner remains, or False if still spinning at `timeout`.
+        """
+        default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+        deadline = time.time() + max(0.0, timeout)
+        saw_spinner = False
+        prefix = f"[{context_tag}] " if context_tag else ""
+        try:
+            self.driver.implicitly_wait(0)
+            while True:
+                try:
+                    spinners = self.driver.find_elements(
+                        AppiumBy.IOS_PREDICATE, self.LOADING_SPINNER_PREDICATE
+                    )
+                    visible = any(el.is_displayed() for el in spinners)
+                except Exception:
+                    visible = False
+                if not visible:
+                    if saw_spinner:
+                        self._logger.info(f"{prefix}Loading spinner cleared.")
+                    return True
+                if not saw_spinner:
+                    self._logger.info(
+                        f"{prefix}Loading spinner active; waiting up to {timeout:.1f}s before proceeding..."
+                    )
+                    saw_spinner = True
+                if time.time() >= deadline:
+                    self._logger.warning(
+                        f"{prefix}Loading spinner still visible after {timeout:.1f}s.")
+                    return False
+                time.sleep(poll_interval)
+        finally:
+            try:
+                self.driver.implicitly_wait(default_wait)
+            except Exception:
+                pass
+
+    def tap_element_with_coord_fallback(
+            self,
+            elem: WebElement,
+            force_coordinates: bool = False,
+            fallback_xy: Optional[Tuple[int, int]] = None,
+    ) -> bool:
+        """Click `elem` normally, falling back to (or forcing) `mobile: tap` coordinates."""
+        if not force_coordinates:
+            try:
+                elem.click()
+                return True
+            except Exception as click_err:
+                self._logger.warning(
+                    f"Element .click() failed ({click_err}); falling back to coordinate tap..."
+                )
+        try:
+            rect = elem.rect
+            cx = int(rect["x"] + rect["width"] / 2)
+            cy = int(rect["y"] + rect["height"] / 2)
+            if cx > 0 and cy > 0:
+                self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                return True
+        except Exception:
+            pass
+        if fallback_xy is not None:
+            try:
+                self.driver.execute_script(
+                    "mobile: tap", {"x": int(fallback_xy[0]), "y": int(fallback_xy[1])}
+                )
+                return True
+            except Exception:
+                pass
+        try:
+            self.driver.execute_script("mobile: tap", {"elementId": elem.id})
+            return True
+        except Exception as tap_err:
+            self._logger.warning(f"Coordinate/element tap fallback failed: {tap_err}")
+            return False

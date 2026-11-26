@@ -17,20 +17,25 @@ from page_object.iGHA.gha_exceptions import OOBEInternalErrorException
 class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
     """Class for handling GHA Video History toggle and setup on iOS."""
     VH_NEXT_BTN_PREDICATE = 'label == "Next" OR name == "actionBarPrimaryButton"'
-    # Locators for internal / offline error dialogs
+    # Locators for internal / offline / stream-removed error dialogs
     VH_INTERNAL_ERROR_PREDICATE = (
         'label == "Internal error encountered." OR name == "Internal error encountered." '
         'OR label CONTAINS[c] "Internal error encountered" OR name CONTAINS[c] "Internal error encountered" '
         'OR label == "The Internet connection appears to be offline." '
         'OR name == "The Internet connection appears to be offline." '
         'OR label CONTAINS[c] "Internet connection appears to be offline" '
-        'OR name CONTAINS[c] "Internet connection appears to be offline"'
+        'OR name CONTAINS[c] "Internet connection appears to be offline" '
+        'OR label CONTAINS[c] "Stream removed" OR name CONTAINS[c] "Stream removed" '
+        'OR label CONTAINS[c] "NSPOSIXErrorDomain" OR name CONTAINS[c] "NSPOSIXErrorDomain" '
+        'OR label CONTAINS[c] "Socket is not connected" OR name CONTAINS[c] "Socket is not connected"'
     )
     VH_ALERT_OK_PREDICATE = 'label == "OK" OR name == "OK"'
+    VH_LOADING_PREDICATE = 'type == "XCUIElementTypeActivityIndicator" AND visible == 1'
     VH_SWITCH_ON_VALUES = ("1", "true")
     VH_PAGE_TIMEOUT = 20.0  # Max wait for the page (title + toggle) to appear
+    VH_SPINNER_WAIT_TIMEOUT = 15.0  # Max wait for an active loading spinner to clear
     VH_TOGGLE_SETTLE_SECONDS = 1.5  # Watch for the internal error alert after tapping the toggle
-    VH_LEAVE_PAGE_TIMEOUT = 8.0  # Max wait for the page transition after tapping Next
+    VH_LEAVE_PAGE_TIMEOUT = 10.0  # Max wait for the page transition after tapping Next
     VH_MAX_NEXT_ATTEMPTS = 3
     VH_POLL_INTERVAL = 0.5
 
@@ -125,6 +130,37 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
                 return
             time.sleep(self.VH_POLL_INTERVAL)
 
+    def _vh_is_spinner_visible(self) -> bool:
+        """Return True if a loading ActivityIndicator is currently displayed."""
+        with self._vh_no_implicit_wait():
+            try:
+                spinners = self.driver.find_elements(AppiumBy.IOS_PREDICATE,
+                                                     self.VH_LOADING_PREDICATE)
+                return any(el.is_displayed() for el in spinners)
+            except WebDriverException:
+                return False
+
+    def _vh_wait_out_spinner(self, timeout: float = VH_SPINNER_WAIT_TIMEOUT) -> bool:
+        """Wait until any active loading spinner clears (checking internal error alerts along the way)."""
+        deadline = time.time() + timeout
+        saw_spinner = False
+        while True:
+            self._vh_check_for_internal_error()
+            if not self._vh_is_spinner_visible():
+                if saw_spinner:
+                    self._logger.info("[VideoHistory] Loading spinner cleared.")
+                return True
+            if not saw_spinner:
+                self._logger.info(
+                    f"[VideoHistory] Loading spinner active; waiting up to {timeout:.0f}s before proceeding..."
+                )
+                saw_spinner = True
+            if time.time() >= deadline:
+                self._logger.warning(
+                    f"[VideoHistory] Loading spinner still active after {timeout:.0f}s.")
+                return False
+            time.sleep(self.VH_POLL_INTERVAL)
+
     def _vh_wait_for_page(self, timeout: float = VH_PAGE_TIMEOUT) -> bool:
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -135,11 +171,27 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
         return False
 
     def _vh_wait_until_left_page(self, timeout: float = VH_LEAVE_PAGE_TIMEOUT) -> bool:
-        deadline = time.time() + timeout
+        start_ts = time.time()
+        deadline = start_ts + timeout
+        hard_cap = start_ts + timeout + self.VH_SPINNER_WAIT_TIMEOUT
+        gone_polls = 0
+        logged_spinner = False
         while time.time() < deadline:
             self._vh_check_for_internal_error()
-            if not self._vh_is_on_page():
-                return True
+            spinning = self._vh_is_spinner_visible()
+            if spinning:
+                gone_polls = 0
+                if not logged_spinner:
+                    self._logger.info(
+                        "[VideoHistory] Post-click loading spinner active; waiting for transition...")
+                    logged_spinner = True
+                deadline = min(hard_cap, max(deadline, time.time() + 4.0))
+            elif not self._vh_is_on_page():
+                gone_polls += 1
+                if gone_polls >= 2:
+                    return True
+            else:
+                gone_polls = 0
             time.sleep(self.VH_POLL_INTERVAL)
         return False
 
@@ -170,28 +222,70 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
         if not self._vh_wait_for_page():
             self._logger.error("Cannot turn on Video History: title / toggle not found.")
             return False
+        self._vh_wait_out_spinner()
         if self.is_video_history_enabled():
             self._logger.info("Video History toggle is already ON.")
             return True
         self._logger.info("Video History toggle is OFF. Clicking to turn ON...")
-        for use_tap in (False, True):
+        for mode in ("click", "element_tap", "coord_tap"):
             toggle = self._vh_get_toggle()  # Fresh lookup: the old element may be stale after a value change.
             if toggle is None:
                 break
             try:
-                if use_tap:
-                    self._logger.warning("Toggle click did not change state to ON. Retrying tap...")
+                if mode == "click":
+                    toggle.click()
+                elif mode == "element_tap":
+                    self._logger.warning(
+                        "Toggle click did not change state to ON. Retrying element tap...")
                     self.driver.execute_script("mobile: tap", {"elementId": toggle.id})
                 else:
-                    toggle.click()
-            except WebDriverException as e:
-                self._logger.warning(f"Failed to interact with Video History toggle: {e}")
+                    rect = toggle.rect
+                    knob_x = int(rect["x"] + max(rect["width"] - 14, rect["width"] * 0.75))
+                    knob_y = int(rect["y"] + rect["height"] / 2)
+                    self._logger.warning(
+                        f"Toggle still OFF. Retrying right-knob coordinate tap at ({knob_x}, {knob_y})..."
+                    )
+                    self.driver.execute_script("mobile: tap", {"x": knob_x, "y": knob_y})
+            except Exception as e:
+                self._logger.warning(f"Failed to interact with Video History toggle ({mode}): {e}")
             self._vh_watch_for_internal_error(self.VH_TOGGLE_SETTLE_SECONDS)
+            self._vh_wait_out_spinner(timeout=8.0)
             if self.is_video_history_enabled():
                 self._logger.info("Successfully turned ON Video History toggle.")
                 return True
         self._logger.error("Failed to turn ON Video History toggle.")
         return False
+
+    def _vh_tap_next(self, btn: WebElement, force_coordinates: bool = False) -> None:
+        """Tap the 'Next' button normally or via screen coordinates on retry."""
+        if not force_coordinates:
+            try:
+                btn.click()
+                return
+            except WebDriverException as e:
+                self._logger.warning(
+                    f"Direct click failed: {e}. Trying coordinate/element tap fallback...")
+        try:
+            rect = btn.rect
+            cx = int(rect["x"] + rect["width"] / 2)
+            cy = int(rect["y"] + rect["height"] / 2)
+            if cx > 0 and cy > 0:
+                self.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                return
+        except Exception:
+            pass
+        try:
+            win = self.driver.get_window_size()
+            w = int(win.get("width", 390))
+            h = int(win.get("height", 844))
+            self.driver.execute_script("mobile: tap", {"x": max(40, w - 55), "y": max(40, h - 58)})
+            return
+        except Exception:
+            pass
+        try:
+            self.driver.execute_script("mobile: tap", {"elementId": btn.id})
+        except WebDriverException as tap_err:
+            self._logger.warning(f"Tap fallback failed: {tap_err}")
 
     def _vh_click_next_and_verify(self) -> bool:
         """Click 'Next' and verify the page transitioned, retrying if the tap was swallowed.
@@ -200,6 +294,7 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
         """
         for attempt in range(1, self.VH_MAX_NEXT_ATTEMPTS + 1):
             self._vh_check_for_internal_error()
+            self._vh_wait_out_spinner()
             btn = self._vh_get_next_btn()
             if btn is None:
                 if not self._vh_is_on_page():
@@ -207,16 +302,12 @@ class GHAChooseWhetherYouWantToTurnOnVideoPage(BasePage):
                     return True
                 self._logger.error("Cannot click 'Next': Button element not found.")
                 return False
+            use_coords = attempt >= 2
+            mode_label = "coordinate tap" if use_coords else "click"
             self._logger.info(
-                f"Clicking 'Next' button (attempt {attempt}/{self.VH_MAX_NEXT_ATTEMPTS})...")
-            try:
-                btn.click()
-            except WebDriverException as e:
-                self._logger.warning(f"Direct click failed: {e}. Trying tap fallback...")
-                try:
-                    self.driver.execute_script("mobile: tap", {"elementId": btn.id})
-                except WebDriverException as tap_err:
-                    self._logger.warning(f"Tap fallback failed: {tap_err}")
+                f"[VideoHistory] Clicking 'Next' button ({mode_label}, attempt {attempt}/{self.VH_MAX_NEXT_ATTEMPTS})..."
+            )
+            self._vh_tap_next(btn, force_coordinates=use_coords)
             if self._vh_wait_until_left_page():
                 self._logger.info("[VideoHistory] Successfully left Video history page.")
                 return True

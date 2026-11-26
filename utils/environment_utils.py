@@ -4,6 +4,7 @@ import subprocess
 import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterator, Optional, Sequence, Union
+
 from appium.webdriver.common.appiumby import AppiumBy
 from appium.webdriver.webdriver import WebDriver
 from appium.webdriver.webelement import WebElement
@@ -12,33 +13,40 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.actions import interaction
 from selenium.webdriver.common.actions.action_builder import ActionBuilder
 from selenium.webdriver.common.actions.pointer_input import PointerInput
+
 from common import constants
 from utils import logging_utils
 
 logger = logging_utils.get_logger(__name__, "env_info")
+
 # =============================================================================
 # Constants
 # =============================================================================
 SETTINGS_BUNDLE_ID = "com.apple.Preferences"
 DEFAULT_IMPLICIT_WAIT = getattr(constants, "DEFAULT_IMPLICIT_WAIT", 10.0)
 DEFAULT_GHP_BUNDLE_ID = "com.google.homeplatform.sampleapp.gomezandres"
+
 MAX_DETAIL_PAGE_ATTEMPTS = 5
 MAX_SCROLL_ATTEMPTS = 4
 INFO_ICON_EDGE_OFFSET = 25
+
 UNKNOWN = "Unknown"
 IPV4_PATTERN = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+
 IGNORED_SECTIONS = ("other networks", "public networks", "my networks")
 IGNORED_SSID_TEXTS = {"Wi-Fi", "Connected", "Selected"}
+
 # wifi_info key -> labels shown in the IPv4 section of the Wi-Fi detail page
 IPV4_FIELD_LABELS: Dict[str, Sequence[str]] = {
-    "ip_address": ("IP Address", "ip address"),
-    "subnet_mask": ("Subnet Mask", "Subnet"),
-    "router_gateway": ("Router", "router"),
+    "ip_address": ("IP Address", "IP 位址"),
+    "subnet_mask": ("Subnet Mask", "子網路遮罩"),
+    "router_gateway": ("Router", "路由器"),
 }
 
 
 class _XPath:
     """XPath locators for iOS Settings > Wi-Fi pages."""
+
     WIFI_NAV_BAR = '//XCUIElementTypeNavigationBar[@name="Wi-Fi"]'
     WIFI_BACK_BUTTON = (
         '//XCUIElementTypeNavigationBar'
@@ -56,14 +64,14 @@ class _XPath:
         'starts-with(@label, "Selected") or starts-with(@name, "Selected")]'
     )
     MORE_INFO_BUTTON = (
-        './/XCUIElementTypeButton[@name="More Info" or contains(@label, "More")]'
+        './/XCUIElementTypeButton[@name="More Info" or contains(@label, "More") or @name="更多資訊"]'
     )
     DETAIL_INDICATORS = (
         '//XCUIElementTypeStaticText[@name="Forget This Network" or @name="Auto-Join" '
         'or @name="Configure IP" or @name="IP Address"]'
     )
-    SUBNET_LABEL = '//XCUIElementTypeStaticText[@name="Subnet Mask"]'
-    COPY_MENU = '//XCUIElementTypeMenuItem[@name="Copy"]'
+    SUBNET_LABEL = '//XCUIElementTypeStaticText[@name="Subnet Mask" or @name="子網路遮罩"]'
+    COPY_MENU = '//XCUIElementTypeMenuItem[@name="Copy" or @name="拷貝"]'
 
     @staticmethod
     def cell_with_labels(labels: Sequence[str]) -> str:
@@ -138,21 +146,25 @@ def _tap_info_icon_of_cell(driver: WebDriver, cell: WebElement) -> None:
 
 def _swipe_up_to_scroll_down(driver: WebDriver) -> None:
     """Fast swipe up (scroll content down) without triggering iOS long-press / Copy menu."""
+    # 若誤觸長按跳出 Copy 選單，先點導覽列關掉
     try:
         if driver.find_elements(AppiumBy.XPATH, _XPath.COPY_MENU):
             driver.find_element(AppiumBy.CLASS_NAME, "XCUIElementTypeNavigationBar").click()
             time.sleep(0.3)
     except WebDriverException:
         pass
+
     try:
         driver.execute_script("mobile: swipe", {"direction": "up"})
         return
     except WebDriverException as err:
         logger.debug(f"mobile: swipe failed, falling back to W3C flick: {err}")
+
     try:
         size = driver.get_window_size()
         x = int(size["width"] * 0.5)
         start_y, end_y = int(size["height"] * 0.75), int(size["height"] * 0.35)
+
         actions = ActionChains(driver)
         actions.w3c_actions = ActionBuilder(
             driver, mouse=PointerInput(interaction.POINTER_TOUCH, "touch")
@@ -174,6 +186,7 @@ def _swipe_up_to_scroll_down(driver: WebDriver) -> None:
 def _version_from_list_apps(driver: WebDriver, bundle_id: str) -> Optional[str]:
     """Read app version via Appium `mobile: listApps`."""
     apps = driver.execute_script("mobile: listApps", {"applicationType": "User"})
+
     info: Any = None
     if isinstance(apps, list):
         info = next(
@@ -182,6 +195,7 @@ def _version_from_list_apps(driver: WebDriver, bundle_id: str) -> Optional[str]:
         )
     elif isinstance(apps, dict):
         info = apps.get(bundle_id)
+
     if isinstance(info, str):
         return info.strip()
     if isinstance(info, dict):
@@ -209,26 +223,31 @@ def _version_from_ideviceinstaller(bundle_id: str) -> Optional[str]:
 
 def get_app_version(driver: WebDriver, bundle_id: str) -> str:
     """Retrieve an installed iOS app version via Appium, falling back to ideviceinstaller.
+
     Args:
         driver: Appium driver instance.
         bundle_id: Target application bundle identifier.
+
     Returns:
         Version string (e.g. '4.29.25') or 'Unknown / Not Installed'.
     """
     if not bundle_id:
         return "Unknown / Not Installed"
+
     try:
         version = _version_from_list_apps(driver, bundle_id)
         if version:
             return version
     except Exception as err:
         logger.debug(f"Appium listApps failed for {bundle_id}: {err}")
+
     try:
         version = _version_from_ideviceinstaller(bundle_id)
         if version:
             return version
     except Exception as err:
         logger.debug(f"ideviceinstaller failed for {bundle_id}: {err}")
+
     return "Unknown / Not Installed"
 
 
@@ -244,6 +263,7 @@ def get_att_app_version(driver: WebDriver) -> str:
     bundle_id: Optional[str] = None
     try:
         from page_object.Partner.ATT.att_common import resolve_att_bundle_id
+
         bundle_id = resolve_att_bundle_id(driver)
     except Exception:
         bundle_id = (
@@ -256,6 +276,7 @@ def get_att_app_version(driver: WebDriver) -> str:
 
 def get_ghp_versions(driver: WebDriver) -> Dict[str, str]:
     """Retrieve iGHP `sample_app_version` and `sdk_version`.
+
     Uses cached `driver._ghp_version_info` captured while GHP was foregrounded on Iteration #1
     when available; otherwise falls back to `mobile: listApps` for `sample_app_version`, and
     if the active session is `ighp`, opens `More (•••) -> About` in GHP to read `SDK Version`.
@@ -264,6 +285,7 @@ def get_ghp_versions(driver: WebDriver) -> Dict[str, str]:
     cached = getattr(driver, "_ghp_version_info", None)
     sample_app_version = "Unknown / Not Installed"
     sdk_version = UNKNOWN
+
     if isinstance(cached, dict):
         c_app = str(cached.get("sample_app_version") or "").strip()
         c_sdk = str(cached.get("sdk_version") or "").strip()
@@ -271,13 +293,16 @@ def get_ghp_versions(driver: WebDriver) -> Dict[str, str]:
             sample_app_version = c_app
         if _is_valid_version_str(c_sdk):
             sdk_version = c_sdk
+
     if not _is_valid_version_str(sample_app_version):
         sample_app_version = get_app_version(driver, ghp_bundle_id)
+
     # Only launch GHP UI to inspect AboutView if this runner is actively testing iGHP
     active_bundle = _resolve_target_bundle_id(driver)
     if active_bundle == ghp_bundle_id and not _is_valid_version_str(sdk_version):
         try:
             from page_object.iGHP.ghp_session import GHPSession
+
             logger.info("Opening iGHP Sample App 'About' view to read Sample App & SDK versions...")
             driver.activate_app(ghp_bundle_id)
             time.sleep(2.0)
@@ -289,6 +314,7 @@ def get_ghp_versions(driver: WebDriver) -> Dict[str, str]:
                 sdk_version = str(collected["sdk_version"])
         except Exception as err:
             logger.warning(f"Could not read GHP SDK version from AboutView: {err}")
+
     return {
         "sample_app_version": sample_app_version,
         "sdk_version": sdk_version,
@@ -318,6 +344,7 @@ def _is_in_wifi_detail_page(driver: WebDriver, ssid: str = "") -> bool:
     """Return True if the screen is on the Wi-Fi 'More Info' detail page."""
     if _first_displayed(driver, _XPath.WIFI_NAV_BAR):
         return False
+
     candidates = [_XPath.WIFI_BACK_BUTTON, _XPath.DETAIL_INDICATORS]
     if ssid and ssid != UNKNOWN and '"' not in ssid:
         candidates.insert(0, f'//XCUIElementTypeNavigationBar[@name="{ssid}"]')
@@ -331,8 +358,10 @@ def _open_wifi_list_page(driver: WebDriver) -> None:
         logger.info("Returning from previous Wi-Fi detail page back to Wi-Fi list...")
         back_btn.click()
         time.sleep(1.2)
+
     if driver.find_elements(AppiumBy.XPATH, _XPath.WIFI_NAV_BAR):
         return
+
     wifi_cells = driver.find_elements(AppiumBy.XPATH, _XPath.WIFI_SETTINGS_CELL)
     if wifi_cells:
         try:
@@ -366,6 +395,7 @@ def _extract_ssid(cell: WebElement) -> str:
         ).strip()
         if _is_valid_ssid(text):
             return text
+
     # Fallback: cell name looks like "Selected, Home QA, Secure network, Signal strength 3 of 3 bars"
     cell_name = cell.get_attribute("name") or cell.get_attribute("label") or ""
     candidate = cell_name.replace("Selected,", "").split(",")[0].strip()
@@ -390,6 +420,7 @@ def _tap_more_info(driver: WebDriver, cell: WebElement, attempt: int) -> None:
     if info_btn is None:
         _tap_info_icon_of_cell(driver, cell)
         return
+
     if attempt == 1:
         try:
             info_btn.click()
@@ -405,14 +436,17 @@ def _enter_wifi_detail_page(driver: WebDriver, wifi_info: Dict[str, str]) -> boo
         try:
             if _is_in_wifi_detail_page(driver, wifi_info["ssid"]):
                 return True
+
             cell = _find_connected_cell(driver)
             if cell is None:
                 time.sleep(0.8)
                 continue
+
             if wifi_info["ssid"] == UNKNOWN:
                 wifi_info["ssid"] = _extract_ssid(cell)
                 if wifi_info["ssid"] != UNKNOWN:
                     logger.info(f"Extracted active Wi-Fi SSID: '{wifi_info['ssid']}'")
+
             logger.info(
                 f"Clicking More Info for '{wifi_info['ssid']}' "
                 f"(attempt {attempt}/{MAX_DETAIL_PAGE_ATTEMPTS})..."
@@ -422,6 +456,7 @@ def _enter_wifi_detail_page(driver: WebDriver, wifi_info: Dict[str, str]) -> boo
             if _is_in_wifi_detail_page(driver, wifi_info["ssid"]):
                 logger.info(f"Confirmed inside More Info detail page for '{wifi_info['ssid']}'!")
                 return True
+
             logger.warning(
                 f"[Attempt {attempt}/{MAX_DETAIL_PAGE_ATTEMPTS}] Still on Wi-Fi list page. "
                 f"Retrying with right-edge tap..."
@@ -431,6 +466,7 @@ def _enter_wifi_detail_page(driver: WebDriver, wifi_info: Dict[str, str]) -> boo
             if _is_in_wifi_detail_page(driver, wifi_info["ssid"]):
                 logger.info("Confirmed inside More Info detail page after fallback tap!")
                 return True
+
         except WebDriverException as err:  # includes StaleElementReferenceException
             logger.debug(f"[Attempt {attempt}] Wi-Fi list refreshed during inspection: {err}")
             time.sleep(0.8)
@@ -452,6 +488,7 @@ def _extract_ipv4_value(driver: WebDriver, labels: Sequence[str]) -> str:
         cells = driver.find_elements(AppiumBy.XPATH, _XPath.cell_with_labels(labels))
     except WebDriverException:
         return UNKNOWN
+
     for cell in cells:
         try:
             for text_el in cell.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText"):
@@ -466,8 +503,8 @@ def _extract_ipv4_value(driver: WebDriver, labels: Sequence[str]) -> str:
     return UNKNOWN
 
 
-def _return_to_target_app(driver: WebDriver) -> None:
-    """Leave the Wi-Fi detail page and switch back to the active app under test (iGHA or iGHP)."""
+def _return_to_target_app(driver: WebDriver, return_to_app: bool = True) -> None:
+    """Leave the Wi-Fi detail page and either close Settings or return to the active app under test."""
     back_btn = _first_displayed(driver, _XPath.WIFI_BACK_BUTTON)
     if back_btn:
         try:
@@ -475,6 +512,15 @@ def _return_to_target_app(driver: WebDriver) -> None:
             time.sleep(0.5)
         except WebDriverException:
             pass
+
+    if not return_to_app:
+        try:
+            logger.info("Closing iOS Settings after Wi-Fi inspection (keeping test app stopped)...")
+            driver.terminate_app(SETTINGS_BUNDLE_ID)
+        except Exception:
+            pass
+        return
+
     target_bundle = _resolve_target_bundle_id(driver)
     try:
         logger.info(f"Switching back to target app: {target_bundle}...")
@@ -484,8 +530,9 @@ def _return_to_target_app(driver: WebDriver) -> None:
         logger.warning(f"Failed to switch back to {target_bundle}: {err}")
 
 
-def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
+def get_wifi_information(driver: WebDriver, return_to_app: bool = True) -> Dict[str, str]:
     """Retrieve the connected Wi-Fi SSID, IP, subnet mask, and router from iOS Settings.
+
     The active network is identified strictly by its checkmark icon / 'Selected' trait,
     ignoring networks listed under 'Other Networks' or 'Public Networks'.
     """
@@ -495,38 +542,49 @@ def get_wifi_information(driver: WebDriver) -> Dict[str, str]:
         "router_gateway": UNKNOWN,
         "subnet_mask": UNKNOWN,
     }
+
     with _implicit_wait(driver, 0):
         try:
             logger.info("Opening iOS Settings to inspect Wi-Fi details...")
             driver.activate_app(SETTINGS_BUNDLE_ID)
             time.sleep(1.5)
+
             _open_wifi_list_page(driver)
+
             if not _enter_wifi_detail_page(driver, wifi_info):
                 logger.warning(
                     f"Could not enter More Info page for '{wifi_info['ssid']}' after "
                     f"{MAX_DETAIL_PAGE_ATTEMPTS} attempts. Skipping IPv4 extraction."
                 )
                 return wifi_info
+
             logger.info("Swiping up to reveal IPv4 Address section...")
             _scroll_to_ipv4_section(driver)
+
             for key, labels in IPV4_FIELD_LABELS.items():
                 wifi_info[key] = _extract_ipv4_value(driver, labels)
+
             logger.info(f"Successfully collected Wi-Fi information: {wifi_info}")
         except Exception as err:
             logger.warning(
                 f"Failed to retrieve Wi-Fi details from Settings: {err}. Using fallback values.")
         finally:
-            _return_to_target_app(driver)
+            _return_to_target_app(driver, return_to_app=return_to_app)
+
     return wifi_info
 
 
 # =============================================================================
 # Summary
 # =============================================================================
-def log_all_version_information(driver: WebDriver) -> Dict[str, Any]:
+def log_all_version_information(driver: WebDriver, return_to_app: bool = True) -> Dict[str, Any]:
     """Collect and log all system, app, and network version details.
+
     Args:
         driver: Appium driver instance.
+        return_to_app: If True (default), reactivate target app after reading Wi-Fi Settings;
+            if False, terminate iOS Settings without relaunching a stopped test app.
+
     Returns:
         Consolidated environment information dictionary.
     """
@@ -534,13 +592,15 @@ def log_all_version_information(driver: WebDriver) -> Dict[str, Any]:
     logger.info(separator)
     logger.info(" [ENV INFO] Collecting Environment & Version Information")
     logger.info(separator)
+
     gha_version = get_app_version(driver, getattr(constants, "GHA_BUNDLE_ID", ""))
     att_version = get_att_app_version(driver)
     ghp_versions = get_ghp_versions(driver)
     sample_app_version = ghp_versions["sample_app_version"]
     sdk_version = ghp_versions["sdk_version"]
     device_info = get_ios_device_info(driver)
-    wifi_info = get_wifi_information(driver)
+    wifi_info = get_wifi_information(driver, return_to_app=return_to_app)
+
     rows = [
         ("Google Home App Version", gha_version),
         ("Sample App Version", sample_app_version),
@@ -558,6 +618,7 @@ def log_all_version_information(driver: WebDriver) -> Dict[str, Any]:
     for label, value in rows:
         logger.info(f"  * {label:<24}: {value}")
     logger.info(separator)
+
     return {
         "gha_version": gha_version,
         "att_version": att_version,

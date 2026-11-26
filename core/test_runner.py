@@ -550,6 +550,129 @@ class MultiProjectTestRunner:
                 f"[SMART PLUG] Could not apply --plug_name filter {plug_names} to GHP: {e}")
 
     @staticmethod
+    def _call_env_fn(fn: Any, driver: Any, return_to_app: bool) -> Any:
+        """Invoke `log_all_version_information` / `get_wifi_information` with `return_to_app` when supported."""
+        try:
+            params = inspect.signature(fn).parameters
+            if "return_to_app" in params or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                return fn(driver, return_to_app=return_to_app)
+        except (TypeError, ValueError):
+            pass
+        return fn(driver)
+
+    WDA_ERROR_SIGNATURES: Tuple[str, ...] = (
+        "ECONNREFUSED",
+        "ECONNRESET",
+        "Remote host closed connection",
+        "Connection aborted",
+        "Could not proxy command to the remote server",
+        "socket hang up",
+        "A session is either terminated or not started",
+        "invalid session id",
+        "NoSuchDriverError",
+    )
+
+    def _preflight_heal_wda_and_dismiss_system_modals(self, current_app: str) -> None:
+        """Verify WDA session is alive (rebuilding under lock if dead), unlock screen, and clear stray modals."""
+        if self.driver is None:
+            return
+        # 1. WDA session health probe & locked in-place rebuild
+        if hasattr(self.driver, "get_window_size"):
+            try:
+                self.driver.get_window_size()
+            except Exception as probe_err:
+                if any(sig in str(probe_err) for sig in self.WDA_ERROR_SIGNATURES):
+                    logger.warning(
+                        f"[PRE-FLIGHT] Dead WDA session detected before iteration ({probe_err}); "
+                        "rebuilding Appium WebDriver session under lock..."
+                    )
+                    try:
+                        self.driver.quit()
+                    except Exception:
+                        pass
+                    try:
+                        options = AppiumOptions()
+                        options.load_capabilities(constants.IOS_CAPABILITIES)
+                        with self._interprocess_lock("ios_automation_wda_init.lock"):
+                            new_driver = webdriver.Remote(constants.APPIUM_SERVER_URL,
+                                                          options=options)
+                        new_driver.implicitly_wait(
+                            getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+                        )
+                        self.driver.__dict__.update(new_driver.__dict__)
+                        self._activate_app_context(current_app)
+                        logger.info(
+                            "[PRE-FLIGHT] Successfully rebuilt Appium/WDA session in-place.")
+                    except Exception as rebuild_err:
+                        logger.error(f"[PRE-FLIGHT] Failed rebuilding WDA session: {rebuild_err}")
+                        return
+
+        # 2. Ensure iPhone screen is unlocked
+        if hasattr(self.driver, "is_locked"):
+            try:
+                if self.driver.is_locked():
+                    helper = BasePage.__new__(BasePage)
+                    helper.driver = self.driver
+                    helper._logger = logger
+                    helper._unlock_device_if_locked()
+            except Exception:
+                pass
+
+        # 3. Dismiss any lingering SpringBoard system alert or leftover HomeUIService / Safari sheet (<50ms when clean)
+        if hasattr(self.driver, "execute_script"):
+            try:
+                btns = self.driver.execute_script("mobile: alert", {"action": "getButtons"})
+                if isinstance(btns, (list, tuple)) and btns:
+                    logger.warning(
+                        f"[PRE-FLIGHT] Dismissing leftover system alert (buttons={list(btns)})...")
+                    try:
+                        self.driver.execute_script("mobile: alert", {"action": "dismiss"})
+                    except Exception:
+                        try:
+                            self.driver.execute_script("mobile: alert", {"action": "accept"})
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        if hasattr(self.driver, "find_elements") and hasattr(self.driver, "implicitly_wait"):
+            default_wait = getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+            try:
+                self.driver.implicitly_wait(0)
+                pred_by = "-ios predicate string"
+                sheet_markers = self.driver.find_elements(
+                    pred_by,
+                    '(type == "XCUIElementTypeOther" AND name IN {"PRXCardContainerView", "TopBrowserBar"}) '
+                    'OR (type == "XCUIElementTypeWebView")',
+                )
+                if any(getattr(m, "is_displayed", lambda: False)() for m in sheet_markers):
+                    close_btns = self.driver.find_elements(
+                        pred_by,
+                        'type == "XCUIElementTypeButton" AND ('
+                        'name IN {"Cancel", "Close", "xmark", "Done", "取消", "完成", "關閉"} '
+                        'OR label IN {"Cancel", "Close", "Done", "取消", "完成", "關閉"})',
+                    )
+                    for cb in close_btns:
+                        if getattr(cb, "is_displayed", lambda: False)():
+                            logger.warning(
+                                "[PRE-FLIGHT] Closing leftover Apple/Safari modal sheet before iteration...")
+                            try:
+                                cb.click()
+                                time.sleep(0.8)
+                            except Exception:
+                                pass
+                            break
+            except Exception:
+                pass
+            finally:
+                try:
+                    self.driver.implicitly_wait(default_wait)
+                except Exception:
+                    pass
+
+    @staticmethod
     def _csv_accepts_param(param: str) -> bool:
         """Check whether csv_report.append_test_result_to_csv accepts a given keyword."""
         try:
@@ -1268,6 +1391,7 @@ class MultiProjectTestRunner:
                             current_ts,
                             adb_serial_override=current_adb_serial,
                         )
+                        self._preflight_heal_wda_and_dismiss_system_modals(current_app)
                         screen_recorder = ScreenRecorder(output_dir=case_additional_log_dir)
                         if self.driver:
                             try:
@@ -1419,13 +1543,18 @@ class MultiProjectTestRunner:
                                     app_ver_map["sdk_version"] = sess_k_ver
                                 self._apply_app_version_fields(current_app)
 
+                            keep_app_open_after_wifi = current_app == "att"
                             if not self._env_collected_by_app.get(current_app,
                                                                   False) and self.driver:
                                 try:
                                     logger.info(
                                         f"[ENV INFO] First '{current_app}' testcase completed, collecting full environment info..."
                                     )
-                                    env_info = log_all_version_information(self.driver)
+                                    env_info = self._call_env_fn(
+                                        log_all_version_information,
+                                        self.driver,
+                                        return_to_app=keep_app_open_after_wifi,
+                                    )
                                     if isinstance(env_info, dict):
                                         if current_app == "ighp":
                                             app_ver_map["gha_version"] = "N/A"
@@ -1508,24 +1637,43 @@ class MultiProjectTestRunner:
                                         self.app_names
                                     )
                             elif self.driver:
-                                try:
+                                need_wifi_refresh = (
+                                        test_status != "PASS"
+                                        or not self.wifi_ssid
+                                        or self.wifi_ssid.lower() == "unknown"
+                                )
+                                if need_wifi_refresh:
+                                    try:
+                                        logger.info(
+                                            f"[ENV INFO] [Iter #{iteration}] Refreshing Wi-Fi details from iOS Settings..."
+                                        )
+                                        w_info = self._call_env_fn(
+                                            get_wifi_information,
+                                            self.driver,
+                                            return_to_app=keep_app_open_after_wifi,
+                                        )
+                                        if isinstance(w_info, dict):
+                                            self.wifi_ssid = str(w_info.get("ssid", self.wifi_ssid))
+                                            self.phone_ip = str(
+                                                w_info.get("ip_address", self.phone_ip))
+                                            self.router_gateway = str(
+                                                w_info.get("router_gateway", self.router_gateway)
+                                            )
+                                            self.subnet_mask = str(
+                                                w_info.get("subnet_mask", self.subnet_mask))
+                                        logger.info(
+                                            f"[ENV INFO] [Iter #{iteration}] Updated Wi-Fi: SSID='{self.wifi_ssid}' | "
+                                            f"Phone IP='{self.phone_ip}' | Gateway='{self.router_gateway}'"
+                                        )
+                                    except Exception as wifi_err:
+                                        logger.warning(
+                                            f"Failed to refresh Wi-Fi info for iteration #{iteration}: {wifi_err}"
+                                        )
+                                else:
                                     logger.info(
-                                        f"[ENV INFO] [Iter #{iteration}] Fetching latest Wi-Fi details for current run...")
-                                    w_info = get_wifi_information(self.driver)
-                                    if isinstance(w_info, dict):
-                                        self.wifi_ssid = str(w_info.get("ssid", self.wifi_ssid))
-                                        self.phone_ip = str(w_info.get("ip_address", self.phone_ip))
-                                        self.router_gateway = str(
-                                            w_info.get("router_gateway", self.router_gateway))
-                                        self.subnet_mask = str(
-                                            w_info.get("subnet_mask", self.subnet_mask))
-                                    logger.info(
-                                        f"[ENV INFO] [Iter #{iteration}] Updated Wi-Fi: SSID='{self.wifi_ssid}' | "
+                                        f"[ENV INFO] [Iter #{iteration}] Reusing cached Wi-Fi: SSID='{self.wifi_ssid}' | "
                                         f"Phone IP='{self.phone_ip}' | Gateway='{self.router_gateway}'"
                                     )
-                                except Exception as wifi_err:
-                                    logger.warning(
-                                        f"Failed to refresh Wi-Fi info for iteration #{iteration}: {wifi_err}")
                             dev_tech = (
                                     getattr(self.driver, "device_tech_info", None)
                                     or getattr(test_instance, "device_tech_info", None)

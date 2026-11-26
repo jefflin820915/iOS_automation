@@ -1314,8 +1314,42 @@ class GHACommissioningPageObject(BasePage):
                 )
         return tapped
 
+    def _cm_rescue_plug_on(self, plug_name: str, on_wait: float) -> bool:
+        """Fail-safe rescue: restart GHA and force `plug_name` back to ON so a camera is never left unpowered."""
+        self._logger.warning(
+            f"[PowerCycle] FAIL-SAFE: '{plug_name}' was switched OFF without confirmed ON; "
+            "restarting GHA to force plug back ON..."
+        )
+        try:
+            self.stop_gha()
+            time.sleep(1.5)
+            self.start_gha()
+            time.sleep(2.5)
+            GHATabPage(self.driver).go_to_tab(constants.TAB.DEVICES)
+            time.sleep(1.5)
+            if not self._cm_ensure_all_devices_ready():
+                return False
+            tile = self._cm_locate_plug_tile(plug_name)
+            if tile is None:
+                self._logger.error(
+                    f"[PowerCycle] FAIL-SAFE could not locate '{plug_name}' after restart.")
+                return False
+            curr = self._cm_read_plug_state(tile)
+            if curr in self.PLUG_ON_VALUES:
+                self._logger.info(f"[PowerCycle] FAIL-SAFE confirmed '{plug_name}' is already ON.")
+                return True
+            if self._cm_tap_plug_tile(tile, plug_name, target_off=False):
+                time.sleep(on_wait)
+                self._logger.info(
+                    f"[PowerCycle] FAIL-SAFE successfully restored '{plug_name}' to ON.")
+                return True
+        except Exception as rescue_err:
+            self._logger.error(
+                f"[PowerCycle] FAIL-SAFE error restoring '{plug_name}' to ON: {rescue_err}")
+        return False
+
     def _cm_power_cycle_one(self, plug_name: str, off_wait: float, on_wait: float) -> bool:
-        """Turn a plug OFF (if not already), wait, then turn it back ON (with crash/lock recovery)."""
+        """Turn a plug OFF (if not already), wait, then turn it back ON (with fail-safe ON rescue)."""
         if not self._cm_ensure_all_devices_ready():
             return False
         tile = self._cm_locate_plug_tile(plug_name)
@@ -1324,11 +1358,14 @@ class GHACommissioningPageObject(BasePage):
             return False
         state = self._cm_read_plug_state(tile)
         self._logger.info(f"[PowerCycle] '{plug_name}' initial state: '{state or 'unknown'}'")
+        turned_off = state in self.PLUG_OFF_VALUES
+        confirmed_on = False
         try:
             if state not in self.PLUG_OFF_VALUES:
                 self._logger.info(f"[PowerCycle] Turning OFF '{plug_name}', waiting {off_wait}s...")
                 if not self._cm_tap_plug_tile(tile, plug_name, target_off=True):
                     return False
+                turned_off = True
                 time.sleep(off_wait)
             if not self._cm_ensure_all_devices_ready():
                 return False
@@ -1344,6 +1381,7 @@ class GHACommissioningPageObject(BasePage):
                 )
                 if not self._cm_tap_plug_tile(tile, plug_name, target_off=True):
                     return False
+                turned_off = True
                 time.sleep(off_wait)
                 if not self._cm_ensure_all_devices_ready():
                     return False
@@ -1354,11 +1392,16 @@ class GHACommissioningPageObject(BasePage):
                 f"[PowerCycle] Turning ON '{plug_name}', waiting {on_wait}s for boot...")
             if not self._cm_tap_plug_tile(tile, plug_name, target_off=False):
                 return False
+            confirmed_on = True
             time.sleep(on_wait)
             return True
         except WebDriverException as e:
             self._logger.error(f"[PowerCycle] Failed power-cycling '{plug_name}': {e}")
             return False
+        finally:
+            if turned_off and not confirmed_on:
+                if self._cm_rescue_plug_on(plug_name, on_wait):
+                    confirmed_on = True
 
     def power_cycle_smart_plug(
             self,
