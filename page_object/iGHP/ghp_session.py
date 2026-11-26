@@ -808,13 +808,101 @@ class GHPSession:
             self._logger.warning(f"[Emergency Teardown] Long-press fallback failed: {err}")
         return False
 
+    def _get_cleanup_candidate_names(self, device_name: Optional[str] = None) -> List[str]:
+        """Collect distinct device/tile names (target, Apple-card alias, hardware default) for cleanup."""
+        sess = GHPSession._resolve_session(self)
+        raw_candidates: List[Any] = [
+            device_name,
+            getattr(self, "device_name", None),
+            getattr(sess, "device_name", None),
+            getattr(sess.driver, "_ghp_commissioned_tile_name", None) if sess.driver else None,
+            getattr(sess, "_cm_resolved_tile_name", None),
+            getattr(getattr(sess, "ghpcommissioningpageobject", None), "_cm_resolved_tile_name",
+                    None),
+        ]
+        primary = next((str(c).strip() for c in raw_candidates if isinstance(c, str) and c.strip()),
+                       "")
+        low = primary.lower()
+        if "doorbell" in low and low != "doorbell":
+            raw_candidates.append("Doorbell")
+        if "camera" in low and low != "camera":
+            raw_candidates.append("Camera")
+
+        seen = set()
+        out: List[str] = []
+        for item in raw_candidates:
+            if not isinstance(item, str):
+                continue
+            cleaned = " ".join(item.split()).strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(cleaned)
+        return out
+
+    def cleanup_leftover_device_if_present(
+            self, device_name: Optional[str] = None, max_scrolls: int = 4
+    ) -> bool:
+        """Check iGHP Devices tab for a leftover target tile and decommission it if found."""
+        sess = GHPSession._resolve_session(self)
+        candidates = sess._get_cleanup_candidate_names(device_name)
+        if not candidates:
+            return False
+
+        dev_page = GHPDevicePage._resolve_page(sess)
+        try:
+            if not sess._is_ghp_running():
+                if not sess.start_ghp():
+                    return False
+                time.sleep(1.5)
+            dev_page.go_to_tab("Devices")
+            matched_name: Optional[str] = None
+            for cand in candidates:
+                hit = dev_page._locate_device_tile_with_scroll(cand, max_scrolls=max_scrolls)
+                if hit is not None:
+                    matched_name = hit[1] or cand
+                    break
+            if not matched_name:
+                return False
+
+            sess._logger.warning(
+                f"[Leftover Cleanup] Found leftover device '{matched_name}' on iGHP Devices tab; "
+                "decommissioning before continuing..."
+            )
+            opened_settings = False
+            try:
+                GHPDevicePage.enter_device_page(sess, device_name=matched_name,
+                                                ready_wait_timeout=0.0)
+                opened_settings = GHPCameraLivePage.click_setting_btn(sess)
+            except Exception:
+                opened_settings = False
+            if not opened_settings:
+                opened_settings = sess._open_device_details_via_long_press(matched_name)
+            if not opened_settings:
+                return False
+            sess.handle_remove_device()
+            sess._device_removed_in_emergency = True
+            try:
+                sess.refresh_ghp_devices()
+            except Exception:
+                pass
+            sess._logger.info(
+                f"[Leftover Cleanup] Successfully removed leftover device '{matched_name}' from iGHP.")
+            return True
+        except Exception as err:
+            sess._logger.warning(
+                f"[Leftover Cleanup] Failed cleaning up leftover iGHP device: {err}")
+            return False
+
     def _emergency_recover_and_remove_device(
             self, attempts: int = EMERGENCY_REMOVE_ATTEMPTS
     ) -> bool:
-        """Restart GHP and decommission the camera so subsequent iterations start clean."""
+        """Restart GHP and decommission the camera (including fallback names) so subsequent iterations start clean."""
         sess = GHPSession._resolve_session(self)
-        target_name = str(
-            getattr(self, "device_name", None) or getattr(sess, "device_name", "") or "")
+        candidates = sess._get_cleanup_candidate_names()
+        target_name = candidates[0] if candidates else ""
         removed = False
         for attempt in range(1, attempts + 1):
             sess._logger.warning(
@@ -827,9 +915,18 @@ class GHPSession:
                 time.sleep(3.0)
                 sess.refresh_ghp_devices()
 
+                dev_page = GHPDevicePage._resolve_page(sess)
+                matched_target = target_name
+                for cand in candidates:
+                    if dev_page._locate_device_tile_with_scroll(cand, max_scrolls=4) is not None:
+                        matched_target = cand
+                        break
+
                 opened_settings = False
                 try:
-                    GHPDevicePage.enter_device_page(sess, device_name=target_name)
+                    GHPDevicePage.enter_device_page(
+                        sess, device_name=matched_target, ready_wait_timeout=5.0
+                    )
                     opened_settings = GHPCameraLivePage.click_setting_btn(sess)
                 except Exception as live_err:
                     sess._logger.warning(
@@ -837,7 +934,10 @@ class GHPSession:
                         "trying long-press 'Device Details...' fallback..."
                     )
                 if not opened_settings:
-                    opened_settings = sess._open_device_details_via_long_press(target_name)
+                    for cand in candidates:
+                        if sess._open_device_details_via_long_press(cand):
+                            opened_settings = True
+                            break
 
                 if opened_settings:
                     sess.handle_remove_device()

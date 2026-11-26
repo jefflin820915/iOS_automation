@@ -2443,6 +2443,11 @@ class GHPCommissioningPageObject(BasePage):
             self._logger.warning(
                 f"[Commissioning Recovery] Removing partially commissioned device '{self._cm_reset_device_name}'..."
             )
+            try:
+                if getattr(self, "_cm_resolved_tile_name", None):
+                    setattr(session, "_cm_resolved_tile_name", self._cm_resolved_tile_name)
+            except Exception:
+                pass
             ok = session._emergency_recover_and_remove_device()
             removed_note = f" | Emergency Decommission: {'SUCCESS' if ok else 'FAILED'}"
         else:
@@ -2504,7 +2509,7 @@ class GHPCommissioningPageObject(BasePage):
                     raise AssertionError(
                         page._cm_recover(
                             f"GHP commissioning failed: '{ghp_fail}'",
-                            remove_paired_device=False,
+                            remove_paired_device=apple_sheet_seen,
                         )
                     )
 

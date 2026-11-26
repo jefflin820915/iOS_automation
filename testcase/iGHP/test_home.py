@@ -19,6 +19,8 @@ class TestGHPHome(BaseTestCase):
             "Start iGHP test case: add camera device, OOBE OTA, and live stream verification")
         sess = ghp_session.GHPSession._resolve_session(self)
         sess._device_reset_done_in_run = False
+        sess._device_removed_in_emergency = False
+        sess._ghp_commissioning_reached = False
         test_failed = False
         try:
             assert ghp_session.GHPSession.stop_ghp(self)
@@ -26,8 +28,10 @@ class TestGHPHome(BaseTestCase):
             tab_devices = getattr(getattr(constants, "TAB", None), "DEVICES", "Devices")
             ghp_session.GHPDevicePage.go_to_tab(self, tab_devices)
             ghp_session.GHPSession.refresh_ghp_devices(self)
+            ghp_session.GHPSession.cleanup_leftover_device_if_present(self)
             ghp_session.GHPSession.click_add_devices_button(self)
             ghp_session.GHPSession.pair_device_with_pairing_code(self)
+            sess._ghp_commissioning_reached = True
             ghp_session.GHPSession.handle_pairing_until_device_connected(self)
             ghp_session.GHPSession.handle_verify_camera_live_stream_and_remove(self)
             assert ghp_session.GHPSession.stop_ghp(self)
@@ -44,6 +48,18 @@ class TestGHPHome(BaseTestCase):
             raise
         finally:
             if test_failed and not getattr(sess, "_device_reset_done_in_run", False):
+                if getattr(sess, "_ghp_commissioning_reached", False) and not getattr(
+                        sess, "_device_removed_in_emergency", False
+                ):
+                    logger.warning(
+                        "[Post-Test Cleanup] Checking iGHP for leftover paired device before hardware reset..."
+                    )
+                    try:
+                        ghp_session.GHPSession._emergency_recover_and_remove_device(self,
+                                                                                    attempts=1)
+                    except Exception as rem_err:
+                        logger.warning(
+                            f"[Post-Test Cleanup] Emergency UI removal warning: {rem_err}")
                 logger.warning(
                     "[Post-Test Cleanup] iGHP test failed before live/remove stage; "
                     "running Smart Plug power-cycle + ADB factory reset..."
