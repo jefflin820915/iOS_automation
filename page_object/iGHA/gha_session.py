@@ -681,6 +681,80 @@ class GHASession:
         self._logger.info("No 'Set up new devices?' bottom sheet detected. Continuing.")
         return False
 
+    def _get_cleanup_candidate_names(self, device_name: Optional[str] = None) -> List[str]:
+        """Collect distinct device/tile names (target, resolved alias, hardware fallback) for GHA cleanup."""
+        sess = GHASession._resolve_session(self)
+        raw_candidates: List[Any] = [
+            device_name,
+            getattr(self, "device_name", None),
+            getattr(sess, "device_name", None),
+            getattr(sess, "_resolved_device_name", None),
+            getattr(getattr(sess, "ghacommissioningpageobject", None), "_cm_resolved_tile_name",
+                    None),
+            getattr(getattr(sess, "ghasettingspage", None), "_resolved_device_name", None),
+        ]
+        primary = next((str(c).strip() for c in raw_candidates if isinstance(c, str) and c.strip()),
+                       "")
+        low = primary.lower()
+        if "doorbell" in low and low != "doorbell":
+            raw_candidates.append("Doorbell")
+        if "camera" in low and low != "camera":
+            raw_candidates.append("Camera")
+
+        seen = set()
+        out: List[str] = []
+        for item in raw_candidates:
+            if not isinstance(item, str):
+                continue
+            cleaned = " ".join(item.split()).strip()
+            if not cleaned or cleaned.lower() in seen:
+                continue
+            seen.add(cleaned.lower())
+            out.append(cleaned)
+        return out
+
+    def cleanup_leftover_device_if_present(self, device_name: Optional[str] = None) -> bool:
+        """Best-effort pre/post-test check: if a leftover target device tile exists in GHA, remove it cleanly."""
+        sess = GHASession._resolve_session(self)
+        candidates = sess._get_cleanup_candidate_names(device_name)
+        if not candidates or sess.driver is None:
+            return False
+        try:
+            if not sess._is_gha_running():
+                if not sess.start_gha():
+                    return False
+                time.sleep(2.0)
+            sess.refresh_gha_devices()
+            dev_page = getattr(sess, "ghadevicepage", None) or GHADevicePage(sess.driver)
+            matched: Optional[str] = None
+            primary = candidates[0]
+            for cand in candidates:
+                is_fb = cand.lower() != primary.lower()
+                if hasattr(dev_page,
+                           "_is_target_device_visible_on_screen") and dev_page._is_target_device_visible_on_screen(
+                        cand, exact_tile_match=is_fb
+                ):
+                    matched = cand
+                    break
+            if not matched and hasattr(dev_page, "_scroll_down_and_find"):
+                try:
+                    found_name = dev_page._scroll_down_and_find(primary, max_scrolls=3)
+                    if found_name:
+                        matched = found_name if isinstance(found_name, str) else primary
+                except Exception:
+                    pass
+            if not matched:
+                return False
+            sess._logger.warning(
+                f"[Leftover Cleanup] Found leftover device '{matched}' in GHA; removing before continuing..."
+            )
+            sess._resolved_device_name = matched
+            return sess._emergency_recover_and_remove_device(attempts=1)
+        except Exception as err:
+            sess._logger.warning(
+                f"[Leftover Cleanup] Failed cleaning up leftover GHA device: {err}")
+            return False
+
     def _emergency_recover_and_remove_device(self,
                                              attempts: int = EMERGENCY_REMOVE_ATTEMPTS) -> bool:
         """Restart GHA and remove the (already commissioned) device so the next run starts clean.
@@ -688,39 +762,53 @@ class GHASession:
         Returns:
             True if handle_remove_device() completed without raising.
         """
+        sess = GHASession._resolve_session(self)
+        candidates = sess._get_cleanup_candidate_names()
+        primary_name = candidates[0] if candidates else getattr(sess, "device_name", None)
+        if len(candidates) > 1 and not getattr(sess, "_resolved_device_name", None):
+            sess._resolved_device_name = candidates[1]
+        if getattr(sess, "ghasettingspage", None) is not None and getattr(sess,
+                                                                          "_resolved_device_name",
+                                                                          None):
+            sess.ghasettingspage._resolved_device_name = sess._resolved_device_name
+
         removed = False
         for attempt in range(1, attempts + 1):
-            self._logger.warning(
+            sess._logger.warning(
                 f"[Emergency Teardown] Attempt {attempt}/{attempts}: restarting GHA to reset navigation state..."
             )
             try:
-                self.stop_gha()
+                sess.stop_gha()
                 time.sleep(2.0)
-                self.start_gha()
+                sess.start_gha()
                 time.sleep(5.0)
-                self._logger.info("[Emergency Teardown] Navigating to Settings to remove device...")
-                if GHATabPage.enter_home_settings_page(self) is False:
+                sess._logger.info("[Emergency Teardown] Navigating to Settings to remove device...")
+                if GHATabPage.enter_home_settings_page(sess) is False:
                     raise RuntimeError(
                         "Failed to enter Home settings page during emergency teardown.")
-                if GHASettingsPage.open_device_settings(self,
-                                                        device_name=self.device_name) is False:
+                opened = False
+                for cand in (candidates or [primary_name]):
+                    if GHASettingsPage.open_device_settings(sess, device_name=cand) is not False:
+                        opened = True
+                        break
+                if not opened:
                     raise RuntimeError(
-                        f"Failed to open device settings for '{self.device_name}' in Home settings; "
+                        f"Failed to open device settings for {candidates or [primary_name]} in Home settings; "
                         "skipping handle_remove_device() to avoid scrolling Home Settings."
                     )
-                self.handle_remove_device()
+                sess.handle_remove_device()
                 removed = True
-                self._device_removed_in_emergency = True
-                self._logger.info(
+                sess._device_removed_in_emergency = True
+                sess._logger.info(
                     "[Emergency Teardown] Device successfully removed during emergency cleanup.")
                 break
             except Exception as cleanup_err:
-                self._logger.error(
+                sess._logger.error(
                     f"[Emergency Teardown] Attempt {attempt}/{attempts} failed: {cleanup_err}")
         try:
-            self.refresh_gha_devices()
+            sess.refresh_gha_devices()
         except Exception as refresh_err:
-            self._logger.warning(f"[Emergency Teardown] Refresh GHA devices failed: {refresh_err}")
+            sess._logger.warning(f"[Emergency Teardown] Refresh GHA devices failed: {refresh_err}")
         return removed
 
     def _start_wda_keepalive(self, interval_seconds: float = 15.0) -> threading.Event:

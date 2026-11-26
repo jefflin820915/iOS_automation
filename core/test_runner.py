@@ -1145,6 +1145,9 @@ class MultiProjectTestRunner:
             self.setup()
             app_suites: Dict[str, Tuple[Any, List[Type]]] = {}
             prev_app: Optional[str] = None
+            last_failed_app: Optional[str] = None
+            last_failed_device: Optional[str] = None
+            last_failed_session: Optional[Any] = None
             while True:
                 iteration += 1
                 if self.count is not None and iteration > self.count:
@@ -1157,6 +1160,24 @@ class MultiProjectTestRunner:
                     self._sync_adb_reset_target(current_device, current_adb_serial)
 
                 if prev_app != current_app:
+                    if (
+                            last_failed_session is not None
+                            and last_failed_app == prev_app
+                            and prev_app != "att"
+                            and not getattr(last_failed_session, "_device_removed_in_emergency",
+                                            False)
+                            and hasattr(last_failed_session, "cleanup_leftover_device_if_present")
+                    ):
+                        logger.warning(
+                            f"[MULTI-APP CLEANUP] Previous '{prev_app}' iteration failed without confirmed UI removal; "
+                            f"checking for leftover '{last_failed_device}' before switching to '{current_app}'..."
+                        )
+                        try:
+                            last_failed_session.cleanup_leftover_device_if_present(
+                                last_failed_device)
+                        except Exception as pre_clean_err:
+                            logger.warning(
+                                f"[MULTI-APP CLEANUP] Pre-switch cleanup error: {pre_clean_err}")
                     if prev_app is not None and self.driver is not None:
                         prev_bundle = self._bundle_id_for_app(prev_app, resolve_att=False)
                         if hasattr(self.driver, "terminate_app"):
@@ -1181,6 +1202,13 @@ class MultiProjectTestRunner:
                 session_instance.device_name = current_device
                 session_instance.pairing_code = current_pairing_code
                 session_instance.iteration = iteration
+                try:
+                    setattr(session_instance, "_device_removed_in_emergency", False)
+                except Exception:
+                    pass
+                last_failed_app = None
+                last_failed_device = None
+                last_failed_session = None
                 iter_label = f"{iteration}/{self.count}" if self.count else f"{iteration} (Infinite)"
                 logger.info("\n" + "=" * 65)
                 logger.info(f"               STARTING ITERATION #{iter_label}")
@@ -1255,6 +1283,26 @@ class MultiProjectTestRunner:
                         self.serial_number = "UNKNOWN"
                         self.software_version = "UNKNOWN"
                         self.device_ip = "UNKNOWN"
+                        if self.driver is not None:
+                            try:
+                                self.driver.implicitly_wait(
+                                    getattr(constants, "DEFAULT_IMPLICIT_WAIT_SECONDS", 10.0)
+                                )
+                            except Exception:
+                                pass
+                            for stale_attr in (
+                                    "device_tech_info",
+                                    "_commissioned_via_timeout_online",
+                                    "_ghp_commissioned_tile_name",
+                            ):
+                                try:
+                                    if hasattr(self.driver, stale_attr):
+                                        delattr(self.driver, stale_attr)
+                                except Exception:
+                                    try:
+                                        setattr(self.driver, stale_attr, None)
+                                    except Exception:
+                                        pass
                         screenshot_file = os.path.join(
                             case_additional_log_dir,
                             f"FAILED_iter{iteration}_{current_ts}_{class_name}_{test_name}.png"
@@ -1286,6 +1334,9 @@ class MultiProjectTestRunner:
                             test_status = "FAIL"
                             test_error = str(e)
                             self.last_error_message = test_error
+                            last_failed_app = current_app
+                            last_failed_device = current_device
+                            last_failed_session = session_instance
                             logger.error(
                                 f">>> [FAIL] [Iter #{iteration}] {class_name}.{test_name} ({elapsed:.2f}s) - Error: {e}"
                             )
