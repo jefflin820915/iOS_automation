@@ -61,7 +61,7 @@ IOS_PREDICATE_BY = getattr(AppiumBy, "IOS_PREDICATE", "-ios predicate string")
 class GHASession:
     """Central entry point managing iGHA application lifecycle and sub-page objects."""
     EMERGENCY_REMOVE_ATTEMPTS = 2
-    ADD_DEVICE_PAGE_TIMEOUT_SECONDS = 12.0
+    ADD_DEVICE_PAGE_TIMEOUT_SECONDS = 25.0
     ADD_DEVICE_MAX_REENTRIES = 2
     ADD_DEVICE_POLL_INTERVAL_SECONDS = 0.4
     WDA_ERROR_SIGNATURES = (
@@ -161,6 +161,21 @@ class GHASession:
         ),
         (AppiumBy.ACCESSIBILITY_ID, "BottomSheetPresentationViewController"),
     )
+    ADD_DEVICE_LOADING_LOCATORS: Tuple[Locator, ...] = (
+        (
+            IOS_PREDICATE_BY,
+            'type == "XCUIElementTypeStaticText" AND ('
+            'label CONTAINS[c] "Looking for" OR value CONTAINS[c] "Looking for" '
+            'OR label CONTAINS[c] "Searching" OR value CONTAINS[c] "Searching" '
+            'OR label CONTAINS[c] "Scanning" OR value CONTAINS[c] "Scanning" '
+            'OR label CONTAINS[c] "Loading" OR value CONTAINS[c] "Loading" '
+            'OR label CONTAINS[c] "Getting ready" OR value CONTAINS[c] "Getting ready")',
+        ),
+        (
+            IOS_PREDICATE_BY,
+            'type == "XCUIElementTypeActivityIndicator" AND visible == 1',
+        ),
+    )
     ADD_DEVICE_CLOSE_BTN_LOCATORS: Tuple[Locator, ...] = (
         (AppiumBy.IOS_CLASS_CHAIN, '**/XCUIElementTypeButton[`name == "closeButton"`]'),
         (
@@ -234,6 +249,16 @@ class GHASession:
             page_instance = cls(driver)
             page_instance.session = self
             setattr(self, attr_name, page_instance)
+
+    @classmethod
+    def _resolve_session(cls, ctx: Any) -> "GHASession":
+        """Resolve GHASession whether `ctx` is already GHASession or a delegating BaseTestCase."""
+        if isinstance(ctx, cls):
+            return ctx
+        existing = getattr(ctx, "session", None)
+        if isinstance(existing, cls):
+            return existing
+        return ctx
 
     def __getattr__(self, name: str) -> Any:
         """Automatically delegate method lookup across all registered pages."""
@@ -336,11 +361,14 @@ class GHASession:
         return has_next and has_diff and card_count <= 1
 
     def _is_add_a_device_page_present(self) -> bool:
-        """Return True if GHA is still on the 'Add a device' page (neither discovery result screen appeared)."""
+        """Return True if GHA is still on the 'Add a device' / loading page (neither result screen appeared)."""
         if self._is_single_device_page_present() or self._is_setup_nearby_devices_page_present():
             return False
         if self._find_matching_element(self.ADD_A_DEVICE_PAGE_LOCATORS,
                                        allow_hidden=True) is not None:
+            return True
+        if self._find_matching_element(self.ADD_DEVICE_LOADING_LOCATORS,
+                                       allow_hidden=False) is not None:
             return True
         return self._find_matching_element(self.ADD_DEVICE_CLOSE_BTN_LOCATORS,
                                            allow_hidden=True) is not None
@@ -448,9 +476,13 @@ class GHASession:
         return clicked_any
 
     def _record_device_selection_failure(self, state: str, detail: str = "") -> None:
-        """Record the specific state inside device selection where the current attempt failed."""
+        """Record the specific state inside device selection on both GHASession and delegating wrapper."""
         self._last_device_selection_state = state
         self._last_device_selection_detail = detail
+        sess = GHASession._resolve_session(self)
+        if sess is not self:
+            sess._last_device_selection_state = state
+            sess._last_device_selection_detail = detail
 
     def _open_add_device_page(self, re_enter: bool, swallow_errors: bool) -> bool:
         """Navigate into the 'Add a device' page, clicking '+' first when re-entering from Home."""
@@ -1064,41 +1096,65 @@ class GHASession:
                 with `failure_stage` set to `HANDLE_DEVICE_SELECTION_STEPS:<sub_state>`
                 when a specific failure state was observed.
         """
-        target_name = str(getattr(self, "device_name", "") or "")
-        self._last_device_selection_state = ""
-        self._last_device_selection_detail = ""
+        sess = GHASession._resolve_session(self)
+        target_name = str(
+            getattr(self, "device_name", None) or getattr(sess, "device_name", "") or ""
+        )
+        sess._last_device_selection_state = ""
+        sess._last_device_selection_detail = ""
+        if sess is not self:
+            try:
+                self._last_device_selection_state = ""
+                self._last_device_selection_detail = ""
+            except Exception:
+                pass
         max_attempts = max(1, int(getattr(constants, "DEVICE_SELECTION_MAX_ATTEMPTS", 2)))
         for attempt in range(1, max_attempts + 1):
             is_last = attempt == max_attempts
             if attempt > 1 and hasattr(BasePage, "reset_failure_screenshot_state"):
-                BasePage.reset_failure_screenshot_state(self.driver, remove_existing=True)
-            self._logger.info(
+                BasePage.reset_failure_screenshot_state(sess.driver, remove_existing=True)
+            sess._logger.info(
                 f"[Device Selection] Attempt {attempt}/{max_attempts} for '{target_name}'...")
-            if self._try_select_target_device_once(target_name, swallow_errors=not is_last):
+            if sess._try_select_target_device_once(target_name, swallow_errors=not is_last):
                 if attempt > 1:
-                    self._logger.info(
+                    sess._logger.info(
                         f"[Device Selection] '{target_name}' found after GHA restart recovery (attempt {attempt})."
                     )
                 return True
             if not is_last:
-                self._logger.warning(
+                cur_state = str(
+                    getattr(sess, "_last_device_selection_state", "")
+                    or getattr(self, "_last_device_selection_state", "")
+                    or ""
+                ).strip()
+                sess._logger.warning(
                     f"[Device Selection] '{target_name}' not discovered on attempt {attempt}/{max_attempts}"
-                    f"{f' (state={self._last_device_selection_state})' if self._last_device_selection_state else ''}. "
+                    f"{f' (state={cur_state})' if cur_state else ''}. "
                     "Restarting GHA and retrying..."
                 )
-                self._recover_device_discovery()
-        fail_state = str(
-            getattr(self, "_last_device_selection_state", "") or "").strip() or "UNKNOWN_SUBSTATE"
-        fail_detail = str(getattr(self, "_last_device_selection_detail", "") or "").strip()
+                sess._recover_device_discovery()
+        fail_state = (
+                str(
+                    getattr(sess, "_last_device_selection_state", "")
+                    or getattr(self, "_last_device_selection_state", "")
+                    or ""
+                ).strip()
+                or "UNKNOWN_SUBSTATE"
+        )
+        fail_detail = str(
+            getattr(sess, "_last_device_selection_detail", "")
+            or getattr(self, "_last_device_selection_detail", "")
+            or ""
+        ).strip()
         state_tag = f"[{fail_state}] "
         detail_suffix = f": {fail_detail}" if fail_detail else ""
         message = (
             f"[Device Selection] {state_tag}'{target_name}' not discovered after "
             f"{max_attempts} attempt(s){detail_suffix}"
         )
-        self._logger.error(message)
+        sess._logger.error(message)
         if hasattr(BasePage, "capture_failure_screenshot"):
-            BasePage.capture_failure_screenshot(self.driver, reason=message, force=False, lock=True)
+            BasePage.capture_failure_screenshot(sess.driver, reason=message, force=False, lock=True)
         err = AssertionError(message)
         err.failure_stage = f"HANDLE_DEVICE_SELECTION_STEPS:{fail_state}"
         raise err
