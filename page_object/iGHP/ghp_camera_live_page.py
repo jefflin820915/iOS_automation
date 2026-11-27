@@ -245,7 +245,10 @@ class GHPCameraLivePage(BasePage):
     SETTINGS_PAGE_MARKER_PREDICATE: str = (
         '(type == "XCUIElementTypeStaticText" AND ('
         'label IN {"Vendor Name", "Model Name", "Product Name", "Software Version", '
-        '"Device Information", "Diagnostics Settings", "Microphone Settings"} '
+        '"Device Information", "Diagnostics Settings", "Microphone Settings", '
+        '"Recording Settings", "Recording Mode", "Activity Zones", "Event Settings", '
+        '"Event Triggers", "Doorbell Settings", "Audio Settings", "Status Light Brightness", '
+        '"Device Settings", "Device Details", "Device Trait", "Basic Information Trait"} '
         'OR value IN {"Vendor Name", "Model Name", "Product Name", "Software Version"})) '
         'OR (type == "XCUIElementTypeButton" AND ('
         'name IN {"Decommission", "Delete Device History"} '
@@ -450,6 +453,78 @@ class GHPCameraLivePage(BasePage):
             except WebDriverException:
                 return False
 
+    def _are_player_controls_still_visible(self) -> bool:
+        """Return True if CameraLiveView player controls ('Settings', 'Turn Camera OFF', etc.) are displayed."""
+        pred = (
+            'type == "XCUIElementTypeButton" AND ('
+            'name IN {"Settings", "Turn Camera OFF", "Turn Camera ON", "Go to live", "google_symbols/menu_symbol"} '
+            'OR label IN {"Settings", "Turn Camera OFF", "Turn Camera ON", "Go to live"})'
+        )
+        with self._fast_probe():
+            try:
+                btns = self.driver.find_elements(IOS_PREDICATE_BY, pred)
+                return any(b.is_displayed() for b in btns)
+            except WebDriverException:
+                return False
+
+    def _wait_until_settings_open_and_initialized(self, timeout: float = 6.0) -> bool:
+        """Wait for CameraSettingsView to open and finish its initial `ProgressView()` trait loading."""
+        start_ts = time.time()
+        deadline = start_ts + timeout
+        hard_cap = start_ts + timeout + 8.0
+        while time.time() < deadline:
+            if self._is_settings_page_open():
+                return True
+            with self._fast_probe():
+                try:
+                    spinners = self.driver.find_elements(
+                        AppiumBy.CLASS_NAME, "XCUIElementTypeActivityIndicator"
+                    )
+                    spinning = any(sp.is_displayed() for sp in spinners)
+                except WebDriverException:
+                    spinning = False
+            if spinning and not self._are_player_controls_still_visible():
+                # CameraSettingsView shows `ProgressView()` while `settingsInitialized == false`
+                deadline = min(hard_cap, max(deadline, time.time() + 2.5))
+            time.sleep(0.4)
+        return self._is_settings_page_open()
+
+    def _tap_live_btn(self, btn: WebElement, prefer_coords: bool = False) -> bool:
+        rect = None
+        try:
+            rect = btn.rect
+        except WebDriverException:
+            rect = None
+        if prefer_coords and rect and rect.get("width", 0) > 0 and rect.get("height", 0) > 0:
+            try:
+                self.driver.execute_script(
+                    "mobile: tap",
+                    {
+                        "x": int(rect["x"] + rect["width"] / 2),
+                        "y": int(rect["y"] + rect["height"] / 2),
+                    },
+                )
+                return True
+            except WebDriverException:
+                pass
+        try:
+            btn.click()
+            return True
+        except WebDriverException:
+            if rect and rect.get("width", 0) > 0 and rect.get("height", 0) > 0:
+                try:
+                    self.driver.execute_script(
+                        "mobile: tap",
+                        {
+                            "x": int(rect["x"] + rect["width"] / 2),
+                            "y": int(rect["y"] + rect["height"] / 2),
+                        },
+                    )
+                    return True
+                except WebDriverException:
+                    pass
+        return False
+
     def click_setting_btn(self, max_attempts: int = 3) -> bool:
         """Open Camera Settings from GHP Camera Live View (supports inline 'Settings' button & action menu)."""
         page = GHPCameraLivePage._resolve_page(self)
@@ -458,10 +533,14 @@ class GHPCameraLivePage(BasePage):
             return True
 
         for attempt in range(1, max_attempts + 1):
+            if page._is_settings_page_open():
+                page._logger.info("Successfully opened GHP Camera Settings page.")
+                return True
+            use_coords = attempt >= 2
             page._logger.info(f"Opening GHP Camera Settings (attempt {attempt}/{max_attempts})...")
             clicked = False
             with page._fast_probe():
-                # Layout 1: Direct 'Settings' button on Camera Live View (e.g. x=165, y=776)
+                # Layout 1: Direct 'Settings' button on Camera Live View (e.g. x=165, y=744)
                 try:
                     settings_btns = [
                         b
@@ -474,24 +553,7 @@ class GHPCameraLivePage(BasePage):
                     settings_btns = []
 
                 if settings_btns:
-                    target_btn = settings_btns[0]
-                    try:
-                        rect = target_btn.rect
-                    except WebDriverException:
-                        rect = None
-                    try:
-                        target_btn.click()
-                        clicked = True
-                    except WebDriverException:
-                        if rect:
-                            page.driver.execute_script(
-                                "mobile: tap",
-                                {
-                                    "x": int(rect["x"] + rect["width"] / 2),
-                                    "y": int(rect["y"] + rect["height"] / 2),
-                                },
-                            )
-                            clicked = True
+                    clicked = page._tap_live_btn(settings_btns[0], prefer_coords=use_coords)
                 else:
                     # Layout 2: Bottom-right menu button ('google_symbols/menu_symbol') -> 'Settings'
                     try:
@@ -505,17 +567,7 @@ class GHPCameraLivePage(BasePage):
                     except WebDriverException:
                         menu_btns = []
                     if menu_btns:
-                        try:
-                            menu_btns[0].click()
-                        except WebDriverException:
-                            r = menu_btns[0].rect
-                            page.driver.execute_script(
-                                "mobile: tap",
-                                {
-                                    "x": int(r["x"] + r["width"] / 2),
-                                    "y": int(r["y"] + r["height"] / 2),
-                                },
-                            )
+                        page._tap_live_btn(menu_btns[0], prefer_coords=use_coords)
                         time.sleep(0.8)
                         try:
                             popover_settings = [
@@ -526,18 +578,15 @@ class GHPCameraLivePage(BasePage):
                                 if b.is_displayed()
                             ]
                             if popover_settings:
-                                popover_settings[0].click()
-                                clicked = True
+                                clicked = page._tap_live_btn(
+                                    popover_settings[0], prefer_coords=use_coords
+                                )
                         except WebDriverException:
                             pass
 
-            if clicked:
-                deadline = time.time() + 5.0
-                while time.time() < deadline:
-                    if page._is_settings_page_open():
-                        page._logger.info("Successfully opened GHP Camera Settings page.")
-                        return True
-                    time.sleep(0.4)
+            if clicked and page._wait_until_settings_open_and_initialized(timeout=6.0):
+                page._logger.info("Successfully opened GHP Camera Settings page.")
+                return True
             time.sleep(0.6)
 
         page._logger.warning("Could not confirm GHP Camera Settings page opened after attempts.")

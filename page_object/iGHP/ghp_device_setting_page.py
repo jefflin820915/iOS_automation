@@ -233,38 +233,37 @@ class GHPDeviceSettingPage(BasePage):
                 continue
         return ""
 
-    def _scroll_settings(self, direction: str = "down", x_ratio: float = 0.5) -> None:
+    def _scroll_settings(
+            self,
+            direction: str = "down",
+            x_ratio: float = 0.5,
+            span: Tuple[float, float] = (0.74, 0.26),
+    ) -> None:
         w, h = self._get_window_dimensions()
-        cx = max(20, min(w - 20, int(w * x_ratio)))
+        # Clamp x strictly inside [90, w-40] so drags never enter iOS's left-edge back-pop zone
+        cx = max(90, min(w - 40, int(w * x_ratio)))
+        high_r, low_r = span
         if direction == "down":
-            from_y, to_y = int(h * 0.80), int(h * 0.20)
+            from_y, to_y = int(h * high_r), int(h * low_r)
         else:
-            from_y, to_y = int(h * 0.22), int(h * 0.80)
-        scrolled = False
+            from_y, to_y = int(h * low_r), int(h * high_r)
         try:
             self.driver.execute_script(
                 "mobile: dragFromToForDuration",
                 {"duration": 0.30, "fromX": cx, "fromY": from_y, "toX": cx, "toY": to_y},
             )
-            scrolled = True
         except WebDriverException:
-            pass
-        if not scrolled:
-            try:
-                self.driver.execute_script("mobile: scroll", {"direction": direction})
-                scrolled = True
-            except WebDriverException:
-                pass
-        if not scrolled:
             try:
                 swipe_dir = "up" if direction == "down" else "down"
                 self.driver.execute_script("mobile: swipe", {"direction": swipe_dir})
             except WebDriverException:
                 pass
-        time.sleep(0.7)
+        time.sleep(0.6)
 
     def _get_settings_scroll_signature(self) -> Tuple[Tuple[str, int], ...]:
         """Capture a lightweight signature of bottom-most visible Settings items to detect scroll movement."""
+        if self._is_on_camera_player_screen():
+            return (("__PLAYER_SCREEN__", 0),)
         _win_w, win_h = self._get_window_dimensions()
         sig: List[Tuple[str, int]] = []
         with self._fast_probe():
@@ -273,7 +272,7 @@ class GHPDeviceSettingPage(BasePage):
                     elems = self.driver.find_elements(AppiumBy.CLASS_NAME, cls_name)
                 except WebDriverException:
                     continue
-                for el in elems[-16:]:
+                for el in elems[-6:]:
                     try:
                         r = el.rect
                         if not isinstance(r, dict):
@@ -290,38 +289,34 @@ class GHPDeviceSettingPage(BasePage):
                         continue
                 if sig:
                     break
-        return tuple(sig[-8:])
+        return tuple(sig[-6:])
 
     def _scroll_settings_down_checked(self) -> bool:
-        """Scroll Settings down and return True if the viewport actually moved (False if stuck or at bottom)."""
+        """Scroll Settings down via pure vertical touch drags (avoiding mobile:scroll responder dismissal)."""
+        if self._is_on_camera_player_screen():
+            return False
+        if self._find_settings_decommission_button() is not None:
+            return False
+
         before_sig = self._get_settings_scroll_signature()
-        self._scroll_settings("down")
+        self._scroll_settings("down", x_ratio=0.5)
+        if self._is_on_camera_player_screen():
+            return False
+        if self._find_settings_decommission_button() is not None:
+            return True
+
         after_sig = self._get_settings_scroll_signature()
         if not before_sig or after_sig != before_sig:
             return True
 
-        # Primary center drag had no effect: try native mobile:scroll, left-side drag (away from controls), and swipe
-        try:
-            self.driver.execute_script("mobile: scroll", {"direction": "down"})
-            time.sleep(0.7)
-            if self._get_settings_scroll_signature() != before_sig:
-                return True
-        except WebDriverException:
-            pass
-
-        self._scroll_settings("down", x_ratio=0.18)
-        if self._get_settings_scroll_signature() != before_sig:
+        # Primary center drag was absorbed (e.g. landed on an interactive Picker/Switch):
+        # try ONE vertical drag on the left-middle label column (x ~ 124px, safe from left-edge pop).
+        self._scroll_settings("down", x_ratio=0.32)
+        if self._is_on_camera_player_screen():
+            return False
+        if self._find_settings_decommission_button() is not None:
             return True
-
-        try:
-            self.driver.execute_script("mobile: swipe", {"direction": "up"})
-            time.sleep(0.7)
-            if self._get_settings_scroll_signature() != before_sig:
-                return True
-        except WebDriverException:
-            pass
-
-        return False
+        return self._get_settings_scroll_signature() != before_sig
 
     @classmethod
     def _match_canonical_key(cls, raw_label: str) -> Optional[str]:
@@ -335,27 +330,86 @@ class GHPDeviceSettingPage(BasePage):
         return None
 
     def _collect_visible_kv_pairs(self, collected: Dict[str, str]) -> None:
-        """Scan visible StaticText pairs (and Cell rows if needed) for technical metadata."""
+        """Scan visible StaticText pairs (and Cell rows when needed) for technical metadata."""
+        if self._is_on_camera_player_screen():
+            return
         with self._fast_probe():
-            # 1. Fast single-query flat pass over visible StaticText elements (avoids O(cells) RPC bursts)
+            # 1. Fast single-query pass over StaticText elements with same-row HStack y-alignment
             try:
                 all_texts = self.driver.find_elements(AppiumBy.CLASS_NAME,
                                                       "XCUIElementTypeStaticText")
             except WebDriverException:
                 all_texts = []
-            ordered_vals = [self._read_kv_text(t) for t in all_texts]
-            ordered_vals = [v for v in ordered_vals if v]
-            for idx in range(len(ordered_vals) - 1):
-                key = self._match_canonical_key(ordered_vals[idx])
-                nxt = ordered_vals[idx + 1].strip()
-                if key and nxt and nxt != "?" and self._match_canonical_key(nxt) is None:
-                    if key not in collected or collected[key] in ("", "UNKNOWN", "?"):
-                        collected[key] = nxt
 
-            if collected.get("software_version") and collected.get("serial_number"):
+            paired_items: List[Tuple[WebElement, str, Optional[str]]] = []
+            for el in all_texts:
+                txt = self._read_kv_text(el)
+                if txt:
+                    paired_items.append((el, txt, self._match_canonical_key(txt)))
+
+            rect_cache: Dict[int, Optional[Dict[str, float]]] = {}
+
+            def _get_rect(i: int) -> Optional[Dict[str, float]]:
+                if i not in rect_cache:
+                    try:
+                        r = paired_items[i][0].rect
+                        rect_cache[i] = r if isinstance(r, dict) else None
+                    except (StaleElementReferenceException, WebDriverException):
+                        rect_cache[i] = None
+                return rect_cache[i]
+
+            unmatched_key_seen = False
+            for idx, (_el, _txt, key) in enumerate(paired_items):
+                if not key:
+                    continue
+                if key in collected and collected[key] not in ("", "UNKNOWN", "?"):
+                    continue
+
+                chosen_val: Optional[str] = None
+                kr = _get_rect(idx)
+                k_cx = float(kr.get("x", 0)) + float(kr.get("width", 0)) / 2.0 if kr else 0.0
+                k_cy = float(kr.get("y", 0)) + float(kr.get("height", 0)) / 2.0 if kr else 0.0
+                has_distinct_geometry = False
+
+                if kr and float(kr.get("height", 0)) > 0:
+                    best_dy = 999.0
+                    lo = max(0, idx - 2)
+                    hi = min(len(paired_items), idx + 5)
+                    for cand_idx in range(lo, hi):
+                        if cand_idx == idx:
+                            continue
+                        _cel, ctxt, ckey = paired_items[cand_idx]
+                        if ckey is not None or not ctxt.strip() or ctxt.strip() == "?":
+                            continue
+                        cr = _get_rect(cand_idx)
+                        if not cr or float(cr.get("height", 0)) <= 0:
+                            continue
+                        c_cx = float(cr.get("x", 0)) + float(cr.get("width", 0)) / 2.0
+                        c_cy = float(cr.get("y", 0)) + float(cr.get("height", 0)) / 2.0
+                        if abs(c_cx - k_cx) > 1.0 or abs(c_cy - k_cy) > 1.0:
+                            has_distinct_geometry = True
+                        dy = abs(c_cy - k_cy)
+                        if c_cx > k_cx and dy <= 28.0 and dy < best_dy:
+                            best_dy = dy
+                            chosen_val = ctxt.strip()
+
+                if chosen_val is None and not has_distinct_geometry and (idx + 1) < len(
+                        paired_items):
+                    _nel, ntxt, nkey = paired_items[idx + 1]
+                    if nkey is None and ntxt.strip() and ntxt.strip() != "?":
+                        chosen_val = ntxt.strip()
+
+                if chosen_val:
+                    collected[key] = chosen_val
+                else:
+                    unmatched_key_seen = True
+
+            # Only query per-Cell children when top-level StaticTexts were absent (unit-test cell mocks)
+            # or a visible key label had no matched value.
+            if paired_items and not unmatched_key_seen:
                 return
 
-            # 2. Fallback: inspect XCUIElementTypeCell rows when flat StaticTexts didn't expose values
+            # 2. Fallback: inspect XCUIElementTypeCell rows
             try:
                 cells = self.driver.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeCell")
             except WebDriverException:
@@ -408,21 +462,37 @@ class GHPDeviceSettingPage(BasePage):
         # Wait briefly for Settings rows to initialize (CameraSettingsView shows ProgressView while loading)
         deadline = time.time() + 8.0
         while time.time() < deadline:
+            if page._is_on_camera_player_screen():
+                page._reopen_settings_if_on_player_page()
             page._collect_visible_kv_pairs(collected)
             if collected:
                 break
-            time.sleep(0.5)
+            with page._fast_probe():
+                try:
+                    any_text = page.driver.find_elements(
+                        AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText"
+                    )
+                    if len(any_text) >= 3:
+                        break
+                except WebDriverException:
+                    pass
+            time.sleep(0.4)
 
+        reopen_attempts = 0
         unchanged_scrolls = 0
         for _step in range(max_scrolls):
-            page._collect_visible_kv_pairs(collected)
-            # Stop scrolling early if Decommission/Remove button is already visible and core fields are captured
-            if (
-                    collected.get("software_version")
-                    and collected.get("serial_number")
-                    and page._find_settings_decommission_button() is not None
-            ):
+            if reopen_attempts < 2 and page._reopen_settings_if_on_player_page():
+                reopen_attempts += 1
+                unchanged_scrolls = 0
+            elif page._is_on_camera_player_screen():
                 break
+
+            page._collect_visible_kv_pairs(collected)
+            # 'Decommission' is the very last section of CameraSettingsView / DeviceDetailsView:
+            # once visible, we have reached the bottom and collected all visible Device Information rows!
+            if page._find_settings_decommission_button() is not None:
+                break
+
             moved = page._scroll_settings_down_checked()
             if moved:
                 unchanged_scrolls = 0
@@ -499,7 +569,11 @@ class GHPDeviceSettingPage(BasePage):
                     return None
                 cx = x + w / 2.0
                 cy = y + h / 2.0
-                in_viewport = (0.0 <= cx <= float(win_w)) and (30.0 <= cy <= float(win_h - 2))
+                in_viewport = (
+                        (0.0 <= cx <= float(win_w))
+                        and (28.0 <= cy <= float(win_h + 6))
+                        and (y < float(win_h - 8))
+                )
                 if not in_viewport:
                     return None
 
@@ -584,9 +658,12 @@ class GHPDeviceSettingPage(BasePage):
         )
         settings_pred = (
             'type == "XCUIElementTypeStaticText" AND ('
-            'label IN {"Vendor Name", "Model Name", "Software Version", '
-            '"Device Information", "Diagnostics Settings", "Microphone Settings"} '
-            'OR value IN {"Vendor Name", "Model Name", "Software Version"})'
+            'label IN {"Vendor Name", "Model Name", "Product Name", "Software Version", '
+            '"Device Information", "Diagnostics Settings", "Microphone Settings", '
+            '"Recording Settings", "Recording Mode", "Activity Zones", "Event Settings", '
+            '"Event Triggers", "Doorbell Settings", "Audio Settings", "Status Light Brightness", '
+            '"Device Settings", "Device Details", "Device Trait", "Basic Information Trait"} '
+            'OR value IN {"Vendor Name", "Model Name", "Product Name", "Software Version"})'
         )
         with self._fast_probe():
             try:
@@ -605,7 +682,7 @@ class GHPDeviceSettingPage(BasePage):
             return True
 
     def _reopen_settings_if_on_player_page(self) -> bool:
-        """If GHP popped back to Camera Live / Player screen, tap 'Settings' to re-open Camera Settings."""
+        """If GHP popped back to Camera Live / Player screen, tap 'Settings' and wait for rows to initialize."""
         if not self._is_on_camera_player_screen():
             return False
         self._logger.warning(
@@ -616,7 +693,20 @@ class GHPDeviceSettingPage(BasePage):
 
         reopened = bool(GHPCameraLivePage.click_setting_btn(self))
         if reopened:
-            time.sleep(0.8)
+            # Wait briefly if CameraSettingsView is still showing its initial ProgressView()
+            wait_end = time.time() + 4.0
+            while time.time() < wait_end:
+                if not self._is_on_camera_player_screen():
+                    with self._fast_probe():
+                        try:
+                            spinners = self.driver.find_elements(
+                                AppiumBy.CLASS_NAME, "XCUIElementTypeActivityIndicator"
+                            )
+                            if not any(sp.is_displayed() for sp in spinners):
+                                break
+                        except WebDriverException:
+                            break
+                time.sleep(0.4)
         return reopened
 
     def _log_decommission_probe_diagnostics(self) -> None:
@@ -1179,6 +1269,21 @@ class GHPDeviceSettingPage(BasePage):
                 time.sleep(0.5)
                 continue
 
+            # If GHP popped back to Camera Live / Player BEFORE any confirmation alert/WebView opened,
+            # 'Decommission' was either swallowed or interrupted by navigation — bail out fast so caller recovers!
+            if (
+                    not native_confirmed
+                    and not web_signin_accepted
+                    and not webview_seen
+                    and (time.time() - start_ts) >= 1.2
+                    and self._is_on_camera_player_screen()
+            ):
+                self._logger.warning(
+                    "[Decommission] Screen returned to Camera Live / Player before any Decommission "
+                    "confirmation appeared; re-entering Settings / Device Details to retry..."
+                )
+                return False
+
             # Retry tapping 'Decommission' once if first click only stopped scroll momentum or hit a non-button text
             if (
                     not retried_decom_tap
@@ -1247,25 +1352,96 @@ class GHPDeviceSettingPage(BasePage):
                         pass
             time.sleep(0.8)
 
+    def _open_device_details_fallback_for_decommission(
+            self, owner: Any = None
+    ) -> Optional[WebElement]:
+        """Fallback when CameraLiveView keeps popping Settings: go to Devices tab -> long-press 'Device Details...'."""
+        sess = getattr(owner, "session", None) or getattr(self, "session", None)
+        if sess is None and hasattr(owner, "_open_device_details_via_long_press"):
+            sess = owner
+        if sess is None or not hasattr(sess, "_open_device_details_via_long_press"):
+            return None
+
+        candidates: List[str] = []
+        if hasattr(sess, "_get_cleanup_candidate_names"):
+            try:
+                candidates = list(
+                    sess._get_cleanup_candidate_names(getattr(owner, "device_name", None)))
+            except Exception:
+                candidates = []
+        if not candidates:
+            raw_dev = getattr(owner, "device_name", None) or getattr(sess, "device_name", None)
+            if raw_dev and str(raw_dev).strip():
+                candidates = [str(raw_dev).strip()]
+        if not candidates:
+            return None
+
+        self._logger.warning(
+            "[GHP Settings] Falling back to Devices tab long-press 'Device Details...' "
+            f"for {candidates} to execute Decommission without live player..."
+        )
+        from page_object.iGHP.ghp_device_page import GHPDevicePage
+
+        try:
+            GHPDevicePage.go_to_tab(sess, "Devices")
+        except Exception:
+            pass
+
+        opened = False
+        for cand in candidates:
+            try:
+                if sess._open_device_details_via_long_press(cand):
+                    opened = True
+                    break
+            except Exception:
+                continue
+        if not opened:
+            return None
+
+        # Opportunistically capture missing Device ID / metadata from DeviceDetailsView
+        if self.device_tech_info.get("device_id", "UNKNOWN") in ("", "UNKNOWN"):
+            extra: Dict[str, str] = dict(self.device_tech_info)
+            self._collect_visible_kv_pairs(extra)
+            self._store_tech_info(owner or self, extra)
+
+        for _ in range(5):
+            btn = self._find_settings_decommission_button()
+            if btn is not None:
+                return btn
+            if not self._scroll_settings_down_checked():
+                break
+        return self._find_settings_decommission_button()
+
     def _scroll_settings_to_find_remove_button(
-            self, max_scrolls: int = 12
+            self, max_scrolls: int = 12, owner: Any = None
     ) -> Optional[WebElement]:
         """Scroll Settings downward until 'Decommission' / 'Remove' appears or bottom is confirmed."""
         reopen_attempts = 0
+        max_reopens = 4
         unchanged_scrolls = 0
         for step in range(max_scrolls + 1):
             decom_btn = self._find_settings_decommission_button()
             if decom_btn is not None:
                 return decom_btn
-            if reopen_attempts < 2 and self._reopen_settings_if_on_player_page():
-                reopen_attempts += 1
-                unchanged_scrolls = 0
-                decom_btn = self._find_settings_decommission_button()
-                if decom_btn is not None:
-                    return decom_btn
+            if self._is_on_camera_player_screen():
+                if reopen_attempts < max_reopens and self._reopen_settings_if_on_player_page():
+                    reopen_attempts += 1
+                    unchanged_scrolls = 0
+                    decom_btn = self._find_settings_decommission_button()
+                    if decom_btn is not None:
+                        return decom_btn
+                else:
+                    # Never scroll CameraPlayerView's event timeline when stuck on Player!
+                    break
             if step >= max_scrolls:
                 break
             moved = self._scroll_settings_down_checked()
+            if self._is_on_camera_player_screen():
+                if reopen_attempts < max_reopens and self._reopen_settings_if_on_player_page():
+                    reopen_attempts += 1
+                    unchanged_scrolls = 0
+                    continue
+                break
             if moved:
                 unchanged_scrolls = 0
             else:
@@ -1276,65 +1452,128 @@ class GHPDeviceSettingPage(BasePage):
                     decom_btn = self._find_settings_decommission_button()
                     if decom_btn is not None:
                         return decom_btn
-                    if reopen_attempts < 2 and self._reopen_settings_if_on_player_page():
+                    if reopen_attempts < max_reopens and self._reopen_settings_if_on_player_page():
                         reopen_attempts += 1
                         unchanged_scrolls = 0
                         continue
                     break
-        return self._find_settings_decommission_button()
+
+        decom_btn = self._find_settings_decommission_button()
+        if decom_btn is not None:
+            return decom_btn
+        return self._open_device_details_fallback_for_decommission(owner=owner)
 
     def click_remove_device_btn(self, max_scrolls: int = 12) -> bool:
         """Scroll all the way down to 'Decommission' / 'Remove' in GHP Settings, click it, and confirm removal."""
         page = GHPDeviceSettingPage._resolve_page(self)
-        page._logger.info(
-            "Scrolling to bottom of GHP Settings for 'Decommission' / 'Remove' button...")
-        decom_btn = page._scroll_settings_to_find_remove_button(max_scrolls=max_scrolls)
+        _win_w, win_h = page._get_window_dimensions()
 
-        if decom_btn is None:
-            page._log_decommission_probe_diagnostics()
-            msg = "Failed to locate 'Decommission' button on GHP Settings page."
-            page._logger.error(msg)
-            BasePage.capture_failure_screenshot(page.driver, reason=msg, force=False, lock=True)
-            raise AssertionError(msg)
+        confirmed = False
+        for decommission_attempt in range(1, 3):
+            if decommission_attempt == 1:
+                page._logger.info(
+                    "Scrolling to bottom of GHP Settings for 'Decommission' / 'Remove' button..."
+                )
+                decom_btn = page._scroll_settings_to_find_remove_button(
+                    max_scrolls=max_scrolls, owner=self
+                )
+            else:
+                page._logger.warning(
+                    "[Decommission] Retry attempt 2/2: re-locating 'Decommission' button after "
+                    "unconfirmed tap / unexpected screen pop..."
+                )
+                if page._is_on_camera_player_screen():
+                    if not page._reopen_settings_if_on_player_page():
+                        decom_btn = page._open_device_details_fallback_for_decommission(owner=self)
+                    else:
+                        decom_btn = page._scroll_settings_to_find_remove_button(
+                            max_scrolls=max_scrolls, owner=self
+                        )
+                else:
+                    decom_btn = page._scroll_settings_to_find_remove_button(
+                        max_scrolls=max_scrolls, owner=self
+                    )
+                    if decom_btn is None:
+                        decom_btn = page._open_device_details_fallback_for_decommission(owner=self)
 
-        rect = None
-        try:
-            rect = decom_btn.rect
-        except WebDriverException:
+            if decom_btn is None:
+                if decommission_attempt == 1:
+                    decom_btn = page._open_device_details_fallback_for_decommission(owner=self)
+                if decom_btn is None:
+                    page._log_decommission_probe_diagnostics()
+                    msg = "Failed to locate 'Decommission' button on GHP Settings page."
+                    page._logger.error(msg)
+                    BasePage.capture_failure_screenshot(page.driver, reason=msg, force=False,
+                                                        lock=True)
+                    raise AssertionError(msg)
+
             rect = None
-        try:
-            was_displayed = bool(decom_btn.is_displayed())
-        except WebDriverException:
-            was_displayed = False
-        try:
-            elem_type = str(decom_btn.get_attribute("type") or "")
-        except WebDriverException:
-            elem_type = ""
+            try:
+                rect = decom_btn.rect
+            except WebDriverException:
+                rect = None
 
-        page._logger.info(
-            f"Clicking 'Decommission' button (type={elem_type or 'unknown'}, displayed={was_displayed})..."
-        )
-        clicked = False
-        try:
-            decom_btn.click()
-            clicked = True
-        except WebDriverException as err:
-            page._logger.debug(f"Direct click on 'Decommission' failed ({err}); tapping center...")
-        if rect and (not clicked or not was_displayed or elem_type != "XCUIElementTypeButton"):
-            if clicked:
-                time.sleep(0.4)
-            if not clicked or not page._has_any_decommission_prompt_open():
-                cx = int(rect["x"] + rect["width"] / 2)
-                cy = int(rect["y"] + rect["height"] / 2)
+            # If 'Decommission' sits inside the bottom iOS Home-Indicator bar, nudge slightly up
+            if isinstance(rect, dict) and float(rect.get("height", 0)) > 0:
+                cy_check = float(rect.get("y", 0)) + float(rect.get("height", 0)) / 2.0
+                if cy_check > float(win_h - 30):
+                    page._scroll_settings("down", x_ratio=0.5, span=(0.60, 0.42))
+                    refreshed_btn = page._find_settings_decommission_button()
+                    if refreshed_btn is not None:
+                        decom_btn = refreshed_btn
+                        try:
+                            rect = decom_btn.rect
+                        except WebDriverException:
+                            pass
+
+            try:
+                was_displayed = bool(decom_btn.is_displayed())
+            except WebDriverException:
+                was_displayed = False
+            try:
+                elem_type = str(decom_btn.get_attribute("type") or "")
+            except WebDriverException:
+                elem_type = ""
+
+            page._logger.info(
+                f"Clicking 'Decommission' button (type={elem_type or 'unknown'}, displayed={was_displayed}, "
+                f"attempt={decommission_attempt}/2)..."
+            )
+            clicked = False
+            if decommission_attempt == 1:
                 try:
-                    page.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
-                except WebDriverException:
-                    pass
+                    decom_btn.click()
+                    clicked = True
+                except WebDriverException as err:
+                    page._logger.debug(
+                        f"Direct click on 'Decommission' failed ({err}); tapping center...")
 
-        time.sleep(0.8)
-        confirmed = page._complete_decommission_confirmation_flow(
-            timeout=35.0, decom_btn_rect=rect
-        )
+            if rect and float(rect.get("width", 0)) > 0 and float(rect.get("height", 0)) > 0:
+                if clicked:
+                    time.sleep(0.6)
+                if (
+                        not clicked
+                        or decommission_attempt >= 2
+                        or not was_displayed
+                        or elem_type != "XCUIElementTypeButton"
+                        or (
+                        not page._has_any_decommission_prompt_open()
+                        and page._find_settings_decommission_button() is not None
+                )
+                ):
+                    cx = int(rect["x"] + rect["width"] / 2)
+                    cy = int(rect["y"] + rect["height"] / 2)
+                    try:
+                        page.driver.execute_script("mobile: tap", {"x": cx, "y": cy})
+                    except WebDriverException:
+                        pass
+
+            time.sleep(0.8)
+            confirmed = page._complete_decommission_confirmation_flow(
+                timeout=35.0, decom_btn_rect=rect
+            )
+            if confirmed:
+                break
 
         if not confirmed:
             msg = (
